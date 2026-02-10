@@ -10,7 +10,7 @@ from .llm import compress
 from .transcripts import Message
 
 
-OBSERVER_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "observer.md"
+OBSERVER_PROMPT_PATH = Path(__file__).parent / "prompts" / "observer.md"
 
 
 def run_observer(

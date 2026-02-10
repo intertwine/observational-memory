@@ -241,7 +241,7 @@ def _install_claude_hooks(config: Config) -> None:
     """Add SessionStart and SessionEnd hooks to ~/.claude/settings.json."""
     import json
 
-    hooks_dir = Path(__file__).parent.parent.parent / "hooks" / "claude"
+    hooks_dir = Path(__file__).parent / "hooks" / "claude"
     session_start_hook = hooks_dir / "session-start.sh"
     session_end_hook = hooks_dir / "session-end.sh"
 

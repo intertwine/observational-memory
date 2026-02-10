@@ -21,6 +21,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/observational_memory"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/observational_memory/prompts" = "observational_memory/prompts"
+"src/observational_memory/hooks" = "observational_memory/hooks"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

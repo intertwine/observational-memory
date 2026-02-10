@@ -304,15 +304,15 @@ observational-memory/
 │   ├── llm.py                        # LLM API abstraction (Anthropic + OpenAI)
 │   ├── observe.py                    # Observer logic
 │   ├── reflect.py                    # Reflector logic
-│   └── transcripts/
-│       ├── claude.py                 # Claude Code JSONL parser
-│       └── codex.py                  # Codex CLI session parser
-├── prompts/
-│   ├── observer.md                   # Observer system prompt
-│   └── reflector.md                  # Reflector system prompt
-├── hooks/claude/
-│   ├── session-start.sh              # Inject memory on session start
-│   └── session-end.sh                # Trigger observer on session end
+│   ├── transcripts/
+│   │   ├── claude.py                 # Claude Code JSONL parser
+│   │   └── codex.py                  # Codex CLI session parser
+│   ├── prompts/
+│   │   ├── observer.md               # Observer system prompt
+│   │   └── reflector.md              # Reflector system prompt
+│   └── hooks/claude/
+│       ├── session-start.sh          # Inject memory on session start
+│       └── session-end.sh            # Trigger observer on session end
 └── tests/
     ├── test_transcripts.py           # Transcript parser tests
     ├── test_observe.py               # Observer tests

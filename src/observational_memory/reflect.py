@@ -10,7 +10,7 @@ from .llm import compress
 from pathlib import Path
 
 
-REFLECTOR_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "reflector.md"
+REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
 
 
 def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | None:
