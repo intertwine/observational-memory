@@ -3,6 +3,14 @@
 # Triggers the observer on the just-completed conversation.
 set -euo pipefail
 
+# Source API keys from env file
+ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/observational-memory/env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+fi
+
 INPUT=$(cat)
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 

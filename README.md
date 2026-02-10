@@ -124,13 +124,27 @@ A daily cron job (04:00 UTC) runs the reflector, which:
 | 🟡 | Contextual | Current tasks, in-progress work | Days–weeks |
 | 🟢 | Minor / transient | Greetings, routine checks | Hours |
 
-### LLM Provider
+### LLM Provider & API Keys
 
-The observer and reflector call an LLM API to perform compression. Configuration:
+The observer and reflector call an LLM API to perform compression. Your API key is stored in a dedicated env file:
 
-- `ANTHROPIC_API_KEY` set → uses Claude Sonnet (default)
-- `OPENAI_API_KEY` set → uses GPT-4o-mini
+```
+~/.config/observational-memory/env
+```
+
+`om install` creates this file with `0600` permissions (owner-read/write only). Edit it to add your key:
+
+```bash
+# ~/.config/observational-memory/env
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+The CLI, hooks, and cron jobs all source this file automatically — no need to export keys in your shell profile.
+
+- `ANTHROPIC_API_KEY` → uses Claude Sonnet (default)
+- `OPENAI_API_KEY` → uses GPT-4o-mini
 - Both set → prefers Anthropic
+- Environment variables override the env file
 
 ---
 
@@ -165,6 +179,22 @@ om status
 ---
 
 ## Configuration
+
+### API Keys
+
+```
+~/.config/observational-memory/env
+```
+
+Created by `om install` with `0600` permissions. Add your key:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-api03-...
+# or
+OPENAI_API_KEY=sk-...
+```
+
+This file is sourced by the `om` CLI, the Claude Code hooks, and the cron jobs. Keys already present in the environment take precedence.
 
 ### Memory Location
 

@@ -14,7 +14,9 @@ from .config import Config
 def cli(ctx: click.Context) -> None:
     """Observational Memory — cross-agent shared memory for Claude Code & Codex CLI."""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = Config()
+    config = Config()
+    config.load_env_file()
+    ctx.obj["config"] = config
 
 
 @cli.command()
@@ -87,6 +89,13 @@ def install(ctx: click.Context, targets: str, cron: bool) -> None:
     """Set up observational memory for Claude Code and/or Codex CLI."""
     config = ctx.obj["config"]
     config.ensure_memory_dir()
+
+    # Create env file for API keys
+    if config.ensure_env_file():
+        click.echo(f"Created {config.env_file}")
+        click.echo(f"  Add your API key: {config.env_file}")
+    else:
+        click.echo(f"Env file: {config.env_file} (already exists)")
 
     # Create initial memory files
     if not config.observations_path.exists():
@@ -187,7 +196,19 @@ def status(ctx: click.Context) -> None:
     else:
         click.echo("\nCursor: no transcripts tracked yet")
 
-    # API keys
+    # Env file
+    click.echo(f"\nEnv file: {config.env_file}")
+    if config.env_file.exists():
+        # Count non-comment, non-empty lines (i.e. actual key assignments)
+        env_lines = [
+            l.strip() for l in config.env_file.read_text().splitlines()
+            if l.strip() and not l.strip().startswith("#")
+        ]
+        click.echo(f"  Exists: yes ({len(env_lines)} key(s) configured)")
+    else:
+        click.echo("  Exists: no (run 'om install' to create)")
+
+    # API keys (from env file + environment)
     import os
     click.echo(f"\nAnthropic API key: {'set' if os.environ.get('ANTHROPIC_API_KEY') else 'not set'}")
     click.echo(f"OpenAI API key: {'set' if os.environ.get('OPENAI_API_KEY') else 'not set'}")
@@ -345,14 +366,21 @@ def _install_cron(config: Config, targets: str) -> None:
         click.echo("Warning: 'om' not found in PATH. Cron jobs will use 'om' — make sure it's installed.")
         om_path = "om"
 
+    # Source the env file before each cron command so API keys are available
+    env_file = config.env_file
+    if env_file.exists():
+        prefix = f". {env_file} && "
+    else:
+        prefix = ""
+
     jobs = []
 
     if targets in ("codex", "both"):
         # Observer cron for Codex (Claude uses hooks instead)
-        jobs.append(f"*/15 * * * * {om_path} observe --source codex 2>/dev/null")
+        jobs.append(f"*/15 * * * * {prefix}{om_path} observe --source codex 2>/dev/null")
 
     # Daily reflector for all
-    jobs.append(f"0 4 * * * {om_path} reflect 2>/dev/null")
+    jobs.append(f"0 4 * * * {prefix}{om_path} reflect 2>/dev/null")
 
     try:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)

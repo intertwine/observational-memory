@@ -39,6 +39,10 @@ Transcripts (Claude JSONL / Codex sessions)
 - **Claude Code**: `SessionStart` hook injects memory via `additionalContext`; `SessionEnd` hook triggers observer. Hooks live in `hooks/claude/` and are registered in `~/.claude/settings.json`.
 - **Codex CLI**: Instructions appended to `~/.codex/AGENTS.md`; cron job for observer.
 
+### API keys
+
+API keys live in `~/.config/observational-memory/env` (created by `om install`, chmod 600). The CLI loads this file on startup via `config.load_env_file()`. The Claude hooks and cron jobs also source it. Environment variables take precedence over the file.
+
 ### Prompts
 
 `prompts/observer.md` and `prompts/reflector.md` define the LLM system prompts. The priority system (🔴/🟡/🟢) and output format are critical — downstream parsing depends on them.
