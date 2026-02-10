@@ -145,6 +145,142 @@ def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> li
     return results
 
 
+def _chunk_messages(
+    messages: list[Message], chunk_size: int = 200
+) -> list[list[Message]]:
+    """Split a list of Message objects into chunks of at most *chunk_size*.
+
+    Returns:
+        A list of lists, each containing up to *chunk_size* messages.
+        Returns an empty list if *messages* is empty.
+    """
+    if not messages:
+        return []
+    return [messages[i : i + chunk_size] for i in range(0, len(messages), chunk_size)]
+
+
+def run_observer_backfill(
+    messages: list[Message],
+    config: Config | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Compress messages into observations in backfill mode.
+
+    Unlike :func:`run_observer`, this does **not** include existing observations
+    in the LLM prompt — keeping context small when replaying large histories.
+    The resulting observations are **appended** to ``observations.md`` rather
+    than overwriting it.
+
+    Args:
+        messages: Normalized messages to compress.
+        config: Runtime config. Uses defaults if None.
+        dry_run: If True, return the new observations without writing.
+
+    Returns:
+        The new observations text, or None if below threshold.
+    """
+    if config is None:
+        config = Config()
+
+    if len(messages) < config.min_messages:
+        return None
+
+    system_prompt = _load_observer_prompt()
+    transcript_text = _format_messages(messages)
+
+    user_content = f"## New transcript to process\n\n{transcript_text}"
+
+    result = compress(system_prompt, user_content, config)
+
+    if dry_run:
+        return result
+
+    _append_observations(result, config)
+    return result
+
+
+def observe_claude_transcript_backfill(
+    transcript_path: Path,
+    config: Config | None = None,
+    chunk_size: int = 200,
+    dry_run: bool = False,
+) -> int | None:
+    """Process a single Claude Code transcript in backfill mode.
+
+    1. Load cursor and get the ``after_uuid`` for *transcript_path*.
+    2. Parse the transcript incrementally (using the cursor).
+    3. If no messages, return ``None``.
+    4. If the number of messages exceeds *chunk_size*, split into chunks.
+    5. Process each chunk through :func:`run_observer_backfill`.
+    6. Update the cursor to the last UUID in the transcript.
+    7. Return the total number of characters written.
+
+    Args:
+        transcript_path: Path to a Claude Code ``.jsonl`` transcript.
+        config: Runtime config. Uses defaults if None.
+        chunk_size: Maximum messages per LLM call.
+        dry_run: If True, skip writing observations and cursor updates.
+
+    Returns:
+        Total characters of observation text produced, or ``None`` if the
+        transcript had no new messages.
+    """
+    from .transcripts.claude import parse_transcript
+
+    if config is None:
+        config = Config()
+
+    cursor = config.load_cursor()
+    cursor_key = str(transcript_path)
+    after_uuid = cursor.get(cursor_key)
+
+    messages = parse_transcript(transcript_path, after_uuid=after_uuid)
+
+    if not messages:
+        return None
+
+    chunks = _chunk_messages(messages, chunk_size)
+    total_chars = 0
+
+    for chunk in chunks:
+        result = run_observer_backfill(chunk, config, dry_run)
+        if result:
+            total_chars += len(result)
+
+    if not dry_run:
+        # Update cursor to the last message UUID in the transcript
+        import json
+
+        last_uuid = None
+        for line in reversed(transcript_path.read_text().splitlines()):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("type") in ("user", "assistant") and entry.get("uuid"):
+                    last_uuid = entry["uuid"]
+                    break
+            except json.JSONDecodeError:
+                continue
+        if last_uuid:
+            cursor[cursor_key] = last_uuid
+            config.save_cursor(cursor)
+
+    return total_chars
+
+
+def _append_observations(new_observations: str, config: Config) -> None:
+    """Append new observations to the observations file (never overwrite)."""
+    config.ensure_memory_dir()
+    if config.observations_path.exists():
+        existing = config.observations_path.read_text()
+        config.observations_path.write_text(
+            existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n"
+        )
+    else:
+        config.observations_path.write_text(new_observations.rstrip() + "\n")
+
+
 def _load_observer_prompt() -> str:
     """Load the observer system prompt."""
     if OBSERVER_PROMPT_PATH.exists():

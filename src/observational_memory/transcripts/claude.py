@@ -133,3 +133,16 @@ def find_recent_transcripts(projects_dir: Path, max_age_hours: int = 24) -> list
                 transcripts.append(jsonl)
 
     return sorted(transcripts, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def find_all_transcripts(projects_dir: Path) -> list[Path]:
+    """Find ALL Claude Code transcript files, sorted oldest-first by modification time."""
+    transcripts = []
+    if not projects_dir.exists():
+        return transcripts
+    for project_dir in projects_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for jsonl in project_dir.glob("*.jsonl"):
+            transcripts.append(jsonl)
+    return sorted(transcripts, key=lambda p: p.stat().st_mtime)
