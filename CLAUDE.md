@@ -1,0 +1,44 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build & Test
+
+```bash
+uv sync                          # install deps
+uv run pytest                    # run all tests
+uv run pytest tests/test_transcripts.py  # single test file
+uv run pytest -v                 # verbose
+uv run om status                 # check local installation status
+```
+
+## Architecture
+
+Cross-agent observational memory that works at the **user level** (not per-project) across Claude Code and Codex CLI. Two background processes compress conversation transcripts into shared memory files at `~/.local/share/observational-memory/`.
+
+### Data flow
+
+```
+Transcripts (Claude JSONL / Codex sessions)
+  → observe.py (LLM compression → observations.md)
+  → reflect.py (daily consolidation → reflections.md)
+```
+
+### Key modules
+
+- **`src/observational_memory/transcripts/claude.py`** — Parses Claude Code `.jsonl` transcripts. Each line is a JSON object with `type` (user/assistant/progress), `message.content` (text or array of blocks), `uuid`, `timestamp`.
+- **`src/observational_memory/transcripts/codex.py`** — Parses Codex CLI session files from `~/.codex/sessions/`.
+- **`src/observational_memory/observe.py`** — Observer: reads transcripts, finds new messages via cursor bookmarks, calls LLM to compress, appends to `observations.md`.
+- **`src/observational_memory/reflect.py`** — Reflector: reads observations + reflections, calls LLM to condense, writes `reflections.md`, trims old observations.
+- **`src/observational_memory/llm.py`** — Thin abstraction over Anthropic and OpenAI APIs. Auto-detects provider from env vars.
+- **`src/observational_memory/config.py`** — All paths, defaults, cursor management. Memory dir follows XDG spec.
+- **`src/observational_memory/cli.py`** — Click CLI (`om` command). Also handles install/uninstall for both agents.
+
+### Agent integration
+
+- **Claude Code**: `SessionStart` hook injects memory via `additionalContext`; `SessionEnd` hook triggers observer. Hooks live in `hooks/claude/` and are registered in `~/.claude/settings.json`.
+- **Codex CLI**: Instructions appended to `~/.codex/AGENTS.md`; cron job for observer.
+
+### Prompts
+
+`prompts/observer.md` and `prompts/reflector.md` define the LLM system prompts. The priority system (🔴/🟡/🟢) and output format are critical — downstream parsing depends on them.
