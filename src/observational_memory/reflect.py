@@ -12,9 +12,20 @@ from pathlib import Path
 
 REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
 
+# Approximate chars-per-token ratio for estimating input size.
+_CHARS_PER_TOKEN = 3.5
+# Maximum input tokens to send in a single reflector call.
+_MAX_INPUT_TOKENS = 30_000
+# max_tokens for reflector output (200-600 lines needs room)
+_REFLECTOR_MAX_OUTPUT_TOKENS = 8192
+
 
 def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | None:
     """Read observations + reflections, condense, write updated reflections.
+
+    When observations are small enough, processes in a single LLM call.
+    When observations are large, chunks them by date section and folds
+    each chunk into the reflections incrementally.
 
     Args:
         config: Runtime config.
@@ -38,13 +49,17 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
         reflections = config.reflections_path.read_text()
 
     system_prompt = _load_reflector_prompt()
-    user_content = (
-        f"## Current reflections\n\n{reflections}\n\n"
-        f"---\n\n"
-        f"## Current observations\n\n{observations}"
-    )
 
-    result = compress(system_prompt, user_content, config)
+    # Estimate total input size
+    total_input_chars = len(system_prompt) + len(reflections) + len(observations)
+    estimated_tokens = total_input_chars / _CHARS_PER_TOKEN
+
+    if estimated_tokens <= _MAX_INPUT_TOKENS:
+        # Small enough — single pass
+        result = _reflect_single(system_prompt, reflections, observations, config)
+    else:
+        # Too large — chunk observations and fold incrementally
+        result = _reflect_chunked(system_prompt, reflections, observations, config)
 
     if dry_run:
         return result
@@ -54,6 +69,88 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     _reindex_if_enabled(config)
 
     return result
+
+
+def _reflect_single(
+    system_prompt: str, reflections: str, observations: str, config: Config
+) -> str:
+    """Single-pass reflection for small observation sets."""
+    user_content = (
+        f"## Current reflections\n\n{reflections}\n\n"
+        f"---\n\n"
+        f"## Current observations\n\n{observations}"
+    )
+    return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS)
+
+
+def _reflect_chunked(
+    system_prompt: str, reflections: str, observations: str, config: Config
+) -> str:
+    """Chunked reflection: split observations into date sections, fold each into reflections."""
+    chunks = _chunk_observations(observations)
+
+    running_reflections = reflections
+
+    for i, chunk in enumerate(chunks, 1):
+        is_last = i == len(chunks)
+        fold_prompt = system_prompt
+        if not is_last:
+            # For intermediate chunks, tell the model more data is coming
+            fold_prompt += (
+                "\n\n**NOTE:** This is chunk {i} of {total}. More observations follow. "
+                "Focus on integrating these observations into the reflections. "
+                "Produce the complete updated reflections document."
+            ).format(i=i, total=len(chunks))
+
+        user_content = (
+            f"## Current reflections\n\n{running_reflections}\n\n"
+            f"---\n\n"
+            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}"
+        )
+        running_reflections = compress(
+            fold_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS
+        )
+
+    return running_reflections
+
+
+def _chunk_observations(observations: str) -> list[str]:
+    """Split observations by date headers into chunks that fit within token limits.
+
+    Groups consecutive date sections until adding another would exceed the
+    per-chunk token budget. Each chunk is a string of one or more date sections.
+    """
+    # Budget per chunk: leave room for reflections + system prompt
+    budget_chars = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN * 0.6)
+
+    # Split by date headers, keeping each "## YYYY-MM-DD" section together
+    sections = re.split(r"(?=^## \d{4}-\d{2}-\d{2})", observations, flags=re.MULTILINE)
+
+    # First element may be the "# Observations" header — prepend to first date section
+    header = ""
+    date_sections = []
+    for section in sections:
+        if re.match(r"## \d{4}-\d{2}-\d{2}", section.strip()):
+            date_sections.append(section)
+        else:
+            header = section
+
+    if not date_sections:
+        # No date sections found — return as single chunk
+        return [observations]
+
+    chunks: list[str] = []
+    current_chunk = header
+    for section in date_sections:
+        if len(current_chunk) + len(section) > budget_chars and current_chunk.strip():
+            chunks.append(current_chunk)
+            current_chunk = header  # restart with header for context
+        current_chunk += section
+
+    if current_chunk.strip():
+        chunks.append(current_chunk)
+
+    return chunks if chunks else [observations]
 
 
 def _reindex_if_enabled(config: Config) -> None:
