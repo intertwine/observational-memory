@@ -241,10 +241,17 @@ Memory search uses a pluggable backend architecture. Three backends are availabl
 
 The default `bm25` backend works out of the box. The index is rebuilt automatically after each observe/reflect run and stored at `~/.local/share/observational-memory/.search-index/bm25.pkl`.
 
-To switch backends, edit `search_backend` in `config.py`:
+To switch backends, set `OM_SEARCH_BACKEND` in your env file:
 
-```python
-search_backend: str = "qmd-hybrid"  # or "bm25", "qmd", "none"
+```bash
+# ~/.config/observational-memory/env
+OM_SEARCH_BACKEND=qmd-hybrid
+```
+
+Or export it in your shell:
+
+```bash
+export OM_SEARCH_BACKEND=qmd-hybrid
 ```
 
 #### Using QMD (optional)

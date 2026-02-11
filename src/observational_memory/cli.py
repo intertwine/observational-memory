@@ -14,8 +14,8 @@ from .config import Config
 def cli(ctx: click.Context) -> None:
     """Observational Memory — cross-agent shared memory for Claude Code & Codex CLI."""
     ctx.ensure_object(dict)
+    Config().load_env_file()  # Seed os.environ before constructing final config
     config = Config()
-    config.load_env_file()
     ctx.obj["config"] = config
 
 

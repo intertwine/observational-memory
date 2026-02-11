@@ -25,6 +25,9 @@ ENV_FILE_TEMPLATE = """\
 
 # ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
+
+# Search backend: bm25 (default), qmd, qmd-hybrid, none
+# OM_SEARCH_BACKEND=bm25
 """
 
 
@@ -58,7 +61,9 @@ class Config:
     reflections_target_lines: int = 400  # aim for 200-600
 
     # Search settings
-    search_backend: str = "bm25"  # "bm25" | "qmd" | "qmd-hybrid" | "none"
+    search_backend: str = field(
+        default_factory=lambda: os.environ.get("OM_SEARCH_BACKEND", "bm25")
+    )  # "bm25" | "qmd" | "qmd-hybrid" | "none"
 
     @property
     def observations_path(self) -> Path:

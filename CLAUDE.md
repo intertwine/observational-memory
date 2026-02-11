@@ -31,7 +31,7 @@ Transcripts (Claude JSONL / Codex sessions)
 - **`src/observational_memory/observe.py`** — Observer: reads transcripts, finds new messages via cursor bookmarks, calls LLM to compress, appends to `observations.md`.
 - **`src/observational_memory/reflect.py`** — Reflector: reads observations + reflections, calls LLM to condense, writes `reflections.md`, trims old observations.
 - **`src/observational_memory/llm.py`** — Thin abstraction over Anthropic and OpenAI APIs. Auto-detects provider from env vars.
-- **`src/observational_memory/config.py`** — All paths, defaults, cursor management. Memory dir follows XDG spec.
+- **`src/observational_memory/config.py`** — All paths, defaults, cursor management. Memory dir follows XDG spec. Search backend is configurable via `OM_SEARCH_BACKEND` env var.
 - **`src/observational_memory/cli.py`** — Click CLI (`om` command). Commands: observe, reflect, backfill, search, context, install, uninstall, status.
 - **`src/observational_memory/search/`** — Pluggable search over memory files. BM25 backend (default, uses `rank-bm25`), QMD backend (optional, shells out to `qmd` CLI — `"qmd"` for keyword search, `"qmd-hybrid"` for hybrid BM25 + vector + LLM reranking), None backend (no-op). Parser splits observations by date, reflections by section. The `reindex()` orchestrator is called automatically after observe/reflect writes.
 
