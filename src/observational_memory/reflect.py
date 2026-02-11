@@ -51,8 +51,20 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
 
     _write_reflections(result, config)
     _trim_old_observations(config)
+    _reindex_if_enabled(config)
 
     return result
+
+
+def _reindex_if_enabled(config: Config) -> None:
+    """Silently rebuild the search index after memory writes."""
+    if config.search_backend == "none":
+        return
+    try:
+        from .search import reindex
+        reindex(config)
+    except Exception:
+        pass  # Never block observe/reflect on search failures
 
 
 def _load_reflector_prompt() -> str:

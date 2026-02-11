@@ -195,7 +195,7 @@ def run_observer_backfill(
     if dry_run:
         return result
 
-    _append_observations(result, config)
+    _append_observations(result, config, skip_reindex=True)
     return result
 
 
@@ -265,11 +265,13 @@ def observe_claude_transcript_backfill(
         if last_uuid:
             cursor[cursor_key] = last_uuid
             config.save_cursor(cursor)
+        # Reindex once after all chunks are written
+        _reindex_if_enabled(config)
 
     return total_chars
 
 
-def _append_observations(new_observations: str, config: Config) -> None:
+def _append_observations(new_observations: str, config: Config, *, skip_reindex: bool = False) -> None:
     """Append new observations to the observations file (never overwrite)."""
     config.ensure_memory_dir()
     if config.observations_path.exists():
@@ -279,6 +281,8 @@ def _append_observations(new_observations: str, config: Config) -> None:
         )
     else:
         config.observations_path.write_text(new_observations.rstrip() + "\n")
+    if not skip_reindex:
+        _reindex_if_enabled(config)
 
 
 def _load_observer_prompt() -> str:
@@ -304,6 +308,17 @@ def _format_messages(messages: list[Message]) -> str:
     return "\n\n".join(lines)
 
 
+def _reindex_if_enabled(config: Config) -> None:
+    """Silently rebuild the search index after memory writes."""
+    if config.search_backend == "none":
+        return
+    try:
+        from .search import reindex
+        reindex(config)
+    except Exception:
+        pass  # Never block observe/reflect on search failures
+
+
 def _write_observations(new_observations: str, config: Config) -> None:
     """Write or append observations to the file."""
     config.ensure_memory_dir()
@@ -322,3 +337,4 @@ def _write_observations(new_observations: str, config: Config) -> None:
             )
     else:
         config.observations_path.write_text(new_observations.rstrip() + "\n")
+    _reindex_if_enabled(config)

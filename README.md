@@ -96,7 +96,7 @@ That's it. Your agents now share persistent, compressed memory.
 
 ### Claude Code Integration
 
-**SessionStart hook** — When you start a Claude Code session, a hook reads `reflections.md` and `observations.md` and injects them as context via `additionalContext`. Claude instantly has your full memory.
+**SessionStart hook** — When you start a Claude Code session, a hook runs `om context` which uses BM25 search to find the most relevant observations and injects them (plus full reflections) as context via `additionalContext`. Falls back to full file dump if search is unavailable.
 
 **SessionEnd hook** — When a session ends, a hook triggers the observer on the just-completed transcript. The observer calls an LLM to compress the conversation into observations.
 
@@ -163,6 +163,16 @@ om observe --source codex
 
 # Run reflector
 om reflect
+
+# Search memories
+om search "PostgreSQL setup"
+om search "current projects" --limit 5
+om search "backfill" --json
+om search "preferences" --reindex   # rebuild index before searching
+
+# Backfill all historical transcripts
+om backfill --source claude
+om backfill --dry-run               # preview what would be processed
 
 # Dry run (print output without writing)
 om observe --dry-run
@@ -299,7 +309,7 @@ observational-memory/
 ├── LICENSE                           # MIT
 ├── pyproject.toml                    # Python package config
 ├── src/observational_memory/
-│   ├── cli.py                        # CLI: om observe, om reflect, om install, om status
+│   ├── cli.py                        # CLI: om observe, reflect, search, backfill, install, status
 │   ├── config.py                     # Paths, defaults, env detection
 │   ├── llm.py                        # LLM API abstraction (Anthropic + OpenAI)
 │   ├── observe.py                    # Observer logic
@@ -307,16 +317,24 @@ observational-memory/
 │   ├── transcripts/
 │   │   ├── claude.py                 # Claude Code JSONL parser
 │   │   └── codex.py                  # Codex CLI session parser
+│   ├── search/                       # Pluggable search over memory files
+│   │   ├── __init__.py               # Document model, factory, reindex orchestrator
+│   │   ├── backend.py                # SearchBackend Protocol
+│   │   ├── parser.py                 # Parse observations/reflections into Documents
+│   │   ├── bm25.py                   # BM25 backend (default, uses rank-bm25)
+│   │   ├── qmd.py                    # QMD backend (optional, shells out to qmd CLI)
+│   │   └── none.py                   # No-op backend
 │   ├── prompts/
 │   │   ├── observer.md               # Observer system prompt
 │   │   └── reflector.md              # Reflector system prompt
 │   └── hooks/claude/
-│       ├── session-start.sh          # Inject memory on session start
+│       ├── session-start.sh          # Inject memory on session start (search-backed)
 │       └── session-end.sh            # Trigger observer on session end
 └── tests/
     ├── test_transcripts.py           # Transcript parser tests
     ├── test_observe.py               # Observer tests
     ├── test_reflect.py               # Reflector tests
+    ├── test_search.py                # Search module tests
     └── fixtures/                     # Sample transcripts
 ```
 
@@ -339,7 +357,7 @@ observational-memory/
 ## FAQ
 
 **Q: Does this replace RAG / vector search?**
-A: For personal context, yes. Observational memory is for remembering *about you* — preferences, projects, communication style. RAG is for searching document collections. They're complementary.
+A: For personal context, yes. Observational memory is for remembering *about you* — preferences, projects, communication style. RAG is for searching document collections. They're complementary. The built-in BM25 search handles keyword retrieval over your memories; for hybrid search (BM25 + vector embeddings), install the optional [QMD](https://github.com/nichochar/qmd) backend.
 
 **Q: How much does it cost?**
 A: The observer processes only new messages per session (~200–1K input tokens typical). The reflector runs once daily. Expect ~$0.05–0.20/day with Sonnet-class models.

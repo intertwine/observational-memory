@@ -57,6 +57,9 @@ class Config:
     observation_retention_days: int = 7
     reflections_target_lines: int = 400  # aim for 200-600
 
+    # Search settings
+    search_backend: str = "bm25"  # "bm25" | "qmd" | "none"
+
     @property
     def observations_path(self) -> Path:
         return self.memory_dir / "observations.md"
@@ -68,6 +71,10 @@ class Config:
     @property
     def cursor_path(self) -> Path:
         return self.memory_dir / ".cursor.json"
+
+    @property
+    def search_index_dir(self) -> Path:
+        return self.memory_dir / ".search-index"
 
     @property
     def codex_agents_md(self) -> Path:

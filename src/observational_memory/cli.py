@@ -1,4 +1,4 @@
-"""CLI entry points: om observe, om reflect, om backfill, om install, om status."""
+"""CLI entry points: om observe, om reflect, om backfill, om search, om context, om install, om status."""
 
 from __future__ import annotations
 
@@ -198,6 +198,109 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
             click.echo(f"Reflector error: {e}")
 
     click.echo(f"\nBackfill complete: {processed} transcript(s), {total_chars:,} chars of observations, {errors} error(s)")
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--limit", "-n", type=int, default=10, help="Max results to return")
+@click.option("--reindex", is_flag=True, help="Rebuild the search index before searching")
+@click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
+@click.pass_context
+def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: bool) -> None:
+    """Search observations and reflections for relevant memories."""
+    from .search import get_backend, reindex as do_reindex
+
+    config = ctx.obj["config"]
+
+    if reindex:
+        n = do_reindex(config)
+        if not as_json:
+            click.echo(f"Indexed {n} document(s)")
+
+    backend = get_backend(config.search_backend, config)
+
+    if not backend.is_ready():
+        # Auto-index on first search
+        n = do_reindex(config)
+        if not as_json:
+            click.echo(f"Built index ({n} document(s))")
+
+    results = backend.search(query, limit=limit)
+
+    if as_json:
+        import json as json_mod
+        output = [
+            {
+                "rank": r.rank,
+                "score": r.score,
+                "doc_id": r.document.doc_id,
+                "source": r.document.source.value,
+                "heading": r.document.heading,
+                "content": r.document.content[:500],
+            }
+            for r in results
+        ]
+        click.echo(json_mod.dumps(output, indent=2))
+    elif results:
+        for r in results:
+            click.echo(f"\n--- [{r.rank}] {r.document.heading} (score: {r.score:.2f}) ---")
+            # Show first 5 lines of content
+            lines = r.document.content.strip().splitlines()
+            for line in lines[:5]:
+                click.echo(f"  {line}")
+            if len(lines) > 5:
+                click.echo(f"  ... ({len(lines) - 5} more lines)")
+    else:
+        click.echo("No results found.")
+
+
+@cli.command(hidden=True)
+@click.pass_context
+def context(ctx: click.Context) -> None:
+    """Generate session-start JSON with search-backed memory retrieval.
+
+    Called by the SessionStart hook. Outputs JSON with additionalContext
+    containing full reflections + search results (or full observations as fallback).
+    """
+    import json as json_mod
+    from .search import get_backend
+
+    config = ctx.obj["config"]
+    parts = []
+
+    # Always include full reflections (small by design, 200-600 lines)
+    if config.reflections_path.exists() and config.reflections_path.stat().st_size > 0:
+        parts.append("## Long-Term Memory (Reflections)\n\n" + config.reflections_path.read_text())
+
+    # Try search-based observation retrieval
+    observations_added = False
+    backend = get_backend(config.search_backend, config)
+    if backend.is_ready():
+        # Search for recent context — use a broad query
+        results = backend.search("recent context current tasks projects", limit=10)
+        if results:
+            obs_parts = []
+            for r in results:
+                if r.document.source.value == "observations":
+                    obs_parts.append(r.document.content)
+            if obs_parts:
+                parts.append("## Recent Observations\n\n" + "\n\n".join(obs_parts))
+                observations_added = True
+
+    # Fallback: include full observations file
+    if not observations_added:
+        if config.observations_path.exists() and config.observations_path.stat().st_size > 0:
+            parts.append("## Recent Observations\n\n" + config.observations_path.read_text())
+
+    if parts:
+        context_text = "\n\n---\n\n".join(parts)
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context_text,
+            }
+        }
+        click.echo(json_mod.dumps(output))
 
 
 @cli.command()
