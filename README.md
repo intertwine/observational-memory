@@ -228,6 +228,44 @@ The installer sets up:
 
 Edit with `crontab -e` to adjust.
 
+### Search Backend
+
+Memory search uses a pluggable backend architecture. Three backends are available:
+
+| Backend | Default | Requires | Method |
+|---------|---------|----------|--------|
+| `bm25` | Yes | Nothing (bundled) | Token-based keyword matching via `rank-bm25` |
+| `qmd` | No | [QMD CLI](https://github.com/nichochar/qmd) + bun | Hybrid BM25 + vector embeddings + reranking |
+| `none` | No | Nothing | Disables search entirely |
+
+The default `bm25` backend works out of the box. The index is rebuilt automatically after each observe/reflect run and stored at `~/.local/share/observational-memory/.search-index/bm25.pkl`.
+
+To switch backends, edit `search_backend` in `config.py`:
+
+```python
+search_backend: str = "qmd"  # or "bm25" or "none"
+```
+
+#### Using QMD (optional)
+
+[QMD](https://github.com/nichochar/qmd) provides hybrid search (BM25 + vector embeddings + reranking) for higher recall on semantic queries. To set it up:
+
+```bash
+# 1. Install bun (QMD runtime)
+curl -fsSL https://bun.sh/install | bash
+
+# 2. Install QMD
+bun install -g qmd
+
+# 3. Switch the backend in config.py
+#    search_backend: str = "qmd"
+
+# 4. Rebuild the index
+om search --reindex "test query"
+```
+
+When using QMD, memory documents are written as `.md` files under `~/.local/share/observational-memory/.qmd-docs/` and registered as a QMD collection named `observational-memory`. The `om search` and `om context` commands use whichever backend is configured.
+
 ### Tuning
 
 Edit the prompts in `prompts/` to adjust:
