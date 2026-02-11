@@ -58,7 +58,7 @@ class Config:
     reflections_target_lines: int = 400  # aim for 200-600
 
     # Search settings
-    search_backend: str = "bm25"  # "bm25" | "qmd" | "none"
+    search_backend: str = "bm25"  # "bm25" | "qmd" | "qmd-hybrid" | "none"
 
     @property
     def observations_path(self) -> Path:

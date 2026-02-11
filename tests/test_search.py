@@ -274,6 +274,14 @@ class TestGetBackend:
         config = Config(memory_dir=tmp_path)
         backend = get_backend("qmd", config)
         assert isinstance(backend, QMDBackend)
+        assert backend._mode == "search"
+
+    def test_qmd_hybrid(self, tmp_path):
+        from observational_memory.search.qmd import QMDBackend
+        config = Config(memory_dir=tmp_path)
+        backend = get_backend("qmd-hybrid", config)
+        assert isinstance(backend, QMDBackend)
+        assert backend._mode == "query"
 
 
 # --- Reindex Tests ---

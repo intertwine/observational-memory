@@ -10,13 +10,20 @@ from . import Document, DocumentSource, SearchResult
 
 
 class QMDBackend:
-    """Search backend using the QMD CLI."""
+    """Search backend using the QMD CLI.
+
+    Args:
+        memory_dir: Path to the observational memory data directory.
+        mode: QMD search command to use. "search" for BM25 keyword matching,
+              "query" for hybrid search (BM25 + vector embeddings + LLM reranking).
+    """
 
     COLLECTION_NAME = "observational-memory"
 
-    def __init__(self, memory_dir: Path) -> None:
+    def __init__(self, memory_dir: Path, mode: str = "search") -> None:
         self._memory_dir = memory_dir
         self._docs_dir = memory_dir / ".qmd-docs"
+        self._mode = mode
 
     def index(self, documents: list[Document]) -> None:
         """Write documents as .md files and run qmd update."""
@@ -39,7 +46,7 @@ class QMDBackend:
 
         result = subprocess.run(
             [
-                "qmd", "search", query,
+                "qmd", self._mode, query,
                 "-c", self.COLLECTION_NAME,
                 "-n", str(limit),
                 "--json",
@@ -57,9 +64,20 @@ class QMDBackend:
 
         results = []
         for rank, hit in enumerate(hits, start=1):
-            file_path = Path(hit.get("file", ""))
-            content = file_path.read_text() if file_path.exists() else hit.get("content", "")
-            doc_id = file_path.stem.replace("_", ":", 1) if file_path.stem else ""
+            # file is a qmd:// URL like "qmd://observational-memory/ref-active-projects.md"
+            file_url = hit.get("file", "")
+            # Extract filename from URL: last segment after /
+            filename = file_url.rsplit("/", 1)[-1] if "/" in file_url else file_url
+            stem = filename.removesuffix(".md") if filename else ""
+
+            # Try reading the actual file from .qmd-docs/
+            local_path = self._docs_dir / filename if filename else None
+            if local_path and local_path.exists():
+                content = local_path.read_text()
+            else:
+                content = hit.get("snippet", hit.get("content", ""))
+
+            doc_id = stem.replace("_", ":", 1) if stem else ""
             source = (
                 DocumentSource.OBSERVATIONS
                 if doc_id.startswith("obs:")
@@ -70,7 +88,7 @@ class QMDBackend:
                     document=Document(
                         doc_id=doc_id,
                         source=source,
-                        heading="",
+                        heading=hit.get("title", ""),
                         content=content,
                     ),
                     score=float(hit.get("score", 0.0)),

@@ -235,7 +235,8 @@ Memory search uses a pluggable backend architecture. Three backends are availabl
 | Backend | Default | Requires | Method |
 |---------|---------|----------|--------|
 | `bm25` | Yes | Nothing (bundled) | Token-based keyword matching via `rank-bm25` |
-| `qmd` | No | [QMD CLI](https://github.com/nichochar/qmd) + bun | Hybrid BM25 + vector embeddings + reranking |
+| `qmd` | No | [QMD CLI](https://github.com/tobi/qmd) + bun | BM25 keyword search via QMD's FTS5 engine |
+| `qmd-hybrid` | No | [QMD CLI](https://github.com/tobi/qmd) + bun | Hybrid BM25 + vector embeddings + LLM reranking (~2GB models, auto-downloaded) |
 | `none` | No | Nothing | Disables search entirely |
 
 The default `bm25` backend works out of the box. The index is rebuilt automatically after each observe/reflect run and stored at `~/.local/share/observational-memory/.search-index/bm25.pkl`.
@@ -243,22 +244,22 @@ The default `bm25` backend works out of the box. The index is rebuilt automatica
 To switch backends, edit `search_backend` in `config.py`:
 
 ```python
-search_backend: str = "qmd"  # or "bm25" or "none"
+search_backend: str = "qmd-hybrid"  # or "bm25", "qmd", "none"
 ```
 
 #### Using QMD (optional)
 
-[QMD](https://github.com/nichochar/qmd) provides hybrid search (BM25 + vector embeddings + reranking) for higher recall on semantic queries. To set it up:
+[QMD](https://github.com/tobi/qmd) provides hybrid search (BM25 + vector embeddings + LLM reranking) for higher recall on semantic queries. All models run locally via node-llama-cpp — no extra API keys needed. To set it up:
 
 ```bash
 # 1. Install bun (QMD runtime)
 curl -fsSL https://bun.sh/install | bash
 
-# 2. Install QMD
-bun install -g qmd
+# 2. Install QMD (from GitHub — the npm package is a placeholder)
+bun install -g github:tobi/qmd
 
 # 3. Switch the backend in config.py
-#    search_backend: str = "qmd"
+#    search_backend: str = "qmd-hybrid"
 
 # 4. Rebuild the index
 om search --reindex "test query"
@@ -400,7 +401,7 @@ observational-memory/
 ## FAQ
 
 **Q: Does this replace RAG / vector search?**
-A: For personal context, yes. Observational memory is for remembering *about you* — preferences, projects, communication style. RAG is for searching document collections. They're complementary. The built-in BM25 search handles keyword retrieval over your memories; for hybrid search (BM25 + vector embeddings), install the optional [QMD](https://github.com/nichochar/qmd) backend.
+A: For personal context, yes. Observational memory is for remembering *about you* — preferences, projects, communication style. RAG is for searching document collections. They're complementary. The built-in BM25 search handles keyword retrieval over your memories; for hybrid search (BM25 + vector embeddings + LLM reranking), use the `qmd-hybrid` backend with [QMD](https://github.com/tobi/qmd).
 
 **Q: How much does it cost?**
 A: The observer processes only new messages per session (~200–1K input tokens typical). The reflector runs once daily. Expect ~$0.05–0.20/day with Sonnet-class models.

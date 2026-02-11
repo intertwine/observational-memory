@@ -43,14 +43,19 @@ def get_backend(backend_name: str, config) -> "backend.SearchBackend":
     elif backend_name == "qmd":
         from .qmd import QMDBackend
 
-        return QMDBackend(config.memory_dir)
+        return QMDBackend(config.memory_dir, mode="search")
+    elif backend_name == "qmd-hybrid":
+        from .qmd import QMDBackend
+
+        return QMDBackend(config.memory_dir, mode="query")
     elif backend_name == "none":
         from .none import NoneBackend
 
         return NoneBackend()
     else:
         raise ValueError(
-            f"Unknown search backend: {backend_name!r}. Use 'bm25', 'qmd', or 'none'."
+            f"Unknown search backend: {backend_name!r}. "
+            "Use 'bm25', 'qmd', 'qmd-hybrid', or 'none'."
         )
 
 
