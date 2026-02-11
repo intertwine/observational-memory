@@ -111,10 +111,14 @@ Both hooks are installed automatically to `~/.claude/settings.json`.
 ### Reflector (Both)
 
 A daily cron job (04:00 UTC) runs the reflector, which:
-1. Reads all observations + existing reflections
-2. Merges, promotes (🟡→🔴), demotes, and archives entries
-3. Writes a clean `reflections.md`
-4. Trims observations older than 7 days
+1. Reads the `Last reflected` timestamp from the existing reflections
+2. Filters observations to only those from that date onward (incremental — skips already-processed days)
+3. If the filtered observations fit in one LLM call (<30K tokens), processes them in a single pass
+4. If they're too large (e.g., after a backfill), automatically chunks by date section and folds each chunk into the reflections incrementally
+5. Merges, promotes (🟡→🔴), demotes, and archives entries
+6. Stamps `Last updated` and `Last reflected` timestamps programmatically
+7. Writes the updated `reflections.md`
+8. Trims observations older than 7 days
 
 ### Priority System
 
@@ -261,6 +265,7 @@ Edit the prompts in `prompts/` to adjust:
 # Reflections — Long-Term Memory
 
 *Last updated: 2026-02-10 04:00 UTC*
+*Last reflected: 2026-02-10*
 
 ## Core Identity
 - **Name:** Alex
@@ -367,6 +372,9 @@ A: Run `om install --claude`. The Codex integration is entirely optional.
 
 **Q: Can I manually edit the memory files?**
 A: Yes. Both `observations.md` and `reflections.md` are plain markdown. The observer appends; the reflector overwrites. Manual edits to reflections will be preserved.
+
+**Q: What happens if the reflector runs on a huge backlog?**
+A: The reflector uses incremental updates — it reads the `Last reflected` timestamp from the existing reflections and only processes new observations since that date. If the timestamp is missing (first run or after a backfill), the reflector automatically chunks observations by date section and folds them incrementally, preventing the model from being overwhelmed. Output token budget is 8192 tokens (enough for the 200–600 line target).
 
 **Q: What about privacy?**
 A: Everything runs locally. Transcripts are processed by the LLM API you configure (Anthropic or OpenAI), subject to their data policies. No data is sent anywhere else.
