@@ -19,13 +19,23 @@ _MAX_INPUT_TOKENS = 30_000
 # max_tokens for reflector output (200-600 lines needs room)
 _REFLECTOR_MAX_OUTPUT_TOKENS = 8192
 
+# Regex for the "Last reflected" timestamp line in reflections.md
+_LAST_REFLECTED_RE = re.compile(
+    r"^\*Last reflected:\s*(\d{4}-\d{2}-\d{2})\b.*\*$", re.MULTILINE
+)
+# Regex for the "Last updated" timestamp line
+_LAST_UPDATED_RE = re.compile(
+    r"^\*Last updated:.*\*$", re.MULTILINE
+)
+
 
 def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | None:
     """Read observations + reflections, condense, write updated reflections.
 
-    When observations are small enough, processes in a single LLM call.
-    When observations are large, chunks them by date section and folds
-    each chunk into the reflections incrementally.
+    Only processes observations newer than the ``Last reflected`` timestamp
+    in the existing reflections. When those observations are small enough,
+    processes in a single LLM call. When they are large, chunks them by
+    date section and folds each chunk into the reflections incrementally.
 
     Args:
         config: Runtime config.
@@ -37,16 +47,23 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     if config is None:
         config = Config()
 
-    observations = ""
+    raw_observations = ""
     if config.observations_path.exists():
-        observations = config.observations_path.read_text()
+        raw_observations = config.observations_path.read_text()
 
-    if not observations.strip():
+    if not raw_observations.strip():
         return None
 
     reflections = ""
     if config.reflections_path.exists():
         reflections = config.reflections_path.read_text()
+
+    # Filter to only new observations since last reflection
+    last_reflected_date = _parse_last_reflected(reflections)
+    observations = _filter_new_observations(raw_observations, last_reflected_date)
+
+    if not observations.strip():
+        return None
 
     system_prompt = _load_reflector_prompt()
 
@@ -60,6 +77,12 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     else:
         # Too large — chunk observations and fold incrementally
         result = _reflect_chunked(system_prompt, reflections, observations, config)
+
+    # Programmatically stamp the "Last reflected" timestamp so we don't
+    # rely on the LLM to format it correctly.
+    latest_obs_date = _extract_latest_observation_date(raw_observations)
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    result = _stamp_timestamps(result, now_utc, latest_obs_date or now_utc)
 
     if dry_run:
         return result
@@ -151,6 +174,90 @@ def _chunk_observations(observations: str) -> list[str]:
         chunks.append(current_chunk)
 
     return chunks if chunks else [observations]
+
+
+def _parse_last_reflected(reflections: str) -> str | None:
+    """Extract the ``Last reflected`` date from reflections.md.
+
+    Returns:
+        A ``YYYY-MM-DD`` string, or None if not found.
+    """
+    m = _LAST_REFLECTED_RE.search(reflections)
+    return m.group(1) if m else None
+
+
+def _filter_new_observations(observations: str, since_date: str | None) -> str:
+    """Return only observation sections from *since_date* onward (inclusive).
+
+    If *since_date* is None, returns the full observations text (first run).
+    Includes the file header (``# Observations`` etc.) in the output.
+    """
+    if since_date is None:
+        return observations
+
+    sections = re.split(r"(?=^## \d{4}-\d{2}-\d{2})", observations, flags=re.MULTILINE)
+
+    header = ""
+    kept: list[str] = []
+    for section in sections:
+        date_match = re.match(r"## (\d{4}-\d{2}-\d{2})", section.strip())
+        if date_match:
+            if date_match.group(1) >= since_date:
+                kept.append(section)
+        else:
+            header = section
+
+    if not kept:
+        return ""
+
+    return header + "".join(kept)
+
+
+def _extract_latest_observation_date(observations: str) -> str | None:
+    """Find the most recent ``## YYYY-MM-DD`` date in observations.
+
+    Returns:
+        A ``YYYY-MM-DD`` string, or None if no date headers found.
+    """
+    dates = re.findall(r"^## (\d{4}-\d{2}-\d{2})", observations, flags=re.MULTILINE)
+    return max(dates) if dates else None
+
+
+def _stamp_timestamps(reflections: str, updated: str, reflected: str) -> str:
+    """Ensure reflections have correct ``Last updated`` and ``Last reflected`` lines.
+
+    Injects or replaces the timestamps programmatically so we don't rely on
+    the LLM to format them correctly.
+    """
+    updated_line = f"*Last updated: {updated}*"
+    reflected_line = f"*Last reflected: {reflected}*"
+
+    has_updated = _LAST_UPDATED_RE.search(reflections)
+    has_reflected = _LAST_REFLECTED_RE.search(reflections)
+
+    if has_updated:
+        reflections = _LAST_UPDATED_RE.sub(updated_line, reflections, count=1)
+    if has_reflected:
+        reflections = _LAST_REFLECTED_RE.sub(reflected_line, reflections, count=1)
+
+    # If "Last reflected" wasn't in the LLM output, insert it after "Last updated"
+    if not has_reflected:
+        if has_updated or _LAST_UPDATED_RE.search(reflections):
+            reflections = _LAST_UPDATED_RE.sub(
+                f"{updated_line}\n{reflected_line}", reflections, count=1
+            )
+        else:
+            # No timestamp lines at all — insert after the title
+            title_match = re.match(r"(#[^\n]*\n)", reflections)
+            if title_match:
+                insert_pos = title_match.end()
+                reflections = (
+                    reflections[:insert_pos]
+                    + f"\n{updated_line}\n{reflected_line}\n"
+                    + reflections[insert_pos:]
+                )
+
+    return reflections
 
 
 def _reindex_if_enabled(config: Config) -> None:
