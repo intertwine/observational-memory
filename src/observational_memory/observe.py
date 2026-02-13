@@ -116,7 +116,11 @@ def observe_all_claude(config: Config | None = None, dry_run: bool = False) -> l
 
 def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> list[str]:
     """Scan all recent Codex sessions and run observer on each."""
-    from .transcripts.codex import find_recent_sessions, parse_transcript
+    from .transcripts.codex import (
+        find_recent_sessions,
+        line_offset_to_message_count,
+        parse_transcript,
+    )
 
     if config is None:
         config = Config()
@@ -127,16 +131,33 @@ def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> li
     for path in find_recent_sessions(config.codex_home):
         cursor_key = str(path)
         after_index = cursor.get(cursor_key)
+        if not isinstance(after_index, int):
+            after_index = 0
 
-        messages = parse_transcript(path, after_index=after_index)
+        all_messages = parse_transcript(path)
+        if not all_messages:
+            continue
+
+        if after_index and after_index > len(all_messages):
+            # Backward compatibility: older cursors tracked raw JSONL line offsets
+            # rather than parsed message counts. Convert by counting how many of the
+            # first N file lines are actual messages. If the converted index is still
+            # out of range (common when non-message records inflate line counts),
+            # fall back to 0 so we safely reprocess rather than skip messages.
+            migrated_index = line_offset_to_message_count(path, after_index)
+            if 0 <= migrated_index < len(all_messages):
+                after_index = migrated_index
+            else:
+                after_index = 0
+
+        messages = all_messages[after_index:]
         if not messages:
             continue
 
         result = run_observer(messages, config, dry_run)
         if result and not dry_run:
-            # Count total lines for cursor
-            total_lines = len(path.read_text().splitlines())
-            cursor[cursor_key] = total_lines
+            # Track processed message count for incremental parsing.
+            cursor[cursor_key] = len(all_messages)
             config.save_cursor(cursor)
 
         if result:

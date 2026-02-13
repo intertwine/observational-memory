@@ -28,6 +28,14 @@ ENV_FILE_TEMPLATE = """\
 
 # Search backend: bm25 (default), qmd, qmd-hybrid, none
 # OM_SEARCH_BACKEND=bm25
+#
+# In-session checkpointing (UserPromptSubmit/PreCompact hooks)
+# OM_SESSION_OBSERVER_INTERVAL_SECONDS=900  # 15 minutes
+# Set to 1/true/yes to disable in-session checkpoints (SessionEnd/Stop still run immediately)
+# OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS=0
+
+# Codex observer polling cadence (minutes)
+# OM_CODEX_OBSERVER_INTERVAL_MINUTES=15
 """
 
 

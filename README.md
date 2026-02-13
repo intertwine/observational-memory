@@ -22,6 +22,9 @@ Observational Memory fixes this. A single set of compressed memory files lives a
   │                       │        │                       │
   │ SessionEnd hook       │        │ Cron-based observer   │
   │ → triggers observer   │        │ → scans sessions      │
+  │                       │        │                       │
+  │ UserPromptSubmit /    │        │                       │
+  │ PreCompact checkpoint │        │                       │
   └───────────┬───────────┘        └───────────┬───────────┘
               │ transcript                      │ transcript
               ▼                                 ▼
@@ -45,7 +48,7 @@ Observational Memory fixes this. A single set of compressed memory files lives a
 | Tier | Updated | Retention | Size | Contents |
 |------|---------|-----------|------|----------|
 | **Raw transcripts** | Real-time | Session only | ~50K tokens/day | Full conversation |
-| **Observations** | Per session + every 15 min | 7 days | ~2K tokens/day | Timestamped, prioritized notes |
+| **Observations** | Per session + periodic checkpoints (~15 min default) | 7 days | ~2K tokens/day | Timestamped, prioritized notes |
 | **Reflections** | Daily | Indefinite | 200–600 lines total | Identity, projects, preferences |
 
 ---
@@ -100,13 +103,18 @@ That's it. Your agents now share persistent, compressed memory.
 
 **SessionEnd hook** — When a session ends, a hook triggers the observer on the just-completed transcript. The observer calls an LLM to compress the conversation into observations.
 
-Both hooks are installed automatically to `~/.claude/settings.json`.
+**UserPromptSubmit / PreCompact hooks** — Long-running sessions also send periodic checkpoint events during the session. These are throttled with `OM_SESSION_OBSERVER_INTERVAL_SECONDS` (default `900` seconds), so observations continue to be captured without observing after every prompt.
+
+To disable in-session checkpoints while keeping normal end-of-session capture, set:
+`OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS=1` in `~/.config/observational-memory/env`.
+
+All hooks are installed automatically to `~/.claude/settings.json`.
 
 ### Codex CLI Integration
 
 **AGENTS.md** — The installer adds instructions to `~/.codex/AGENTS.md` telling Codex to read the memory files at session start.
 
-**Cron observer** — A cron job runs every 15 minutes, scanning `~/.codex/sessions/` for new transcript data and compressing it into observations.
+**Cron observer** — A cron job runs every 15 minutes, scanning `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`) and compressing it into observations.
 
 ### Reflector (Both)
 
@@ -221,10 +229,11 @@ export XDG_DATA_HOME=~/my-data
 ```
 
 ### Cron Schedules
-
 The installer sets up:
-- **Observer (Codex):** `*/15 * * * *` (every 15 min)
+- **Observer (Codex):** `*/15 * * * *` by default (controlled by `OM_CODEX_OBSERVER_INTERVAL_MINUTES`, e.g. `*/10 * * * *` for 10 min)
 - **Reflector:** `0 4 * * *` (daily at 04:00 UTC)
+
+Set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` in `~/.config/observational-memory/env` to tune Codex polling (`1` = every minute).
 
 Edit with `crontab -e` to adjust.
 
@@ -246,12 +255,14 @@ To switch backends, set `OM_SEARCH_BACKEND` in your env file:
 ```bash
 # ~/.config/observational-memory/env
 OM_SEARCH_BACKEND=qmd-hybrid
+OM_CODEX_OBSERVER_INTERVAL_MINUTES=10
 ```
 
 Or export it in your shell:
 
 ```bash
 export OM_SEARCH_BACKEND=qmd-hybrid
+export OM_CODEX_OBSERVER_INTERVAL_MINUTES=10
 ```
 
 #### Using QMD (optional)
