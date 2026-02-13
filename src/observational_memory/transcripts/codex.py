@@ -4,8 +4,54 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from . import Message
+
+
+def _coerce_records(value: Any) -> list[dict]:
+    """Normalize parsed JSON payloads to a list of dict records."""
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [record for record in value if isinstance(record, dict)]
+    return []
+
+
+def _extract_records(raw: str) -> list[dict]:
+    """Extract message-like dicts from either full JSON sessions or JSONL sessions."""
+    records: list[dict] = []
+
+    # Try full JSON document first (Codex sessions are sometimes pretty-printed JSON objects).
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = None
+    else:
+        if isinstance(payload, dict):
+            items = payload.get("items")
+            if isinstance(items, list):
+                records.extend(_coerce_records(items))
+            else:
+                records.extend(_coerce_records(payload))
+        else:
+            records.extend(_coerce_records(payload))
+
+    # Fall back to JSONL line parsing (legacy format).
+    if not records:
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, list):
+                records.extend(_coerce_records(entry))
+            else:
+                records.extend(_coerce_records(entry))
+
+    return records
 
 
 def parse_transcript(path: Path, after_index: int | None = None) -> list[Message]:
@@ -16,23 +62,19 @@ def parse_transcript(path: Path, after_index: int | None = None) -> list[Message
     line has type, role, content, and timestamp fields.
 
     Args:
-        path: Path to the session file.
-        after_index: If set, skip the first N entries (for incremental processing).
+    path: Path to the session file.
+    after_index: If set, skip the first N parsed entries (for incremental processing).
 
     Returns:
         List of normalized Message objects.
     """
     messages: list[Message] = []
+    start = max(after_index or 0, 0)
 
-    lines = path.read_text().splitlines()
-    start = (after_index or 0)
+    records = _extract_records(path.read_text())
 
-    for line in lines[start:]:
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
+    for entry in records[start:]:
+        if not isinstance(entry, dict):
             continue
 
         role = entry.get("role", "")
@@ -100,7 +142,11 @@ def find_recent_sessions(codex_home: Path, max_age_hours: int = 24) -> list[Path
     if not sessions_dir.exists():
         return sessions
 
-    for f in sessions_dir.rglob("*.jsonl"):
+    for f in sessions_dir.rglob("*"):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in {".json", ".jsonl"}:
+            continue
         mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
         if mtime > cutoff:
             sessions.append(f)

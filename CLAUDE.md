@@ -27,7 +27,7 @@ Transcripts (Claude JSONL / Codex sessions)
 ### Key modules
 
 - **`src/observational_memory/transcripts/claude.py`** — Parses Claude Code `.jsonl` transcripts. Each line is a JSON object with `type` (user/assistant/progress), `message.content` (text or array of blocks), `uuid`, `timestamp`.
-- **`src/observational_memory/transcripts/codex.py`** — Parses Codex CLI session files from `~/.codex/sessions/`.
+- **`src/observational_memory/transcripts/codex.py`** — Parses Codex CLI session files (`*.json` and `*.jsonl`) from `~/.codex/sessions/`.
 - **`src/observational_memory/observe.py`** — Observer: reads transcripts, finds new messages via cursor bookmarks, calls LLM to compress, appends to `observations.md`.
 - **`src/observational_memory/reflect.py`** — Reflector: reads observations + reflections, calls LLM to condense, writes `reflections.md`, trims old observations.
 - **`src/observational_memory/llm.py`** — Thin abstraction over Anthropic and OpenAI APIs. Auto-detects provider from env vars.
@@ -37,7 +37,7 @@ Transcripts (Claude JSONL / Codex sessions)
 
 ### Agent integration
 
-- **Claude Code**: `SessionStart` hook injects memory via `additionalContext`; `SessionEnd` hook triggers observer. Hooks live in `src/observational_memory/hooks/claude/` (bundled as package data) and are registered in `~/.claude/settings.json`.
+- **Claude Code**: `SessionStart` injects memory via `additionalContext`; `SessionEnd`, `UserPromptSubmit`, and `PreCompact` hooks trigger checkpoints. In-session checkpoints are throttled by `OM_SESSION_OBSERVER_INTERVAL_SECONDS` and can be disabled with `OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS`.
 - **Codex CLI**: Instructions appended to `~/.codex/AGENTS.md`; cron job for observer.
 
 ### API keys

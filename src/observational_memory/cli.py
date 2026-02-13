@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
@@ -444,9 +445,13 @@ def status(ctx: click.Context) -> None:
         hooks = settings.get("hooks", {})
         has_start = "SessionStart" in hooks
         has_end = "SessionEnd" in hooks
+        has_prompt_submit = "UserPromptSubmit" in hooks
+        has_precompact = "PreCompact" in hooks
         click.echo(f"\nClaude Code hooks:")
         click.echo(f"  SessionStart: {'installed' if has_start else 'not installed'}")
         click.echo(f"  SessionEnd: {'installed' if has_end else 'not installed'}")
+        click.echo(f"  UserPromptSubmit: {'installed' if has_prompt_submit else 'not installed'}")
+        click.echo(f"  PreCompact: {'installed' if has_precompact else 'not installed'}")
     else:
         click.echo(f"\nClaude Code: settings not found at {config.claude_settings_path}")
 
@@ -462,7 +467,7 @@ def status(ctx: click.Context) -> None:
 # --- Claude Code hook installation ---
 
 def _install_claude_hooks(config: Config) -> None:
-    """Add SessionStart and SessionEnd hooks to ~/.claude/settings.json."""
+    """Add SessionStart and session checkpoint hooks to ~/.claude/settings.json."""
     import json
 
     hooks_dir = Path(__file__).parent / "hooks" / "claude"
@@ -505,8 +510,36 @@ def _install_claude_hooks(config: Config) -> None:
         }
     ]
 
+    # UserPromptSubmit checkpoint hook
+    hooks["UserPromptSubmit"] = [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": str(session_end_hook),
+                    "timeout": 5,
+                    "async": True
+                }
+            ]
+        }
+    ]
+
+    # PreCompact checkpoint hook
+    hooks["PreCompact"] = [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": str(session_end_hook),
+                    "timeout": 5,
+                    "async": True
+                }
+            ]
+        }
+    ]
+
     config.claude_settings_path.write_text(json.dumps(settings, indent=2) + "\n")
-    click.echo("Installed Claude Code hooks (SessionStart + SessionEnd)")
+    click.echo("Installed Claude Code hooks (SessionStart, UserPromptSubmit, PreCompact, SessionEnd)")
 
 
 def _uninstall_claude_hooks(config: Config) -> None:
@@ -520,6 +553,8 @@ def _uninstall_claude_hooks(config: Config) -> None:
     hooks = settings.get("hooks", {})
     hooks.pop("SessionStart", None)
     hooks.pop("SessionEnd", None)
+    hooks.pop("UserPromptSubmit", None)
+    hooks.pop("PreCompact", None)
     if not hooks:
         settings.pop("hooks", None)
 
@@ -538,6 +573,9 @@ At the start of every session, read these files for context about the user:
 
 1. `~/.local/share/observational-memory/reflections.md` — long-term memory (identity, projects, preferences)
 2. `~/.local/share/observational-memory/observations.md` — recent compressed observations
+
+If this is a long-lived Codex session, ensure observations continue to be captured by periodic observers (or set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` before install, e.g. `OM_CODEX_OBSERVER_INTERVAL_MINUTES=5`).
+You can run a manual checkpoint with `om observe --source codex`.
 
 These files are auto-maintained. Do not modify them directly.
 {_CODEX_OM_MARKER}"""
@@ -581,6 +619,24 @@ def _uninstall_codex(config: Config) -> None:
 
 # --- Cron installation ---
 
+
+def _codex_observer_interval_minutes(default: int = 15) -> int:
+    raw_interval = os.environ.get("OM_CODEX_OBSERVER_INTERVAL_MINUTES", str(default))
+    try:
+        interval = int(raw_interval)
+    except ValueError:
+        return default
+
+    if interval <= 0:
+        return default
+    return min(interval, 59)
+
+
+def _cron_every_minutes(minutes: int) -> str:
+    if minutes <= 1:
+        return "*"
+    return f"*/{minutes}"
+
 def _install_cron(config: Config, targets: str) -> None:
     """Add cron jobs for observer and reflector."""
     import subprocess
@@ -599,9 +655,11 @@ def _install_cron(config: Config, targets: str) -> None:
 
     jobs = []
 
+    codex_interval = _cron_every_minutes(_codex_observer_interval_minutes())
+
     if targets in ("codex", "both"):
         # Observer cron for Codex (Claude uses hooks instead)
-        jobs.append(f"*/15 * * * * {prefix}{om_path} observe --source codex 2>/dev/null")
+        jobs.append(f"{codex_interval} * * * * {prefix}{om_path} observe --source codex 2>/dev/null")
 
     # Daily reflector for all
     jobs.append(f"0 4 * * * {prefix}{om_path} reflect 2>/dev/null")

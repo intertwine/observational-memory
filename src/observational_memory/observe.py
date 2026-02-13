@@ -127,16 +127,28 @@ def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> li
     for path in find_recent_sessions(config.codex_home):
         cursor_key = str(path)
         after_index = cursor.get(cursor_key)
+        if not isinstance(after_index, int):
+            after_index = 0
 
-        messages = parse_transcript(path, after_index=after_index)
+        all_messages = parse_transcript(path)
+        if not all_messages:
+            continue
+
+        if after_index and after_index > len(all_messages):
+            # Backward compatibility for legacy cursor values that might be based on
+            # line offsets from older parsers.
+            cursor[cursor_key] = len(all_messages)
+            config.save_cursor(cursor)
+            after_index = len(all_messages)
+
+        messages = all_messages[after_index:]
         if not messages:
             continue
 
         result = run_observer(messages, config, dry_run)
         if result and not dry_run:
-            # Count total lines for cursor
-            total_lines = len(path.read_text().splitlines())
-            cursor[cursor_key] = total_lines
+            # Track processed message count for incremental parsing.
+            cursor[cursor_key] = len(all_messages)
             config.save_cursor(cursor)
 
         if result:
