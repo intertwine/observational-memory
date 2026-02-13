@@ -13,6 +13,7 @@ fi
 
 MEM_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/observational-memory"
 STATE_FILE="$MEM_DIR/.session-observer-state.json"
+LOCK_DIR="$MEM_DIR/.session-observer-locks"
 INPUT=$(cat)
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 EVENT_NAME=$(echo "$INPUT" | jq -r '.hook_event_name // empty')
@@ -27,6 +28,88 @@ THROTTLE_SECONDS="${OM_SESSION_OBSERVER_INTERVAL_SECONDS:-900}"
 if ! [[ "$THROTTLE_SECONDS" =~ ^[0-9]+$ ]]; then
     THROTTLE_SECONDS=900
 fi
+
+count_session_messages() {
+    local transcript_path=$1
+    jq -R '
+        fromjson? as $entry
+        | if $entry == null then
+            empty
+        elif ($entry.type == "user" or $entry.type == "assistant") then
+            1
+        elif (($entry.message | type == "object")
+            and (($entry.message.role == "user") or ($entry.message.role == "assistant"))) then
+            1
+        else
+            empty
+        end
+    ' "$transcript_path" | wc -l | tr -d " "
+}
+
+state_read_field() {
+    local field=$1
+    if [[ ! -f "$STATE_FILE" ]] || ! jq empty "$STATE_FILE" >/dev/null 2>&1; then
+        echo ""
+        return
+    fi
+    jq -r --arg p "$TRANSCRIPT" --arg field "$field" '.[$p][$field] // empty' "$STATE_FILE"
+}
+
+state_message_count() {
+    local count
+    count="$(state_read_field "message_count")"
+    if [[ -z "$count" ]]; then
+        # Backward compatibility with older state entries.
+        count="$(state_read_field "line_count")"
+    fi
+    echo "$count"
+}
+
+write_state() {
+    local now_ts=$1
+    local message_count=$2
+    local status=$3
+    local state_tmp
+    state_tmp="$(mktemp)"
+
+    jq -n --arg p "$TRANSCRIPT" --argjson now_ts "$now_ts" --argjson message_count "$message_count" --arg status "$status" \
+        '.[$p] = {last_observed: $now_ts, message_count: $message_count, status: $status}' \
+        < /dev/null > "$state_tmp"
+
+    if [[ -s "$STATE_FILE" ]] && jq empty "$STATE_FILE" >/dev/null 2>&1; then
+        jq --arg p "$TRANSCRIPT" --argjson now_ts "$now_ts" --argjson message_count "$message_count" --arg status "$status" \
+            '.[$p] = {last_observed: $now_ts, message_count: $message_count, status: $status}' \
+            "$STATE_FILE" > "$state_tmp"
+    fi
+
+    mv "$state_tmp" "$STATE_FILE"
+}
+
+should_skip_observer() {
+    local now_ts=$1
+    local message_count=$2
+    local last_message_count=$3
+    local last_observed_at=$4
+
+    if [[ -n "$last_message_count" ]] && (( message_count <= last_message_count )); then
+        return 0
+    fi
+
+    if [[ -n "$last_observed_at" ]] && (( now_ts - last_observed_at < THROTTLE_SECONDS )); then
+        return 0
+    fi
+
+    return 1
+}
+
+acquire_lock() {
+    local lock_path=$1
+    mkdir -p "$LOCK_DIR"
+    if ! mkdir "$lock_path" 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
 
 # Find om command
 OM=$(command -v om 2>/dev/null || echo "")
@@ -63,101 +146,49 @@ esac
 
 mkdir -p "$MEM_DIR"
 
-if [[ "$is_checkpoint_event" == true ]] && [[ "$THROTTLE_SECONDS" -gt 0 ]]; then
-    case "$(printf '%s' "$DISABLE_CHECKPOINTS" | tr '[:upper:]' '[:lower:]')" in
-        1|true|yes|on)
-            exit 0
-            ;;
-    esac
+if [[ "$is_force_event" == false ]]; then
+    if [[ "$is_checkpoint_event" == true ]] && [[ "$THROTTLE_SECONDS" -gt 0 ]]; then
+        case "$(printf '%s' "$DISABLE_CHECKPOINTS" | tr '[:upper:]' '[:lower:]')" in
+            1|true|yes|on)
+                exit 0
+                ;;
+        esac
+    fi
 
-    # Keep only the latest line_count even when skipping throttled events.
-    if [[ "$THROTTLE_SECONDS" -eq 0 ]]; then
-        :
-    else
+    if [[ "$is_checkpoint_event" == true ]] || [[ "$THROTTLE_SECONDS" -gt 0 ]]; then
         now=$(date +%s)
-        if [[ -f "$STATE_FILE" ]]; then
-            last_seen_lines=$(jq -r --arg p "$TRANSCRIPT" '.[$p].line_count // empty' "$STATE_FILE")
-            last_observed_at=$(jq -r --arg p "$TRANSCRIPT" '.[$p].last_observed // empty' "$STATE_FILE")
-        else
-            last_seen_lines=""
-            last_observed_at=""
-        fi
+        last_message_count="$(state_message_count)"
+        last_observed_at="$(state_read_field "last_observed")"
+        transcript_messages="$(count_session_messages "$TRANSCRIPT")"
 
-        transcript_lines="$(wc -l < "$TRANSCRIPT" | tr -d ' ')"
-
-        if [[ -n "$last_seen_lines" ]] && (( transcript_lines <= last_seen_lines )); then
-            # No new transcript lines to process.
-            exit 0
-        fi
-
-        if [[ -n "$last_observed_at" ]] && (( now - last_observed_at < THROTTLE_SECONDS )); then
-            # Keep checkpoint state updated so we continue from latest lines if we skipped.
-            state_tmp="$(mktemp)"
-            jq -n --arg p "$TRANSCRIPT" --argjson lc "$transcript_lines" \
-                --argjson lo "$last_observed_at" \
-                '.[$p] = {last_observed: $lo, line_count: $lc}' < /dev/null > "$state_tmp"
-            if [[ -s "$STATE_FILE" ]] && jq empty "$STATE_FILE" >/dev/null 2>&1; then
-                jq --arg p "$TRANSCRIPT" --argjson lc "$transcript_lines" \
-                    --argjson lo "$last_observed_at" \
-                    '.[$p] = {last_observed: $lo, line_count: $lc}' \
-                    "$STATE_FILE" > "$state_tmp"
-            fi
-            mv "$state_tmp" "$STATE_FILE"
+        if should_skip_observer "$now" "$transcript_messages" "$last_message_count" "$last_observed_at"; then
+            # Keep cursor state updated so we resume from the latest known message position.
+            write_state "$now" "$transcript_messages" "skipped"
             exit 0
         fi
     fi
-elif [[ "$is_force_event" == false ]]; then
-    # Unknown event type; default to in-session throttled behavior so we do not over-observe.
-    now=$(date +%s)
-    if [[ -f "$STATE_FILE" ]]; then
-        last_seen_lines=$(jq -r --arg p "$TRANSCRIPT" '.[$p].line_count // empty' "$STATE_FILE")
-        last_observed_at=$(jq -r --arg p "$TRANSCRIPT" '.[$p].last_observed // empty' "$STATE_FILE")
-    else
-        last_seen_lines=""
-        last_observed_at=""
-    fi
+fi
 
-    transcript_lines="$(wc -l < "$TRANSCRIPT" | tr -d ' ')"
-
-    if [[ -n "$last_seen_lines" ]] && (( transcript_lines <= last_seen_lines )); then
-        # No new transcript lines to process.
-        exit 0
-    fi
-
-    if [[ -n "$last_observed_at" ]] && (( now - last_observed_at < THROTTLE_SECONDS )); then
-        # Keep checkpoint state updated so we continue from latest lines if we skipped.
-        state_tmp="$(mktemp)"
-        jq -n --arg p "$TRANSCRIPT" --argjson lc "$transcript_lines" \
-            --argjson lo "$last_observed_at" \
-            '.[$p] = {last_observed: $lo, line_count: $lc}' < /dev/null > "$state_tmp"
-        if [[ -s "$STATE_FILE" ]] && jq empty "$STATE_FILE" >/dev/null 2>&1; then
-            jq --arg p "$TRANSCRIPT" --argjson lc "$transcript_lines" \
-                --argjson lo "$last_observed_at" \
-                '.[$p] = {last_observed: $lo, line_count: $lc}' \
-                "$STATE_FILE" > "$state_tmp"
-        fi
-        mv "$state_tmp" "$STATE_FILE"
-        exit 0
-    fi
+sanitized_transcript="${TRANSCRIPT//[\/:.]/_}"
+lock_path="$LOCK_DIR/$sanitized_transcript"
+if ! acquire_lock "$lock_path"; then
+    exit 0
 fi
 
 # Run observer in background so we don't block session lifecycle.
 (
+    trap 'rm -rf "$lock_path"' EXIT
+    now=$(date +%s)
     "$OM" observe --transcript "$TRANSCRIPT" --source claude
     observe_status=$?
+
+    now=$(date +%s)
+    transcript_messages="$(count_session_messages "$TRANSCRIPT")"
     if [[ $observe_status -eq 0 ]]; then
-        mkdir -p "$MEM_DIR"
-        now=$(date +%s)
-        transcript_lines="$(wc -l < "$TRANSCRIPT" | tr -d ' ')"
-        state_tmp="$(mktemp)"
-        jq -n --arg p "$TRANSCRIPT" --argjson now_ts "$now" --argjson lc "$transcript_lines" \
-            '.[$p] = {last_observed: $now_ts, line_count: $lc}' < /dev/null > "$state_tmp"
-        if [[ -s "$STATE_FILE" ]] && jq empty "$STATE_FILE" >/dev/null 2>&1; then
-            jq --arg p "$TRANSCRIPT" --argjson now_ts "$now" --argjson lc "$transcript_lines" \
-                '.[$p] = {last_observed: $now_ts, line_count: $lc}' \
-                "$STATE_FILE" > "$state_tmp"
-        fi
-        mv "$state_tmp" "$STATE_FILE"
+        write_state "$now" "$transcript_messages" "success"
+    else
+        echo "Warning: om observe failed for $TRANSCRIPT with status $observe_status" >&2
+        write_state "$now" "$transcript_messages" "failed"
     fi
 ) &
 disown

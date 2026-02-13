@@ -574,7 +574,7 @@ At the start of every session, read these files for context about the user:
 1. `~/.local/share/observational-memory/reflections.md` — long-term memory (identity, projects, preferences)
 2. `~/.local/share/observational-memory/observations.md` — recent compressed observations
 
-If this is a long-lived Codex session, ensure observations continue to be captured by periodic observers (or set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` before install, e.g. `OM_CODEX_OBSERVER_INTERVAL_MINUTES=5`).
+If this is a long-lived Codex session, ensure observations continue to be captured by periodic observers by setting `OM_CODEX_OBSERVER_INTERVAL_MINUTES` in your environment file (for example in `~/.config/observational-memory/env`, set `OM_CODEX_OBSERVER_INTERVAL_MINUTES=5`).
 You can run a manual checkpoint with `om observe --source codex`.
 
 These files are auto-maintained. Do not modify them directly.
@@ -625,9 +625,17 @@ def _codex_observer_interval_minutes(default: int = 15) -> int:
     try:
         interval = int(raw_interval)
     except ValueError:
+        click.echo(
+            f"Warning: invalid OM_CODEX_OBSERVER_INTERVAL_MINUTES={raw_interval!r}; using default {default}.",
+            err=True,
+        )
         return default
 
     if interval <= 0:
+        click.echo(
+            f"Warning: OM_CODEX_OBSERVER_INTERVAL_MINUTES must be >0; using default {default}.",
+            err=True,
+        )
         return default
     return min(interval, 59)
 

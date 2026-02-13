@@ -116,7 +116,11 @@ def observe_all_claude(config: Config | None = None, dry_run: bool = False) -> l
 
 def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> list[str]:
     """Scan all recent Codex sessions and run observer on each."""
-    from .transcripts.codex import find_recent_sessions, parse_transcript
+    from .transcripts.codex import (
+        find_recent_sessions,
+        line_offset_to_message_count,
+        parse_transcript,
+    )
 
     if config is None:
         config = Config()
@@ -135,11 +139,14 @@ def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> li
             continue
 
         if after_index and after_index > len(all_messages):
-            # Backward compatibility for legacy cursor values that might be based on
-            # line offsets from older parsers.
-            cursor[cursor_key] = len(all_messages)
+            # Backward compatibility: older cursor values may track raw line offsets.
+            # Convert to a message index from the first `after_index` raw lines to
+            # avoid skipping newly added messages after migration.
+            after_index = line_offset_to_message_count(path, after_index)
+            if after_index > len(all_messages):
+                after_index = len(all_messages)
+            cursor[cursor_key] = after_index
             config.save_cursor(cursor)
-            after_index = len(all_messages)
 
         messages = all_messages[after_index:]
         if not messages:
