@@ -199,33 +199,35 @@ esac
 
 mkdir -p "$MEM_DIR"
 
-if [[ "$is_force_event" == false ]]; then
-    if [[ "$is_checkpoint_event" == true ]]; then
-        case "$(printf '%s' "$DISABLE_CHECKPOINTS" | tr '[:upper:]' '[:lower:]')" in
-            1|true|yes|on)
-                exit 0
-                ;;
-        esac
-    fi
-
-    if [[ "$THROTTLE_SECONDS" -gt 0 ]]; then
-        now=$(date +%s)
-        last_message_count="$(state_message_count)"
-        last_observed_at="$(state_read_field "last_observed")"
-        transcript_messages="$(count_session_messages "$TRANSCRIPT")"
-
-        if should_skip_observer "$now" "$transcript_messages" "$last_message_count" "$last_observed_at"; then
-            # Keep cursor state updated so we resume from the latest known message position.
-            write_state "$now" "$transcript_messages" "skipped"
+# Early exit for disabled checkpoints (cheap check, no lock needed).
+if [[ "$is_force_event" == false ]] && [[ "$is_checkpoint_event" == true ]]; then
+    case "$(printf '%s' "$DISABLE_CHECKPOINTS" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on)
             exit 0
-        fi
-    fi
+            ;;
+    esac
 fi
 
+# Acquire lock BEFORE the throttle check so concurrent hooks cannot all pass
+# the throttle with stale state and then race to start duplicate observers.
 sanitized_transcript="${TRANSCRIPT//[\/:.]/_}"
 lock_path="$LOCK_DIR/$sanitized_transcript"
 if ! acquire_lock "$lock_path"; then
     exit 0
+fi
+
+# Throttle check (with lock held). Force events skip throttling entirely.
+if [[ "$is_force_event" == false ]] && [[ "$THROTTLE_SECONDS" -gt 0 ]]; then
+    now=$(date +%s)
+    last_message_count="$(state_message_count)"
+    last_observed_at="$(state_read_field "last_observed")"
+    transcript_messages="$(count_session_messages "$TRANSCRIPT")"
+
+    if should_skip_observer "$now" "$transcript_messages" "$last_message_count" "$last_observed_at"; then
+        write_state "$now" "$transcript_messages" "skipped"
+        rm -rf "$lock_path"
+        exit 0
+    fi
 fi
 
 now=$(date +%s)

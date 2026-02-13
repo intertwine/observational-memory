@@ -139,9 +139,11 @@ def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> li
             continue
 
         if after_index and after_index > len(all_messages):
-            # Backward compatibility: older Codex cursors stored JSONL line offsets.
-            # Convert the first N lines into a message index. If migration is
-            # ambiguous, fall back to 0 so we reprocess safely instead of skipping.
+            # Backward compatibility: older cursors tracked raw JSONL line offsets
+            # rather than parsed message counts. Convert by counting how many of the
+            # first N file lines are actual messages. If the converted index is still
+            # out of range (common when non-message records inflate line counts),
+            # fall back to 0 so we safely reprocess rather than skip messages.
             migrated_index = line_offset_to_message_count(path, after_index)
             if 0 <= migrated_index < len(all_messages):
                 after_index = migrated_index
