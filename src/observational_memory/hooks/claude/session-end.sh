@@ -14,10 +14,14 @@ fi
 MEM_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/observational-memory"
 STATE_FILE="$MEM_DIR/.session-observer-state.json"
 LOCK_DIR="$MEM_DIR/.session-observer-locks"
+LOCK_STALE_MINUTES="${OM_SESSION_OBSERVER_LOCK_STALE_MINUTES:-60}"
 INPUT=$(cat)
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 EVENT_NAME=$(echo "$INPUT" | jq -r '.hook_event_name // empty')
 DISABLE_CHECKPOINTS="${OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS:-0}"
+
+# STATE_FILE is hook-local checkpoint throttling metadata. It is separate from
+# the Python observer cursor file used for incremental transcript processing.
 
 if [[ -z "$TRANSCRIPT" ]] || [[ ! -f "$TRANSCRIPT" ]]; then
     exit 0
@@ -29,8 +33,42 @@ if ! [[ "$THROTTLE_SECONDS" =~ ^[0-9]+$ ]]; then
     THROTTLE_SECONDS=900
 fi
 
+if ! [[ "$LOCK_STALE_MINUTES" =~ ^[0-9]+$ ]]; then
+    LOCK_STALE_MINUTES=60
+fi
+
 count_session_messages() {
     local transcript_path=$1
+    local count=""
+
+    if jq empty "$transcript_path" >/dev/null 2>&1; then
+        count="$(jq -r '
+            def is_message:
+                (.type == "user")
+                or (.type == "assistant")
+                or (.role == "user")
+                or (.role == "assistant")
+                or ((.message | type) == "object"
+                    and ((.message.role == "user") or (.message.role == "assistant")));
+            if type == "array" then
+                [ .[] | select(type == "object") | select(is_message) ] | length
+            elif type == "object" then
+                if (.items | type) == "array" then
+                    [ .items[] | select(type == "object") | select(is_message) ] | length
+                else
+                    (if is_message then 1 else 0 end)
+                end
+            else
+                0
+            end
+        ' "$transcript_path" 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$count" ]] && [[ "$count" =~ ^[0-9]+$ ]]; then
+        echo "$count"
+        return
+    fi
+
     jq -R '
         fromjson? as $entry
         | if $entry == null then
@@ -39,6 +77,8 @@ count_session_messages() {
             1
         elif (($entry.message | type == "object")
             and (($entry.message.role == "user") or ($entry.message.role == "assistant"))) then
+            1
+        elif ($entry.role == "user" or $entry.role == "assistant") then
             1
         else
             empty
@@ -105,10 +145,23 @@ should_skip_observer() {
 acquire_lock() {
     local lock_path=$1
     mkdir -p "$LOCK_DIR"
-    if ! mkdir "$lock_path" 2>/dev/null; then
-        return 1
+    # Best-effort stale lock cleanup so interrupted hooks do not block forever.
+    if [[ "$LOCK_STALE_MINUTES" -gt 0 ]]; then
+        find "$LOCK_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +"$LOCK_STALE_MINUTES" -exec rm -rf {} + 2>/dev/null || true
     fi
-    return 0
+
+    if mkdir "$lock_path" 2>/dev/null; then
+        return 0
+    fi
+
+    if [[ "$LOCK_STALE_MINUTES" -gt 0 ]] && [[ -n "$(find "$lock_path" -prune -mmin +"$LOCK_STALE_MINUTES" -print -quit 2>/dev/null || true)" ]]; then
+        rm -rf "$lock_path" 2>/dev/null || true
+        if mkdir "$lock_path" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    return 1
 }
 
 # Find om command
@@ -147,7 +200,7 @@ esac
 mkdir -p "$MEM_DIR"
 
 if [[ "$is_force_event" == false ]]; then
-    if [[ "$is_checkpoint_event" == true ]] && [[ "$THROTTLE_SECONDS" -gt 0 ]]; then
+    if [[ "$is_checkpoint_event" == true ]]; then
         case "$(printf '%s' "$DISABLE_CHECKPOINTS" | tr '[:upper:]' '[:lower:]')" in
             1|true|yes|on)
                 exit 0
@@ -155,7 +208,7 @@ if [[ "$is_force_event" == false ]]; then
         esac
     fi
 
-    if [[ "$is_checkpoint_event" == true ]] || [[ "$THROTTLE_SECONDS" -gt 0 ]]; then
+    if [[ "$THROTTLE_SECONDS" -gt 0 ]]; then
         now=$(date +%s)
         last_message_count="$(state_message_count)"
         last_observed_at="$(state_read_field "last_observed")"
@@ -175,10 +228,13 @@ if ! acquire_lock "$lock_path"; then
     exit 0
 fi
 
+now=$(date +%s)
+transcript_messages="$(count_session_messages "$TRANSCRIPT")"
+write_state "$now" "$transcript_messages" "in_progress"
+
 # Run observer in background so we don't block session lifecycle.
 (
     trap 'rm -rf "$lock_path"' EXIT
-    now=$(date +%s)
     "$OM" observe --transcript "$TRANSCRIPT" --source claude
     observe_status=$?
 

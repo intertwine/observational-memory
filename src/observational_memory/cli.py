@@ -574,7 +574,7 @@ At the start of every session, read these files for context about the user:
 1. `~/.local/share/observational-memory/reflections.md` — long-term memory (identity, projects, preferences)
 2. `~/.local/share/observational-memory/observations.md` — recent compressed observations
 
-If this is a long-lived Codex session, ensure observations continue to be captured by periodic observers by setting `OM_CODEX_OBSERVER_INTERVAL_MINUTES` in your environment file (for example in `~/.config/observational-memory/env`, set `OM_CODEX_OBSERVER_INTERVAL_MINUTES=5`).
+If this is a long-lived Codex session, Codex observations run every 15 minutes by default. To adjust that interval, edit `~/.config/observational-memory/env` and set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` (for example: `OM_CODEX_OBSERVER_INTERVAL_MINUTES=5`).
 You can run a manual checkpoint with `om observe --source codex`.
 
 These files are auto-maintained. Do not modify them directly.
