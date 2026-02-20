@@ -1,8 +1,10 @@
-"""CLI entry points: om observe, om reflect, om backfill, om search, om context, om install, om status."""
+"""CLI entry points: om observe, om reflect, om backfill, om search, om context, om install, om status, om doctor."""
 
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 from pathlib import Path
 
 import click
@@ -22,7 +24,9 @@ def cli(ctx: click.Context) -> None:
 
 @cli.command()
 @click.option("--transcript", type=click.Path(exists=True, path_type=Path), help="Specific transcript file to process")
-@click.option("--source", type=click.Choice(["claude", "codex", "all"]), default="all", help="Which agent transcripts to process")
+@click.option(
+    "--source", type=click.Choice(["claude", "codex", "all"]), default="all", help="Which agent transcripts to process"
+)
 @click.option("--dry-run", is_flag=True, help="Print observations without writing")
 @click.pass_context
 def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: bool) -> None:
@@ -81,7 +85,9 @@ def reflect(ctx: click.Context, dry_run: bool) -> None:
 
 
 @cli.command()
-@click.option("--source", type=click.Choice(["claude", "codex", "all"]), default="all", help="Which transcripts to process")
+@click.option(
+    "--source", type=click.Choice(["claude", "codex", "all"]), default="all", help="Which transcripts to process"
+)
 @click.option("--dry-run", is_flag=True, help="Show what would be processed without writing")
 @click.option("--limit", type=int, default=0, help="Max transcripts to process (0 = unlimited)")
 @click.option("--reflect-every", type=int, default=20, help="Run reflector every N transcripts")
@@ -128,7 +134,7 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
     click.echo(f"Found {total} transcript(s), {pending} unprocessed")
 
     if dry_run:
-        for p, s in unprocessed[:limit or None]:
+        for p, s in unprocessed[: limit or None]:
             size = p.stat().st_size
             project = p.parent.name
             click.echo(f"  [{s}] {project}/{p.name} ({size:,} bytes)")
@@ -188,7 +194,7 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
 
     # Final reflector run
     if processed > 0:
-        click.echo(f"\n--- Final reflector run ---")
+        click.echo("\n--- Final reflector run ---")
         try:
             result = run_reflector(config)
             if result:
@@ -198,7 +204,9 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
         except Exception as e:
             click.echo(f"Reflector error: {e}")
 
-    click.echo(f"\nBackfill complete: {processed} transcript(s), {total_chars:,} chars of observations, {errors} error(s)")
+    click.echo(
+        f"\nBackfill complete: {processed} transcript(s), {total_chars:,} chars of observations, {errors} error(s)"
+    )
 
 
 @cli.command()
@@ -209,7 +217,8 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
 @click.pass_context
 def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: bool) -> None:
     """Search observations and reflections for relevant memories."""
-    from .search import get_backend, reindex as do_reindex
+    from .search import get_backend
+    from .search import reindex as do_reindex
 
     config = ctx.obj["config"]
 
@@ -230,6 +239,7 @@ def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: b
 
     if as_json:
         import json as json_mod
+
         output = [
             {
                 "rank": r.rank,
@@ -264,6 +274,7 @@ def context(ctx: click.Context) -> None:
     containing full reflections + search results (or full observations as fallback).
     """
     import json as json_mod
+
     from .search import get_backend
 
     config = ctx.obj["config"]
@@ -304,6 +315,94 @@ def context(ctx: click.Context) -> None:
         click.echo(json_mod.dumps(output))
 
 
+def _has_api_key() -> bool:
+    """Check if any LLM API key is configured (env file or environment)."""
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+
+
+def _validate_api_key_format(key: str, provider: str) -> bool:
+    """Basic format validation for API keys."""
+    if provider == "anthropic":
+        return key.startswith("sk-ant-") and len(key) > 20
+    elif provider == "openai":
+        return key.startswith("sk-") and len(key) > 20
+    return False
+
+
+def _prompt_api_key(config: Config) -> None:
+    """Interactively prompt for an API key if none is configured."""
+    if _has_api_key():
+        return
+
+    if not sys.stdin.isatty():
+        click.echo("Warning: No API key configured and stdin is not a TTY. Skipping API key setup.")
+        click.echo(f"  Add your key manually to: {config.env_file}")
+        return
+
+    click.echo("\nNo API key found. Let's set one up.")
+    provider = click.prompt(
+        "Which provider?",
+        type=click.Choice(["anthropic", "openai"], case_sensitive=False),
+        default="anthropic",
+    )
+
+    key = click.prompt(f"Paste your {provider} API key", hide_input=True)
+
+    if not key.strip():
+        click.echo("Empty key — skipping.")
+        return
+
+    key = key.strip()
+
+    # Validate format
+    if not _validate_api_key_format(key, provider):
+        click.echo(f"Warning: Key doesn't match expected {provider} format, but saving anyway.")
+
+    # Try a live validation
+    validated = False
+    try:
+        if provider == "anthropic":
+            from anthropic import Anthropic
+
+            client = Anthropic(api_key=key)
+            msg = [{"role": "user", "content": "hi"}]
+            client.messages.create(model="claude-sonnet-4-5-20250929", max_tokens=1, messages=msg)
+            validated = True
+        elif provider == "openai":
+            from openai import OpenAI
+
+            client = OpenAI(api_key=key)
+            msg = [{"role": "user", "content": "hi"}]
+            client.chat.completions.create(model="gpt-4o-mini", max_tokens=1, messages=msg)
+            validated = True
+    except Exception:
+        click.echo("Could not validate key via API (network issue?) — saving based on format check.")
+
+    if validated:
+        click.echo("API key validated successfully.")
+
+    # Write to env file
+    env_var = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+    env_file = config.env_file
+    if env_file.exists():
+        content = env_file.read_text()
+        # Replace commented-out line or append
+        if f"# {env_var}=" in content:
+            content = content.replace(f"# {env_var}=sk-ant-...", f"{env_var}={key}")
+            content = content.replace(f"# {env_var}=sk-...", f"{env_var}={key}")
+        else:
+            content = content.rstrip() + f"\n{env_var}={key}\n"
+        env_file.write_text(content)
+    else:
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(f"{env_var}={key}\n")
+        env_file.chmod(0o600)
+
+    # Also set in current process so subsequent steps see it
+    os.environ[env_var] = key
+    click.echo(f"Saved to {env_file}")
+
+
 @cli.command()
 @click.option("--claude", "targets", flag_value="claude", help="Install Claude Code hooks")
 @click.option("--codex", "targets", flag_value="codex", help="Install Codex AGENTS.md additions")
@@ -321,6 +420,9 @@ def install(ctx: click.Context, targets: str, cron: bool) -> None:
         click.echo(f"  Add your API key: {config.env_file}")
     else:
         click.echo(f"Env file: {config.env_file} (already exists)")
+
+    # Prompt for API key if none configured
+    _prompt_api_key(config)
 
     # Create initial memory files
     if not config.observations_path.exists():
@@ -374,6 +476,7 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
 
     if purge:
         import shutil
+
         if config.memory_dir.exists():
             shutil.rmtree(config.memory_dir)
             click.echo(f"Removed {config.memory_dir}")
@@ -426,8 +529,9 @@ def status(ctx: click.Context) -> None:
     if config.env_file.exists():
         # Count non-comment, non-empty lines (i.e. actual key assignments)
         env_lines = [
-            l.strip() for l in config.env_file.read_text().splitlines()
-            if l.strip() and not l.strip().startswith("#")
+            line.strip()
+            for line in config.env_file.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
         ]
         click.echo(f"  Exists: yes ({len(env_lines)} key(s) configured)")
     else:
@@ -435,19 +539,21 @@ def status(ctx: click.Context) -> None:
 
     # API keys (from env file + environment)
     import os
+
     click.echo(f"\nAnthropic API key: {'set' if os.environ.get('ANTHROPIC_API_KEY') else 'not set'}")
     click.echo(f"OpenAI API key: {'set' if os.environ.get('OPENAI_API_KEY') else 'not set'}")
 
     # Claude Code hooks
     if config.claude_settings_path.exists():
         import json
+
         settings = json.loads(config.claude_settings_path.read_text())
         hooks = settings.get("hooks", {})
         has_start = "SessionStart" in hooks
         has_end = "SessionEnd" in hooks
         has_prompt_submit = "UserPromptSubmit" in hooks
         has_precompact = "PreCompact" in hooks
-        click.echo(f"\nClaude Code hooks:")
+        click.echo("\nClaude Code hooks:")
         click.echo(f"  SessionStart: {'installed' if has_start else 'not installed'}")
         click.echo(f"  SessionEnd: {'installed' if has_end else 'not installed'}")
         click.echo(f"  UserPromptSubmit: {'installed' if has_prompt_submit else 'not installed'}")
@@ -464,7 +570,184 @@ def status(ctx: click.Context) -> None:
         click.echo(f"\nCodex: AGENTS.md not found at {config.codex_agents_md}")
 
 
+@cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.option("--validate-key", is_flag=True, help="Test API key with a live API call")
+@click.pass_context
+def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
+    """Run diagnostic checks on your observational memory installation."""
+    import json as json_mod
+    import subprocess
+
+    config = ctx.obj["config"]
+    results: list[dict] = []
+
+    def _check(name: str, status: str, detail: str, fix: str = "") -> None:
+        results.append({"name": name, "status": status, "detail": detail, "fix": fix})
+
+    # 1. Python version
+    ver = sys.version_info
+    ver_str = f"{ver.major}.{ver.minor}.{ver.micro}"
+    if ver >= (3, 11):
+        _check("Python version", "PASS", ver_str)
+    else:
+        _check("Python version", "FAIL", ver_str, fix="Upgrade to Python 3.11+")
+
+    # 2. om binary on PATH
+    om_path = shutil.which("om")
+    if om_path:
+        _check("om binary", "PASS", om_path)
+    else:
+        _check("om binary", "FAIL", "not found on PATH", fix="Run: uv tool install observational-memory")
+
+    # 3. API key present
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    if anthropic_key or openai_key:
+        providers = []
+        if anthropic_key:
+            providers.append("anthropic")
+        if openai_key:
+            providers.append("openai")
+        _check("API key present", "PASS", ", ".join(providers))
+    else:
+        _check(
+            "API key present",
+            "FAIL",
+            "neither ANTHROPIC_API_KEY nor OPENAI_API_KEY set",
+            fix=f"Add your key to {config.env_file}",
+        )
+
+    # 4. API key valid (opt-in)
+    if validate_key:
+        if anthropic_key:
+            try:
+                from anthropic import Anthropic
+
+                client = Anthropic(api_key=anthropic_key)
+                msg = [{"role": "user", "content": "hi"}]
+                client.messages.create(model="claude-sonnet-4-5-20250929", max_tokens=1, messages=msg)
+                _check("API key valid", "PASS", "anthropic key works")
+            except Exception as e:
+                _check("API key valid", "FAIL", f"anthropic: {e}", fix="Check your ANTHROPIC_API_KEY")
+        elif openai_key:
+            try:
+                from openai import OpenAI
+
+                client = OpenAI(api_key=openai_key)
+                msg = [{"role": "user", "content": "hi"}]
+                client.chat.completions.create(model="gpt-4o-mini", max_tokens=1, messages=msg)
+                _check("API key valid", "PASS", "openai key works")
+            except Exception as e:
+                _check("API key valid", "FAIL", f"openai: {e}", fix="Check your OPENAI_API_KEY")
+        else:
+            _check("API key valid", "FAIL", "no key to validate", fix=f"Add your key to {config.env_file}")
+
+    # 5. Memory directory
+    if config.memory_dir.exists():
+        _check("Memory directory", "PASS", str(config.memory_dir))
+    else:
+        _check("Memory directory", "FAIL", "missing", fix="Run: om install")
+
+    # 6. Env file permissions
+    if config.env_file.exists():
+        mode = config.env_file.stat().st_mode & 0o777
+        if mode == 0o600:
+            _check("Env file permissions", "PASS", "600 (owner-only)")
+        else:
+            _check("Env file permissions", "WARN", f"{oct(mode)} (too open)", fix=f"Run: chmod 600 {config.env_file}")
+    else:
+        _check("Env file permissions", "WARN", "env file not found", fix="Run: om install")
+
+    # 7. jq installed
+    if shutil.which("jq"):
+        _check("jq installed", "PASS", shutil.which("jq"))
+    else:
+        _check("jq installed", "FAIL", "not found", fix="Install with: brew install jq")
+
+    # 8. Claude hooks
+    if config.claude_settings_path.exists():
+        try:
+            settings = json_mod.loads(config.claude_settings_path.read_text())
+            hooks = settings.get("hooks", {})
+            expected = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact"]
+            present = [h for h in expected if h in hooks]
+            missing = [h for h in expected if h not in hooks]
+            if not missing:
+                _check("Claude hooks", "PASS", f"{len(present)}/4 hooks installed")
+            else:
+                _check("Claude hooks", "FAIL", f"missing: {', '.join(missing)}", fix="Run: om install --claude")
+        except Exception as e:
+            _check("Claude hooks", "FAIL", f"error reading settings: {e}", fix="Check ~/.claude/settings.json")
+    else:
+        _check("Claude hooks", "WARN", "settings.json not found", fix="Run: om install --claude")
+
+    # 9. Hook paths valid (only check hooks that look like file paths, not inline shell commands)
+    if config.claude_settings_path.exists():
+        try:
+            settings = json_mod.loads(config.claude_settings_path.read_text())
+            hooks = settings.get("hooks", {})
+            broken = []
+            for event_name, event_hooks in hooks.items():
+                for group in event_hooks:
+                    for hook in group.get("hooks", []):
+                        cmd = hook.get("command", "")
+                        # Only validate commands that look like file paths (start with / or ~),
+                        # skip inline shell commands
+                        if cmd and (cmd.startswith("/") or cmd.startswith("~")) and not Path(cmd).exists():
+                            broken.append(f"{event_name}: {cmd}")
+            if not broken:
+                _check("Hook paths valid", "PASS", "all hook commands exist")
+            else:
+                _check("Hook paths valid", "FAIL", f"broken: {', '.join(broken)}", fix="Run: om install --claude")
+        except Exception:
+            pass  # Already reported above
+
+    # 10. Cron jobs
+    try:
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and "om" in result.stdout:
+            om_lines = [
+                line for line in result.stdout.splitlines() if "om " in line and not line.strip().startswith("#")
+            ]
+            _check("Cron jobs", "PASS", f"{len(om_lines)} job(s) found")
+        else:
+            _check("Cron jobs", "WARN", "no observational-memory cron jobs found", fix="Run: om install")
+    except Exception:
+        _check("Cron jobs", "WARN", "could not read crontab")
+
+    # 11. Platform
+    if sys.platform == "win32":
+        _check("Platform", "WARN", "Windows — some features may not work")
+    else:
+        _check("Platform", "PASS", sys.platform)
+
+    # Output
+    if as_json:
+        click.echo(json_mod.dumps(results, indent=2))
+    else:
+        for r in results:
+            tag = r["status"]
+            if tag == "PASS":
+                prefix = click.style("[PASS]", fg="green")
+            elif tag == "WARN":
+                prefix = click.style("[WARN]", fg="yellow")
+            else:
+                prefix = click.style("[FAIL]", fg="red")
+            line = f"{prefix} {r['name']}: {r['detail']}"
+            if r["fix"]:
+                line += click.style(f" — {r['fix']}", fg="yellow")
+            click.echo(line)
+
+        # Summary
+        passes = sum(1 for r in results if r["status"] == "PASS")
+        warns = sum(1 for r in results if r["status"] == "WARN")
+        fails = sum(1 for r in results if r["status"] == "FAIL")
+        click.echo(f"\n{passes} passed, {warns} warnings, {fails} failures")
+
+
 # --- Claude Code hook installation ---
+
 
 def _install_claude_hooks(config: Config) -> None:
     """Add SessionStart and session checkpoint hooks to ~/.claude/settings.json."""
@@ -490,7 +773,7 @@ def _install_claude_hooks(config: Config) -> None:
                     "type": "command",
                     "command": str(session_start_hook),
                     "timeout": 5,
-                    "statusMessage": "Loading observational memory..."
+                    "statusMessage": "Loading observational memory...",
                 }
             ]
         }
@@ -498,44 +781,17 @@ def _install_claude_hooks(config: Config) -> None:
 
     # SessionEnd hook
     hooks["SessionEnd"] = [
-        {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": str(session_end_hook),
-                    "timeout": 60,
-                    "async": True
-                }
-            ]
-        }
+        {"hooks": [{"type": "command", "command": str(session_end_hook), "timeout": 60, "async": True}]}
     ]
 
     # UserPromptSubmit checkpoint hook
     hooks["UserPromptSubmit"] = [
-        {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": str(session_end_hook),
-                    "timeout": 5,
-                    "async": True
-                }
-            ]
-        }
+        {"hooks": [{"type": "command", "command": str(session_end_hook), "timeout": 5, "async": True}]}
     ]
 
     # PreCompact checkpoint hook
     hooks["PreCompact"] = [
-        {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": str(session_end_hook),
-                    "timeout": 5,
-                    "async": True
-                }
-            ]
-        }
+        {"hooks": [{"type": "command", "command": str(session_end_hook), "timeout": 5, "async": True}]}
     ]
 
     config.claude_settings_path.write_text(json.dumps(settings, indent=2) + "\n")
@@ -574,7 +830,9 @@ At the start of every session, read these files for context about the user:
 1. `~/.local/share/observational-memory/reflections.md` — long-term memory (identity, projects, preferences)
 2. `~/.local/share/observational-memory/observations.md` — recent compressed observations
 
-If this is a long-lived Codex session, Codex observations run every 15 minutes by default. To adjust that interval, edit `~/.config/observational-memory/env` and set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` (for example: `OM_CODEX_OBSERVER_INTERVAL_MINUTES=5`).
+If this is a long-lived Codex session, Codex observations run every 15 minutes by default.
+To adjust that interval, edit `~/.config/observational-memory/env` and set
+`OM_CODEX_OBSERVER_INTERVAL_MINUTES` (for example: `OM_CODEX_OBSERVER_INTERVAL_MINUTES=5`).
 You can run a manual checkpoint with `om observe --source codex`.
 
 These files are auto-maintained. Do not modify them directly.
@@ -611,6 +869,7 @@ def _uninstall_codex(config: Config) -> None:
 
     # Remove the OM block
     import re
+
     pattern = rf"\n*{re.escape(_CODEX_OM_MARKER)}.*?{re.escape(_CODEX_OM_MARKER)}\n*"
     content = re.sub(pattern, "\n", content, flags=re.DOTALL)
     agents_md.write_text(content.strip() + "\n" if content.strip() else "")
@@ -644,6 +903,7 @@ def _cron_every_minutes(minutes: int) -> str:
     if minutes <= 1:
         return "*"
     return f"*/{minutes}"
+
 
 def _install_cron(config: Config, targets: str) -> None:
     """Add cron jobs for observer and reflector."""
@@ -679,7 +939,7 @@ def _install_cron(config: Config, targets: str) -> None:
         existing = ""
 
     # Remove old OM cron lines
-    lines = [l for l in existing.splitlines() if "om observe" not in l and "om reflect" not in l]
+    lines = [line for line in existing.splitlines() if "om observe" not in line and "om reflect" not in line]
 
     lines.append("# --- observational-memory ---")
     lines.extend(jobs)
@@ -727,4 +987,5 @@ def _uninstall_cron() -> None:
 def _find_om_path() -> str | None:
     """Find the absolute path to the 'om' command."""
     import shutil
+
     return shutil.which("om")

@@ -1,5 +1,8 @@
 # Observational Memory
 
+[![PyPI version](https://img.shields.io/pypi/v/observational-memory.svg)](https://pypi.org/project/observational-memory/)
+[![CI](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml)
+
 **Cross-agent shared memory for Claude Code and Codex CLI — no RAG, no embeddings, no databases.**
 
 Two background processes (Observer + Reflector) compress your conversation history from multiple AI coding agents into a single shared long-term memory. Every agent reads it on startup and instantly knows about you, your projects, your preferences, and what happened in previous sessions — even sessions with a *different* agent.
@@ -65,33 +68,29 @@ Observational Memory fixes this. A single set of compressed memory files lives a
 ### Install
 
 ```bash
-# Clone and install
-git clone https://github.com/intertwine/observational-memory.git
-cd observational-memory
-uv tool install .
+# Install from PyPI
+uv tool install observational-memory
 
-# Or with pip
-pip install .
-```
-
-### Set up for both agents
-
-```bash
-# Install hooks, AGENTS.md additions, and cron jobs
-om install --both
-
-# Or just one agent
-om install --claude
-om install --codex
+# Set up hooks, API key, and cron
+om install
 ```
 
 ### Verify
 
 ```bash
-om status
+om doctor
 ```
 
 That's it. Your agents now share persistent, compressed memory.
+
+### Development Install
+
+```bash
+git clone https://github.com/intertwine/observational-memory.git
+cd observational-memory
+uv sync
+uv pip install -e ".[dev]"
+```
 
 ---
 
@@ -196,6 +195,11 @@ om uninstall [--claude|--codex|--both] [--purge]
 
 # Check status
 om status
+
+# Run diagnostics
+om doctor
+om doctor --json              # machine-readable output
+om doctor --validate-key      # test API key with a live call
 ```
 
 ---
@@ -348,16 +352,16 @@ Edit the prompts in `prompts/` to adjust:
 ## Testing
 
 ```bash
-# Install dev dependencies
+# Using make (recommended)
+make check          # lint + test
+make test           # tests only
+make lint           # linter only
+make format         # auto-format
+
+# Or directly with uv
 uv sync
-
-# Run tests
 uv run pytest
-
-# Run a specific test file
 uv run pytest tests/test_transcripts.py
-
-# Verbose output
 uv run pytest -v
 ```
 

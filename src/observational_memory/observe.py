@@ -9,7 +9,6 @@ from .config import Config
 from .llm import compress
 from .transcripts import Message
 
-
 OBSERVER_PROMPT_PATH = Path(__file__).parent / "prompts" / "observer.md"
 
 
@@ -81,6 +80,7 @@ def observe_claude_transcript(
     if result and not dry_run:
         # Update cursor to last message UUID — find it from the transcript
         import json
+
         last_uuid = None
         for line in reversed(transcript_path.read_text().splitlines()):
             if not line.strip():
@@ -166,9 +166,7 @@ def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> li
     return results
 
 
-def _chunk_messages(
-    messages: list[Message], chunk_size: int = 200
-) -> list[list[Message]]:
+def _chunk_messages(messages: list[Message], chunk_size: int = 200) -> list[list[Message]]:
     """Split a list of Message objects into chunks of at most *chunk_size*.
 
     Returns:
@@ -297,9 +295,7 @@ def _append_observations(new_observations: str, config: Config, *, skip_reindex:
     config.ensure_memory_dir()
     if config.observations_path.exists():
         existing = config.observations_path.read_text()
-        config.observations_path.write_text(
-            existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n"
-        )
+        config.observations_path.write_text(existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n")
     else:
         config.observations_path.write_text(new_observations.rstrip() + "\n")
     if not skip_reindex:
@@ -335,6 +331,7 @@ def _reindex_if_enabled(config: Config) -> None:
         return
     try:
         from .search import reindex
+
         reindex(config)
     except Exception:
         pass  # Never block observe/reflect on search failures
@@ -353,9 +350,7 @@ def _write_observations(new_observations: str, config: Config) -> None:
             config.observations_path.write_text(new_observations.rstrip() + "\n")
         else:
             # Append if the LLM only returned the new section
-            config.observations_path.write_text(
-                existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n"
-            )
+            config.observations_path.write_text(existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n")
     else:
         config.observations_path.write_text(new_observations.rstrip() + "\n")
     _reindex_if_enabled(config)

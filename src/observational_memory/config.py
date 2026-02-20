@@ -131,8 +131,7 @@ class Config:
         if os.environ.get("OPENAI_API_KEY"):
             return "openai"
         raise RuntimeError(
-            "No LLM API key found. Add your key to "
-            f"{self.env_file} or set ANTHROPIC_API_KEY / OPENAI_API_KEY."
+            f"No LLM API key found. Add your key to {self.env_file} or set ANTHROPIC_API_KEY / OPENAI_API_KEY."
         )
 
     # --- Cursor (bookmark) management ---

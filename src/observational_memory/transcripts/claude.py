@@ -51,12 +51,14 @@ def parse_transcript(path: Path, after_uuid: str | None = None) -> list[Message]
 
         content = _extract_content(msg)
         if content:
-            messages.append(Message(
-                role=role,
-                content=content,
-                timestamp=timestamp,
-                source="claude",
-            ))
+            messages.append(
+                Message(
+                    role=role,
+                    content=content,
+                    timestamp=timestamp,
+                    source="claude",
+                )
+            )
 
     return messages
 

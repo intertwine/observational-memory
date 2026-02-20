@@ -1,22 +1,17 @@
 """Tests for the pluggable search module."""
 
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-
 import pytest
 
 from observational_memory.config import Config
 from observational_memory.search import (
     Document,
     DocumentSource,
-    SearchResult,
     get_backend,
     reindex,
 )
-from observational_memory.search.parser import parse_observations, parse_reflections
 from observational_memory.search.bm25 import BM25Backend, _tokenize
 from observational_memory.search.none import NoneBackend
-
+from observational_memory.search.parser import parse_observations, parse_reflections
 
 # --- Fixtures ---
 
@@ -271,6 +266,7 @@ class TestGetBackend:
 
     def test_qmd(self, tmp_path):
         from observational_memory.search.qmd import QMDBackend
+
         config = Config(memory_dir=tmp_path)
         backend = get_backend("qmd", config)
         assert isinstance(backend, QMDBackend)
@@ -278,6 +274,7 @@ class TestGetBackend:
 
     def test_qmd_hybrid(self, tmp_path):
         from observational_memory.search.qmd import QMDBackend
+
         config = Config(memory_dir=tmp_path)
         backend = get_backend("qmd-hybrid", config)
         assert isinstance(backend, QMDBackend)

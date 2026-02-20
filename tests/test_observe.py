@@ -1,27 +1,56 @@
 """Tests for the observer module."""
 
-from pathlib import Path
 from unittest.mock import patch
 
 from observational_memory.config import Config
 from observational_memory.observe import (
+    _append_observations,
+    _chunk_messages,
+    _format_messages,
     run_observer,
     run_observer_backfill,
-    _format_messages,
-    _chunk_messages,
-    _append_observations,
 )
 from observational_memory.transcripts import Message
 
 
 def _sample_messages() -> list[Message]:
     return [
-        Message(role="user", content="Help me set up PostgreSQL for my project Atlas.", timestamp="2026-02-10T14:00:00Z", source="claude"),
-        Message(role="assistant", content="Sure! Let me help with PostgreSQL setup.", timestamp="2026-02-10T14:00:05Z", source="claude"),
-        Message(role="user", content="I prefer Postgres over SQLite for production.", timestamp="2026-02-10T14:05:00Z", source="claude"),
-        Message(role="assistant", content="Good choice. PostgreSQL handles concurrency much better.", timestamp="2026-02-10T14:05:05Z", source="claude"),
-        Message(role="user", content="My name is Alex, I'm a backend engineer.", timestamp="2026-02-10T14:10:00Z", source="claude"),
-        Message(role="assistant", content="Nice to meet you, Alex!", timestamp="2026-02-10T14:10:05Z", source="claude"),
+        Message(
+            role="user",
+            content="Help me set up PostgreSQL for my project Atlas.",
+            timestamp="2026-02-10T14:00:00Z",
+            source="claude",
+        ),
+        Message(
+            role="assistant",
+            content="Sure! Let me help with PostgreSQL setup.",
+            timestamp="2026-02-10T14:00:05Z",
+            source="claude",
+        ),
+        Message(
+            role="user",
+            content="I prefer Postgres over SQLite for production.",
+            timestamp="2026-02-10T14:05:00Z",
+            source="claude",
+        ),
+        Message(
+            role="assistant",
+            content="Good choice. PostgreSQL handles concurrency much better.",
+            timestamp="2026-02-10T14:05:05Z",
+            source="claude",
+        ),
+        Message(
+            role="user",
+            content="My name is Alex, I'm a backend engineer.",
+            timestamp="2026-02-10T14:10:00Z",
+            source="claude",
+        ),
+        Message(
+            role="assistant",
+            content="Nice to meet you, Alex!",
+            timestamp="2026-02-10T14:10:05Z",
+            source="claude",
+        ),
     ]
 
 

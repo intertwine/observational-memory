@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 
 
 class DocumentSource(Enum):
@@ -33,7 +32,7 @@ class SearchResult:
     rank: int
 
 
-def get_backend(backend_name: str, config) -> "backend.SearchBackend":
+def get_backend(backend_name: str, config):
     """Resolve a backend name to an instance."""
     if backend_name == "bm25":
         from .bm25 import BM25Backend
@@ -53,10 +52,7 @@ def get_backend(backend_name: str, config) -> "backend.SearchBackend":
 
         return NoneBackend()
     else:
-        raise ValueError(
-            f"Unknown search backend: {backend_name!r}. "
-            "Use 'bm25', 'qmd', 'qmd-hybrid', or 'none'."
-        )
+        raise ValueError(f"Unknown search backend: {backend_name!r}. Use 'bm25', 'qmd', 'qmd-hybrid', or 'none'.")
 
 
 def reindex(config) -> int:

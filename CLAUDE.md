@@ -5,11 +5,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Test
 
 ```bash
+# Makefile targets (preferred)
+make check              # lint + test (run before committing)
+make test               # tests only
+make lint               # ruff check + format check
+make format             # auto-format code
+make build              # build sdist + wheel
+make clean              # remove build artifacts
+make bump-version       # bump patch (BUMP=minor|major)
+make publish-test       # publish to TestPyPI
+make publish            # publish to PyPI (production)
+make install-dev        # editable install with dev deps
+make doctor             # run om doctor diagnostics
+
+# Direct commands
 uv sync                          # install deps
 uv run pytest                    # run all tests
 uv run pytest tests/test_transcripts.py  # single test file
 uv run pytest -v                 # verbose
 uv run om status                 # check local installation status
+uv run om doctor                 # run diagnostics
 ```
 
 ## Architecture
@@ -32,7 +47,7 @@ Transcripts (Claude JSONL / Codex sessions)
 - **`src/observational_memory/reflect.py`** — Reflector: reads observations + reflections, calls LLM to condense, writes `reflections.md`, trims old observations.
 - **`src/observational_memory/llm.py`** — Thin abstraction over Anthropic and OpenAI APIs. Auto-detects provider from env vars.
 - **`src/observational_memory/config.py`** — All paths, defaults, cursor management. Memory dir follows XDG spec. Search backend is configurable via `OM_SEARCH_BACKEND` env var.
-- **`src/observational_memory/cli.py`** — Click CLI (`om` command). Commands: observe, reflect, backfill, search, context, install, uninstall, status.
+- **`src/observational_memory/cli.py`** — Click CLI (`om` command). Commands: observe, reflect, backfill, search, context, install, uninstall, status, doctor.
 - **`src/observational_memory/search/`** — Pluggable search over memory files. BM25 backend (default, uses `rank-bm25`), QMD backend (optional, shells out to `qmd` CLI — `"qmd"` for keyword search, `"qmd-hybrid"` for hybrid BM25 + vector + LLM reranking), None backend (no-op). Parser splits observations by date, reflections by section. The `reindex()` orchestrator is called automatically after observe/reflect writes.
 
 ### Agent integration

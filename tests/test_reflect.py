@@ -1,17 +1,17 @@
 """Tests for the reflector module."""
 
-from unittest.mock import patch, call
+from unittest.mock import patch
 
 from observational_memory.config import Config
 from observational_memory.reflect import (
-    run_reflector,
-    _trim_old_observations,
-    _parse_last_reflected,
-    _filter_new_observations,
-    _extract_latest_observation_date,
-    _stamp_timestamps,
     _chunk_observations,
+    _extract_latest_observation_date,
+    _filter_new_observations,
+    _parse_last_reflected,
     _reflect_chunked,
+    _stamp_timestamps,
+    _trim_old_observations,
+    run_reflector,
 )
 
 
@@ -107,10 +107,7 @@ class TestParseLastReflected:
         assert _parse_last_reflected(reflections) == "2026-02-09"
 
     def test_extracts_date_with_time(self):
-        reflections = (
-            "# Reflections\n\n"
-            "*Last reflected: 2026-02-10 23:45 UTC*\n"
-        )
+        reflections = "# Reflections\n\n*Last reflected: 2026-02-10 23:45 UTC*\n"
         assert _parse_last_reflected(reflections) == "2026-02-10"
 
     def test_returns_none_when_missing(self):
@@ -167,12 +164,7 @@ class TestFilterNewObservations:
 
 class TestExtractLatestObservationDate:
     def test_finds_latest(self):
-        obs = (
-            "# Observations\n\n"
-            "## 2026-02-07\n\n- old\n\n"
-            "## 2026-02-10\n\n- new\n\n"
-            "## 2026-02-09\n\n- middle\n"
-        )
+        obs = "# Observations\n\n## 2026-02-07\n\n- old\n\n## 2026-02-10\n\n- new\n\n## 2026-02-09\n\n- middle\n"
         assert _extract_latest_observation_date(obs) == "2026-02-10"
 
     def test_single_date(self):
@@ -189,10 +181,7 @@ class TestExtractLatestObservationDate:
 class TestStampTimestamps:
     def test_replaces_existing_timestamps(self):
         reflections = (
-            "# Reflections\n\n"
-            "*Last updated: 2026-02-09 10:00 UTC*\n"
-            "*Last reflected: 2026-02-08*\n\n"
-            "## Core Identity\n"
+            "# Reflections\n\n*Last updated: 2026-02-09 10:00 UTC*\n*Last reflected: 2026-02-08*\n\n## Core Identity\n"
         )
         result = _stamp_timestamps(reflections, "2026-02-10 14:00 UTC", "2026-02-10")
         assert "*Last updated: 2026-02-10 14:00 UTC*" in result
@@ -201,11 +190,7 @@ class TestStampTimestamps:
         assert "2026-02-08" not in result
 
     def test_injects_reflected_when_only_updated_exists(self):
-        reflections = (
-            "# Reflections\n\n"
-            "*Last updated: 2026-02-09 10:00 UTC*\n\n"
-            "## Core Identity\n"
-        )
+        reflections = "# Reflections\n\n*Last updated: 2026-02-09 10:00 UTC*\n\n## Core Identity\n"
         result = _stamp_timestamps(reflections, "2026-02-10 14:00 UTC", "2026-02-10")
         assert "*Last updated: 2026-02-10 14:00 UTC*" in result
         assert "*Last reflected: 2026-02-10*" in result
@@ -284,11 +269,7 @@ class TestReflectChunked:
 
         # Build observations large enough to force 2 chunks
         big = "- 🔴 10:00 " + "x" * 50000 + "\n\n"
-        observations = (
-            "# Observations\n\n"
-            f"## 2026-02-07\n\n{big}"
-            f"## 2026-02-08\n\n{big}"
-        )
+        observations = f"# Observations\n\n## 2026-02-07\n\n{big}## 2026-02-08\n\n{big}"
 
         result = _reflect_chunked("system prompt", "existing reflections", observations, config)
 
@@ -305,11 +286,7 @@ class TestReflectChunked:
         ]
 
         big = "- 🔴 10:00 " + "x" * 50000 + "\n\n"
-        observations = (
-            "# Observations\n\n"
-            f"## 2026-02-07\n\n{big}"
-            f"## 2026-02-08\n\n{big}"
-        )
+        observations = f"# Observations\n\n## 2026-02-07\n\n{big}## 2026-02-08\n\n{big}"
 
         _reflect_chunked("system prompt", "", observations, config)
 
@@ -328,15 +305,11 @@ class TestRunReflectorTimestampIntegration:
     @patch("observational_memory.reflect.compress")
     def test_stamps_last_reflected_on_output(self, mock_compress, tmp_path):
         mock_compress.return_value = (
-            "# Reflections\n\n"
-            "*Last updated: 2026-02-10 00:00 UTC*\n\n"
-            "## Core Identity\n- Name: Test"
+            "# Reflections\n\n*Last updated: 2026-02-10 00:00 UTC*\n\n## Core Identity\n- Name: Test"
         )
         config = Config(memory_dir=tmp_path / "memory")
         config.ensure_memory_dir()
-        config.observations_path.write_text(
-            "# Observations\n\n## 2026-02-10\n\n- 🔴 14:00 Test obs\n"
-        )
+        config.observations_path.write_text("# Observations\n\n## 2026-02-10\n\n- 🔴 14:00 Test obs\n")
 
         result = run_reflector(config, dry_run=True)
         assert "*Last reflected: 2026-02-10*" in result
@@ -378,16 +351,10 @@ class TestRunReflectorTimestampIntegration:
         config = Config(memory_dir=tmp_path / "memory")
         config.ensure_memory_dir()
 
-        config.reflections_path.write_text(
-            "# Reflections\n\n"
-            "*Last reflected: 2026-02-10*\n\n"
-            "## Core Identity\n"
-        )
+        config.reflections_path.write_text("# Reflections\n\n*Last reflected: 2026-02-10*\n\n## Core Identity\n")
         # All observations are older than the reflected date
         config.observations_path.write_text(
-            "# Observations\n\n"
-            "## 2026-02-07\n\n- 🔴 14:00 Old\n\n"
-            "## 2026-02-08\n\n- 🔴 10:00 Also old\n"
+            "# Observations\n\n## 2026-02-07\n\n- 🔴 14:00 Old\n\n## 2026-02-08\n\n- 🔴 10:00 Also old\n"
         )
 
         result = run_reflector(config, dry_run=True)
@@ -401,9 +368,7 @@ class TestRunReflectorTimestampIntegration:
         config = Config(memory_dir=tmp_path / "memory")
         config.ensure_memory_dir()
         config.observations_path.write_text(
-            "# Observations\n\n"
-            "## 2026-02-07\n\n- 🔴 14:00 Day 1\n\n"
-            "## 2026-02-10\n\n- 🔴 22:00 Day 4\n"
+            "# Observations\n\n## 2026-02-07\n\n- 🔴 14:00 Day 1\n\n## 2026-02-10\n\n- 🔴 22:00 Day 4\n"
         )
 
         run_reflector(config, dry_run=True)

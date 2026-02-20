@@ -4,8 +4,10 @@ import time
 from pathlib import Path
 
 from observational_memory.transcripts.claude import (
-    parse_transcript as parse_claude,
     find_all_transcripts,
+)
+from observational_memory.transcripts.claude import (
+    parse_transcript as parse_claude,
 )
 from observational_memory.transcripts.codex import parse_transcript as parse_codex
 

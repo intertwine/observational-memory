@@ -8,10 +8,30 @@ from pathlib import Path
 
 from . import Document, SearchResult
 
-_STOPWORDS = frozenset({
-    "the", "a", "an", "is", "are", "was", "were", "in", "on", "at",
-    "to", "for", "of", "and", "or", "but", "not", "with", "by", "from",
-})
+_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "and",
+        "or",
+        "but",
+        "not",
+        "with",
+        "by",
+        "from",
+    }
+)
 
 
 def _tokenize(text: str) -> list[str]:

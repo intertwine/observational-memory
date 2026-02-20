@@ -46,9 +46,13 @@ class QMDBackend:
 
         result = subprocess.run(
             [
-                "qmd", self._mode, query,
-                "-c", self.COLLECTION_NAME,
-                "-n", str(limit),
+                "qmd",
+                self._mode,
+                query,
+                "-c",
+                self.COLLECTION_NAME,
+                "-n",
+                str(limit),
                 "--json",
             ],
             capture_output=True,
@@ -78,11 +82,7 @@ class QMDBackend:
                 content = hit.get("snippet", hit.get("content", ""))
 
             doc_id = stem.replace("_", ":", 1) if stem else ""
-            source = (
-                DocumentSource.OBSERVATIONS
-                if doc_id.startswith("obs:")
-                else DocumentSource.REFLECTIONS
-            )
+            source = DocumentSource.OBSERVATIONS if doc_id.startswith("obs:") else DocumentSource.REFLECTIONS
             results.append(
                 SearchResult(
                     document=Document(
@@ -113,9 +113,14 @@ class QMDBackend:
             return
         subprocess.run(
             [
-                "qmd", "collection", "add", str(self._docs_dir),
-                "--name", self.COLLECTION_NAME,
-                "--mask", "**/*.md",
+                "qmd",
+                "collection",
+                "add",
+                str(self._docs_dir),
+                "--name",
+                self.COLLECTION_NAME,
+                "--mask",
+                "**/*.md",
             ],
             capture_output=True,
             check=True,

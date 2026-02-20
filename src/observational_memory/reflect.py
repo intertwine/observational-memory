@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .config import Config
 from .llm import compress
-from pathlib import Path
-
 
 REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
 
@@ -20,13 +19,9 @@ _MAX_INPUT_TOKENS = 30_000
 _REFLECTOR_MAX_OUTPUT_TOKENS = 8192
 
 # Regex for the "Last reflected" timestamp line in reflections.md
-_LAST_REFLECTED_RE = re.compile(
-    r"^\*Last reflected:\s*(\d{4}-\d{2}-\d{2})\b.*\*$", re.MULTILINE
-)
+_LAST_REFLECTED_RE = re.compile(r"^\*Last reflected:\s*(\d{4}-\d{2}-\d{2})\b.*\*$", re.MULTILINE)
 # Regex for the "Last updated" timestamp line
-_LAST_UPDATED_RE = re.compile(
-    r"^\*Last updated:.*\*$", re.MULTILINE
-)
+_LAST_UPDATED_RE = re.compile(r"^\*Last updated:.*\*$", re.MULTILINE)
 
 
 def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | None:
@@ -94,21 +89,13 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     return result
 
 
-def _reflect_single(
-    system_prompt: str, reflections: str, observations: str, config: Config
-) -> str:
+def _reflect_single(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
     """Single-pass reflection for small observation sets."""
-    user_content = (
-        f"## Current reflections\n\n{reflections}\n\n"
-        f"---\n\n"
-        f"## Current observations\n\n{observations}"
-    )
+    user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n## Current observations\n\n{observations}"
     return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS)
 
 
-def _reflect_chunked(
-    system_prompt: str, reflections: str, observations: str, config: Config
-) -> str:
+def _reflect_chunked(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
     """Chunked reflection: split observations into date sections, fold each into reflections."""
     chunks = _chunk_observations(observations)
 
@@ -130,9 +117,7 @@ def _reflect_chunked(
             f"---\n\n"
             f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}"
         )
-        running_reflections = compress(
-            fold_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS
-        )
+        running_reflections = compress(fold_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS)
 
     return running_reflections
 
@@ -243,18 +228,14 @@ def _stamp_timestamps(reflections: str, updated: str, reflected: str) -> str:
     # If "Last reflected" wasn't in the LLM output, insert it after "Last updated"
     if not has_reflected:
         if has_updated or _LAST_UPDATED_RE.search(reflections):
-            reflections = _LAST_UPDATED_RE.sub(
-                f"{updated_line}\n{reflected_line}", reflections, count=1
-            )
+            reflections = _LAST_UPDATED_RE.sub(f"{updated_line}\n{reflected_line}", reflections, count=1)
         else:
             # No timestamp lines at all — insert after the title
             title_match = re.match(r"(#[^\n]*\n)", reflections)
             if title_match:
                 insert_pos = title_match.end()
                 reflections = (
-                    reflections[:insert_pos]
-                    + f"\n{updated_line}\n{reflected_line}\n"
-                    + reflections[insert_pos:]
+                    reflections[:insert_pos] + f"\n{updated_line}\n{reflected_line}\n" + reflections[insert_pos:]
                 )
 
     return reflections
@@ -266,6 +247,7 @@ def _reindex_if_enabled(config: Config) -> None:
         return
     try:
         from .search import reindex
+
         reindex(config)
     except Exception:
         pass  # Never block observe/reflect on search failures

@@ -143,12 +143,14 @@ def parse_transcript(path: Path, after_index: int | None = None) -> list[Message
             timestamp = entry.get("timestamp", entry.get("created_at", ""))
 
         if content:
-            messages.append(Message(
-                role=role,
-                content=content,
-                timestamp=timestamp,
-                source="codex",
-            ))
+            messages.append(
+                Message(
+                    role=role,
+                    content=content,
+                    timestamp=timestamp,
+                    source="codex",
+                )
+            )
 
     return messages
 
