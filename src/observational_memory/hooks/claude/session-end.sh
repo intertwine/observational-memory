@@ -39,51 +39,23 @@ fi
 
 count_session_messages() {
     local transcript_path=$1
-    local count=""
-
-    if jq empty "$transcript_path" >/dev/null 2>&1; then
-        count="$(jq -r '
-            def is_message:
-                (.type == "user")
-                or (.type == "assistant")
-                or (.role == "user")
-                or (.role == "assistant")
-                or ((.message | type) == "object"
-                    and ((.message.role == "user") or (.message.role == "assistant")));
-            if type == "array" then
-                [ .[] | select(type == "object") | select(is_message) ] | length
-            elif type == "object" then
-                if (.items | type) == "array" then
-                    [ .items[] | select(type == "object") | select(is_message) ] | length
-                else
-                    (if is_message then 1 else 0 end)
-                end
-            else
-                0
-            end
-        ' "$transcript_path" 2>/dev/null || true)"
-    fi
-
-    if [[ -n "$count" ]] && [[ "$count" =~ ^[0-9]+$ ]]; then
-        echo "$count"
-        return
-    fi
-
-    jq -R '
-        fromjson? as $entry
-        | if $entry == null then
-            empty
-        elif ($entry.type == "user" or $entry.type == "assistant") then
-            1
-        elif (($entry.message | type == "object")
-            and (($entry.message.role == "user") or ($entry.message.role == "assistant"))) then
-            1
-        elif ($entry.role == "user" or $entry.role == "assistant") then
-            1
-        else
-            empty
+    # Use jq -s (slurp) to normalise all formats into a single array:
+    #   JSONL  → [obj, obj, ...]          (already flat after slurp)
+    #   Array  → [[obj, obj, ...]]        (flatten(1) unwraps the outer layer)
+    #   Object with .items (Codex)        (special-cased below)
+    # flatten(1) leaves objects untouched so both cases converge to [obj, ...].
+    jq -s '
+        def is_message:
+            (.type == "user") or (.type == "assistant")
+            or (.role == "user") or (.role == "assistant")
+            or ((.message | type) == "object"
+                and ((.message.role == "user") or (.message.role == "assistant")));
+        if length == 1 and (.[0].items | type) == "array" then .[0].items
+        else flatten(1)
         end
-    ' "$transcript_path" | wc -l | tr -d " "
+        | map(select(type == "object" and is_message))
+        | length
+    ' "$transcript_path" 2>/dev/null || echo "0"
 }
 
 state_read_field() {
