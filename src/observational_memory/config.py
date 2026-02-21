@@ -21,10 +21,27 @@ ENV_FILE_TEMPLATE = """\
 # This file is sourced by om, its hooks, and its cron jobs.
 # It is NOT committed to any repo. Keep it private.
 #
-# Uncomment and set exactly one (or both — Anthropic is preferred when both exist):
-
+# LLM provider selection:
+# OM_LLM_PROVIDER=auto  # auto|anthropic|openai|anthropic-vertex|anthropic-bedrock
+#
+# Shared/default model for observer + reflector:
+# OM_LLM_MODEL=claude-sonnet-4-5-20250929
+#
+# Optional per-step model overrides:
+# OM_LLM_OBSERVER_MODEL=claude-sonnet-4-5-20250929
+# OM_LLM_REFLECTOR_MODEL=claude-sonnet-4-5-20250929
+#
+# Direct provider keys (legacy/default flow):
 # ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
+#
+# Anthropic on Google Vertex AI:
+# OM_VERTEX_PROJECT_ID=my-gcp-project
+# OM_VERTEX_REGION=us-east5
+#
+# Anthropic on Amazon Bedrock:
+# OM_BEDROCK_REGION=us-east-1
+# AWS_REGION=us-east-1
 
 # Search backend: bm25 (default), qmd, qmd-hybrid, none
 # OM_SEARCH_BACKEND=bm25
@@ -57,9 +74,21 @@ class Config:
     codex_home: Path = field(default_factory=lambda: Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")))
 
     # LLM settings
-    llm_provider: str | None = None  # "anthropic" | "openai" | None (auto-detect)
-    anthropic_model: str = "claude-sonnet-4-5-20250929"
-    openai_model: str = "gpt-4o-mini"
+    llm_provider: str = field(
+        default_factory=lambda: os.environ.get("OM_LLM_PROVIDER", "auto")
+    )  # auto|anthropic|openai|anthropic-vertex|anthropic-bedrock
+    llm_model: str | None = field(default_factory=lambda: os.environ.get("OM_LLM_MODEL"))
+    llm_observer_model: str | None = field(default_factory=lambda: os.environ.get("OM_LLM_OBSERVER_MODEL"))
+    llm_reflector_model: str | None = field(default_factory=lambda: os.environ.get("OM_LLM_REFLECTOR_MODEL"))
+    anthropic_model: str = field(
+        default_factory=lambda: os.environ.get("OM_ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+    )
+    openai_model: str = field(default_factory=lambda: os.environ.get("OM_OPENAI_MODEL", "gpt-4o-mini"))
+    vertex_project_id: str | None = field(default_factory=lambda: os.environ.get("OM_VERTEX_PROJECT_ID"))
+    vertex_region: str | None = field(default_factory=lambda: os.environ.get("OM_VERTEX_REGION"))
+    bedrock_region: str | None = field(
+        default_factory=lambda: os.environ.get("OM_BEDROCK_REGION") or os.environ.get("AWS_REGION")
+    )
 
     # Observer settings
     min_messages: int = 5  # skip if fewer new messages
@@ -122,17 +151,76 @@ class Config:
         self.env_file.chmod(0o600)
         return True
 
-    def detect_provider(self) -> str:
-        """Auto-detect which LLM API to use based on available keys."""
-        if self.llm_provider:
-            return self.llm_provider
+    def resolve_provider(self) -> str:
+        """Resolve active provider using explicit config or legacy key auto-detect."""
+        provider = (self.llm_provider or "auto").strip().lower()
+        allowed = {"auto", "anthropic", "openai", "anthropic-vertex", "anthropic-bedrock"}
+        if provider not in allowed:
+            raise RuntimeError(
+                "Invalid OM_LLM_PROVIDER="
+                f"{provider!r}. Use one of: auto, anthropic, openai, anthropic-vertex, anthropic-bedrock."
+            )
+
+        if provider != "auto":
+            return provider
+
         if os.environ.get("ANTHROPIC_API_KEY"):
             return "anthropic"
         if os.environ.get("OPENAI_API_KEY"):
             return "openai"
         raise RuntimeError(
-            f"No LLM API key found. Add your key to {self.env_file} or set ANTHROPIC_API_KEY / OPENAI_API_KEY."
+            "No LLM provider resolved. Either set OM_LLM_PROVIDER explicitly, "
+            "or add ANTHROPIC_API_KEY / OPENAI_API_KEY "
+            f"to {self.env_file}."
         )
+
+    def detect_provider(self) -> str:
+        """Backward-compatible alias for provider resolution."""
+        return self.resolve_provider()
+
+    def resolve_model(self, operation: str | None = None, provider: str | None = None) -> str:
+        """Resolve model for observer/reflector with override precedence."""
+        if operation == "observer" and self.llm_observer_model:
+            return self.llm_observer_model
+        if operation == "reflector" and self.llm_reflector_model:
+            return self.llm_reflector_model
+        if self.llm_model:
+            return self.llm_model
+
+        active_provider = provider or self.resolve_provider()
+        if active_provider == "openai":
+            return self.openai_model
+        if active_provider in {"anthropic", "anthropic-vertex", "anthropic-bedrock"}:
+            return self.anthropic_model
+        raise RuntimeError(f"Unknown provider for model resolution: {active_provider}")
+
+    def validate_provider_config(self, provider: str | None = None) -> str:
+        """Validate provider-specific required settings and return resolved provider."""
+        active_provider = provider or self.resolve_provider()
+
+        if active_provider == "anthropic":
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise RuntimeError("Provider 'anthropic' requires ANTHROPIC_API_KEY.")
+        elif active_provider == "openai":
+            if not os.environ.get("OPENAI_API_KEY"):
+                raise RuntimeError("Provider 'openai' requires OPENAI_API_KEY.")
+        elif active_provider == "anthropic-vertex":
+            missing = []
+            if not self.vertex_project_id:
+                missing.append("OM_VERTEX_PROJECT_ID")
+            if not self.vertex_region:
+                missing.append("OM_VERTEX_REGION")
+            if missing:
+                raise RuntimeError(
+                    "Provider 'anthropic-vertex' is missing required settings: " + ", ".join(missing) + "."
+                )
+        elif active_provider == "anthropic-bedrock":
+            if not self.bedrock_region:
+                raise RuntimeError("Provider 'anthropic-bedrock' requires OM_BEDROCK_REGION (or AWS_REGION).")
+        else:
+            raise RuntimeError(f"Unknown provider: {active_provider}")
+
+        return active_provider
 
     # --- Cursor (bookmark) management ---
 

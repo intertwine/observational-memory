@@ -3,17 +3,56 @@
 [![PyPI version](https://img.shields.io/pypi/v/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![CI](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml)
 
-**Cross-agent shared memory for Claude Code and Codex CLI — no RAG, no embeddings, no databases.**
+**Cross-agent shared memory for Claude Code and Codex CLI, with built-in search and no database setup.**
 
-Two background processes (Observer + Reflector) compress your conversation history from multiple AI coding agents into a single shared long-term memory. Every agent reads it on startup and instantly knows about you, your projects, your preferences, and what happened in previous sessions — even sessions with a _different_ agent.
+Observational Memory runs two background jobs (Observer and Reflector) that condense transcript history into shared markdown memory. On session start, it retrieves relevant context with a pluggable search layer: built-in BM25 by default, plus optional QMD and qmd-hybrid backends for stronger semantic recall.
 
 > Adapted from [Mastra's Observational Memory](https://mastra.ai/docs/memory/observational-memory) pattern. See the [OpenClaw version](https://github.com/intertwine/openclaw-observational-memory) for the original.
 
 ---
 
+## Quick start
+
+### Prerequisites
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- One LLM access path:
+  - Direct API key (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
+  - Google Vertex AI auth (ADC) for Anthropic on Vertex
+  - AWS credentials/profile/role for Anthropic on Bedrock
+- Claude Code and/or Codex CLI installed
+
+### Install
+
+```bash
+# Option A: Install from PyPI
+uv tool install observational-memory
+
+# Option A2: Install with enterprise provider dependencies
+uv tool install "observational-memory[enterprise]"
+
+# Option B (macOS): Install from Homebrew tap
+brew tap intertwine/tap
+brew install intertwine/tap/observational-memory
+
+# Set up hooks, LLM provider config, and cron
+om install
+```
+
+### Verify
+
+```bash
+om doctor
+```
+
+That's it. Your agents now share persistent, compressed memory.
+
+---
+
 ## Why
 
-You use Claude Code in one terminal and Codex CLI in another. Each session starts from scratch — no memory of who you are, what you're working on, or what you told the other agent five minutes ago.
+If you use Claude Code in one terminal and Codex CLI in another, context gets lost fast. Each session starts cold.
 
 Observational Memory fixes this. A single set of compressed memory files lives at `~/.local/share/observational-memory/` and is shared across all your agents:
 
@@ -31,75 +70,33 @@ Observational Memory fixes this. A single set of compressed memory files lives a
 
 ---
 
-## Quick Start
+## How it works
 
-### Prerequisites
+### Claude Code integration
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- An API key: `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
-- Claude Code and/or Codex CLI installed
+**SessionStart hook:** On session start, `om context` retrieves relevant observations (BM25/QMD backend) and injects them with full reflections via `additionalContext`. If search is unavailable, it falls back to the full file dump.
 
-### Install
+**SessionEnd hook:** When a session ends, the observer runs on that transcript and compresses it into observations.
 
-```bash
-# Option A: Install from PyPI
-uv tool install observational-memory
-
-# Option B (macOS): Install from Homebrew tap
-brew tap intertwine/tap
-brew install intertwine/tap/observational-memory
-
-# Set up hooks, API key, and cron
-om install
-```
-
-### Verify
-
-```bash
-om doctor
-```
-
-That's it. Your agents now share persistent, compressed memory.
-
-### Development Install
-
-```bash
-git clone https://github.com/intertwine/observational-memory.git
-cd observational-memory
-uv sync
-uv pip install -e ".[dev]"
-```
-
----
-
-## How It Works
-
-### Claude Code Integration
-
-**SessionStart hook** — When you start a Claude Code session, a hook runs `om context` which uses BM25 search to find the most relevant observations and injects them (plus full reflections) as context via `additionalContext`. Falls back to full file dump if search is unavailable.
-
-**SessionEnd hook** — When a session ends, a hook triggers the observer on the just-completed transcript. The observer calls an LLM to compress the conversation into observations.
-
-**UserPromptSubmit / PreCompact hooks** — Long-running sessions also send periodic checkpoint events during the session. These are throttled with `OM_SESSION_OBSERVER_INTERVAL_SECONDS` (default `900` seconds), so observations continue to be captured without observing after every prompt.
+**UserPromptSubmit / PreCompact hooks:** Long sessions also trigger periodic checkpoints. They are throttled by `OM_SESSION_OBSERVER_INTERVAL_SECONDS` (default `900`), so capture stays incremental without running on every prompt.
 
 To disable in-session checkpoints while keeping normal end-of-session capture, set:
 `OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS=1` in `~/.config/observational-memory/env`.
 
 All hooks are installed automatically to `~/.claude/settings.json`.
 
-### Codex CLI Integration
+### Codex CLI integration
 
-**AGENTS.md** — The installer adds instructions to `~/.codex/AGENTS.md` telling Codex to read the memory files at session start.
+**AGENTS.md:** The installer adds instructions to `~/.codex/AGENTS.md` so Codex reads memory files at session start.
 
-**Cron observer** — A cron job runs every 15 minutes, scanning `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`) and compressing it into observations.
+**Cron observer:** A cron job runs every 15 minutes, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations.
 
-### Reflector (Both)
+### Reflector (both)
 
 A daily cron job (04:00 UTC) runs the reflector, which:
 
 1. Reads the `Last reflected` timestamp from the existing reflections
-2. Filters observations to only those from that date onward (incremental — skips already-processed days)
+2. Filters observations to only those from that date onward (incremental; skips already-processed days)
 3. If the filtered observations fit in one LLM call (<30K tokens), processes them in a single pass
 4. If they're too large (e.g., after a backfill), automatically chunks by date section and folds each chunk into the reflections incrementally
 5. Merges, promotes (🟡→🔴), demotes, and archives entries
@@ -107,7 +104,7 @@ A daily cron job (04:00 UTC) runs the reflector, which:
 7. Writes the updated `reflections.md`
 8. Trims observations older than 7 days
 
-### Priority System
+### Priority system
 
 | Level | Meaning                | Examples                                    | Retention  |
 | ----- | ---------------------- | ------------------------------------------- | ---------- |
@@ -115,31 +112,64 @@ A daily cron job (04:00 UTC) runs the reflector, which:
 | 🟡    | Contextual             | Current tasks, in-progress work             | Days–weeks |
 | 🟢    | Minor / transient      | Greetings, routine checks                   | Hours      |
 
-### LLM Provider & API Keys
+### LLM providers and auth
 
-The observer and reflector call an LLM API to perform compression. Your API key is stored in a dedicated env file:
+The observer and reflector call an LLM API for compression.
+Provider and auth settings are stored in:
 
 ```bash
 ~/.config/observational-memory/env
 ```
 
-`om install` creates this file with `0600` permissions (owner-read/write only). Edit it to add your key:
+`om install` creates this file with `0600` permissions (owner-read/write only).
+It supports both interactive setup and non-interactive flags.
+
+Supported provider profiles:
+
+| Profile | `OM_LLM_PROVIDER` | Auth mode | Required settings |
+| --- | --- | --- | --- |
+| Direct Anthropic | `anthropic` | API key | `ANTHROPIC_API_KEY` |
+| Direct OpenAI | `openai` | API key | `OPENAI_API_KEY` |
+| Anthropic on Vertex | `anthropic-vertex` | Google ADC | `OM_VERTEX_PROJECT_ID`, `OM_VERTEX_REGION` |
+| Anthropic on Bedrock | `anthropic-bedrock` | AWS credential chain | `OM_BEDROCK_REGION` (or `AWS_REGION`) |
+| Legacy auto-detect | `auto` | API key | prefers `ANTHROPIC_API_KEY`, then `OPENAI_API_KEY` |
+
+The CLI, hooks, and cron jobs source this file automatically.
+You do not need to export keys in your shell profile.
+
+Model selection precedence:
+
+1. `OM_LLM_OBSERVER_MODEL` / `OM_LLM_REFLECTOR_MODEL`
+2. `OM_LLM_MODEL`
+3. Provider default (`claude-sonnet-4-5-20250929` for Anthropic profiles, `gpt-4o-mini` for OpenAI)
+
+Example direct key setup:
 
 ```bash
-# ~/.config/observational-memory/env
+OM_LLM_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-The CLI, hooks, and cron jobs all source this file automatically — no need to export keys in your shell profile.
+Example Vertex setup:
 
-- `ANTHROPIC_API_KEY` → uses Claude Sonnet (default)
-- `OPENAI_API_KEY` → uses GPT-4o-mini
-- Both set → prefers Anthropic
-- Environment variables override the env file
+```bash
+OM_LLM_PROVIDER=anthropic-vertex
+OM_VERTEX_PROJECT_ID=my-gcp-project
+OM_VERTEX_REGION=us-east5
+OM_LLM_MODEL=claude-sonnet-4-5-20250929
+```
+
+Example Bedrock setup:
+
+```bash
+OM_LLM_PROVIDER=anthropic-bedrock
+OM_BEDROCK_REGION=us-east-1
+OM_LLM_MODEL=anthropic.claude-sonnet-4-5-20250929-v1:0
+```
 
 ---
 
-## CLI Reference
+## CLI reference
 
 ```bash
 # Run observer on all recent transcripts
@@ -171,6 +201,8 @@ om reflect --dry-run
 
 # Install/uninstall
 om install [--claude|--codex|--both] [--no-cron]
+om install --provider anthropic-vertex --vertex-project-id my-proj --vertex-region us-east5 --llm-model claude-sonnet-4-5-20250929 --non-interactive
+om install --provider anthropic-bedrock --bedrock-region us-east-1 --llm-model anthropic.claude-sonnet-4-5-20250929-v1:0 --non-interactive
 om uninstall [--claude|--codex|--both] [--purge]
 
 # Check status
@@ -179,30 +211,30 @@ om status
 # Run diagnostics
 om doctor
 om doctor --json              # machine-readable output
-om doctor --validate-key      # test API key with a live call
+om doctor --validate-key      # test configured provider access with a live call
 ```
 
 ---
 
 ## Configuration
 
-### API Keys
+### LLM provider settings
 
 ```bash
 ~/.config/observational-memory/env
 ```
 
-Created by `om install` with `0600` permissions. Add your key:
+Created by `om install` with `0600` permissions. Typical values:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-api03-...
-# or
-OPENAI_API_KEY=sk-...
+OM_LLM_PROVIDER=anthropic
+OM_LLM_MODEL=claude-sonnet-4-5-20250929
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-This file is sourced by the `om` CLI, the Claude Code hooks, and the cron jobs. Keys already present in the environment take precedence.
+This file is sourced by the `om` CLI, the Claude Code hooks, and the cron jobs. Environment variables already present in your shell take precedence.
 
-### Memory Location
+### Memory location
 
 Default: `~/.local/share/observational-memory/`
 
@@ -213,7 +245,7 @@ export XDG_DATA_HOME=~/my-data
 # Memory will be at ~/my-data/observational-memory/
 ```
 
-### Cron Schedules
+### Cron schedules
 
 The installer sets up:
 
@@ -224,7 +256,7 @@ Set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` in `~/.config/observational-memory/env`
 
 Edit with `crontab -e` to adjust.
 
-### Search Backend
+### Search backend
 
 Memory search uses a pluggable backend architecture. Three backends are available:
 
@@ -235,7 +267,8 @@ Memory search uses a pluggable backend architecture. Three backends are availabl
 | `qmd-hybrid` | No      | [QMD CLI](https://github.com/tobi/qmd) + bun | Hybrid BM25 + vector embeddings + LLM reranking (~2GB models, auto-downloaded) |
 | `none`       | No      | Nothing                                      | Disables search entirely                                                       |
 
-The default `bm25` backend works out of the box. The index is rebuilt automatically after each observe/reflect run and stored at `~/.local/share/observational-memory/.search-index/bm25.pkl`.
+The default `bm25` backend works out of the box.
+The index is rebuilt automatically after each observe/reflect run and stored at `~/.local/share/observational-memory/.search-index/bm25.pkl`.
 
 To switch backends, set `OM_SEARCH_BACKEND` in your env file:
 
@@ -254,7 +287,7 @@ export OM_CODEX_OBSERVER_INTERVAL_MINUTES=10
 
 #### Using QMD (optional)
 
-[QMD](https://github.com/tobi/qmd) provides hybrid search (BM25 + vector embeddings + LLM reranking) for higher recall on semantic queries. All models run locally via node-llama-cpp — no extra API keys needed. To set it up:
+[QMD](https://github.com/tobi/qmd) provides hybrid search (BM25 + vector embeddings + LLM reranking) for better recall on semantic queries. Models run locally through node-llama-cpp, so no extra API key is required. To set it up:
 
 ```bash
 # 1. Install bun (QMD runtime)
@@ -270,19 +303,21 @@ bun install -g github:tobi/qmd
 om search --reindex "test query"
 ```
 
-When using QMD, memory documents are written as `.md` files under `~/.local/share/observational-memory/.qmd-docs/` and registered as a QMD collection named `observational-memory`. The `om search` and `om context` commands use whichever backend is configured.
+When using QMD, memory documents are written as `.md` files under `~/.local/share/observational-memory/.qmd-docs/`.
+They are registered as a QMD collection named `observational-memory`.
+`om search` and `om context` use whichever backend is configured.
 
 ### Tuning
 
 Edit the prompts in `prompts/` to adjust:
 
-- **What gets captured** — priority definitions in `observer.md`
-- **How aggressively things are merged** — rules in `reflector.md`
-- **Target size** — the reflector aims for 200–600 lines
+- **What gets captured:** priority definitions in `observer.md`
+- **How aggressively things are merged:** rules in `reflector.md`
+- **Target size:** the reflector aims for 200 to 600 lines
 
 ---
 
-## Example Output
+## Example output
 
 ### Observations (`observations.md`)
 
@@ -338,93 +373,11 @@ _Last reflected: 2026-02-10_
 
 ---
 
-## Testing
+## Contributing and maintainers
 
-```bash
-# Using make (recommended)
-make check          # lint + test
-make test           # tests only
-make lint           # linter only
-make format         # auto-format
-make brew-formula   # generate Homebrew formula from current PyPI release
-make brew-check     # audit Homebrew formula (requires brew)
+Contributor and maintainer instructions have moved to [`docs/MAINTAINERS.md`](docs/MAINTAINERS.md).
 
-# Or directly with uv
-uv sync
-uv run pytest
-uv run pytest tests/test_transcripts.py
-uv run pytest -v
-```
-
-## Homebrew Release (Maintainers)
-
-`observational-memory` is published to Homebrew via a tap formula (to avoid name collisions with short/common formula names). The executable remains `om`.
-The Homebrew release workflow also checks Homebrew/core to catch formula-name collisions before pushing tap updates.
-
-### One-time setup
-
-1. Create tap repo: `intertwine/homebrew-tap`
-2. Add repo variable in this repo: `HOMEBREW_TAP_REPO=intertwine/homebrew-tap`
-3. Add repo secret in this repo: `HOMEBREW_TAP_GITHUB_TOKEN` (token with push access to the tap repo)
-
-### Per-release flow
-
-1. Publish new version to PyPI.
-2. Tag the same version in git (for example `v0.1.2`) and push the tag.
-3. GitHub Actions workflow `.github/workflows/homebrew-release.yml` regenerates `packaging/homebrew/observational-memory.rb` from PyPI, updates `Formula/observational-memory.rb` in the tap repo, then commits and pushes the tap update.
-
-### Local maintainership commands
-
-```bash
-# Regenerate formula locally
-make brew-formula
-
-# Copy into a local tap checkout
-make release-homebrew HOMEBREW_TAP_DIR=../homebrew-tap
-```
-
----
-
-## File Structure
-
-```text
-observational-memory/
-├── README.md                         # This file
-├── LICENSE                           # MIT
-├── pyproject.toml                    # Python package config
-├── src/observational_memory/
-│   ├── cli.py                        # CLI: om observe, reflect, search, backfill, install, status
-│   ├── config.py                     # Paths, defaults, env detection
-│   ├── llm.py                        # LLM API abstraction (Anthropic + OpenAI)
-│   ├── observe.py                    # Observer logic
-│   ├── reflect.py                    # Reflector logic
-│   ├── transcripts/
-│   │   ├── claude.py                 # Claude Code JSONL parser
-│   │   └── codex.py                  # Codex CLI session parser
-│   ├── search/                       # Pluggable search over memory files
-│   │   ├── __init__.py               # Document model, factory, reindex orchestrator
-│   │   ├── backend.py                # SearchBackend Protocol
-│   │   ├── parser.py                 # Parse observations/reflections into Documents
-│   │   ├── bm25.py                   # BM25 backend (default, uses rank-bm25)
-│   │   ├── qmd.py                    # QMD backend (optional, shells out to qmd CLI)
-│   │   └── none.py                   # No-op backend
-│   ├── prompts/
-│   │   ├── observer.md               # Observer system prompt
-│   │   └── reflector.md              # Reflector system prompt
-│   └── hooks/claude/
-│       ├── session-start.sh          # Inject memory on session start (search-backed)
-│       └── session-end.sh            # Trigger observer on session end
-└── tests/
-    ├── test_transcripts.py           # Transcript parser tests
-    ├── test_observe.py               # Observer tests
-    ├── test_reflect.py               # Reflector tests
-    ├── test_search.py                # Search module tests
-    └── fixtures/                     # Sample transcripts
-```
-
----
-
-## How It Compares to the OpenClaw Version
+## How it compares to the OpenClaw version
 
 | Feature                | OpenClaw Version        | This Version                                |
 | ---------------------- | ----------------------- | ------------------------------------------- |
@@ -441,7 +394,7 @@ observational-memory/
 ## FAQ
 
 **Q: Does this replace RAG / vector search?**
-A: For personal context, yes. Observational memory is for remembering _about you_ — preferences, projects, communication style. RAG is for searching document collections. They're complementary. The built-in BM25 search handles keyword retrieval over your memories; for hybrid search (BM25 + vector embeddings + LLM reranking), use the `qmd-hybrid` backend with [QMD](https://github.com/tobi/qmd).
+A: For personal context, mostly yes. Observational memory tracks facts about you (preferences, projects, working style). RAG is still better for large document collections. Use BM25 for lightweight local retrieval, or `qmd-hybrid` with [QMD](https://github.com/tobi/qmd) if you want hybrid semantic search.
 
 **Q: How much does it cost?**
 A: The observer processes only new messages per session (~200–1K input tokens typical). The reflector runs once daily. Expect ~$0.05–0.20/day with Sonnet-class models.
@@ -453,7 +406,7 @@ A: Run `om install --claude`. The Codex integration is entirely optional.
 A: Yes. Both `observations.md` and `reflections.md` are plain markdown. The observer appends; the reflector overwrites. Manual edits to reflections will be preserved.
 
 **Q: What happens if the reflector runs on a huge backlog?**
-A: The reflector uses incremental updates — it reads the `Last reflected` timestamp from the existing reflections and only processes new observations since that date. If the timestamp is missing (first run or after a backfill), the reflector automatically chunks observations by date section and folds them incrementally, preventing the model from being overwhelmed. Output token budget is 8192 tokens (enough for the 200–600 line target).
+A: The reflector runs incrementally. It reads `Last reflected` from `reflections.md` and only processes newer observations. If that timestamp is missing (first run or after backfill), it chunks observations by date and folds them in batches so the model is not overloaded. Output budget is 8192 tokens, which is enough for the 200 to 600 line target.
 
 **Q: What about privacy?**
 A: Everything runs locally. Transcripts are processed by the LLM API you configure (Anthropic or OpenAI), subject to their data policies. No data is sent anywhere else.

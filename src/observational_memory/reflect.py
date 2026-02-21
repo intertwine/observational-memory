@@ -92,7 +92,7 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
 def _reflect_single(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
     """Single-pass reflection for small observation sets."""
     user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n## Current observations\n\n{observations}"
-    return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS)
+    return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
 
 
 def _reflect_chunked(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
@@ -117,7 +117,13 @@ def _reflect_chunked(system_prompt: str, reflections: str, observations: str, co
             f"---\n\n"
             f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}"
         )
-        running_reflections = compress(fold_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS)
+        running_reflections = compress(
+            fold_prompt,
+            user_content,
+            config,
+            max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS,
+            operation="reflector",
+        )
 
     return running_reflections
 

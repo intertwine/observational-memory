@@ -46,7 +46,7 @@ def run_observer(
         f"## New transcript to process\n\n{transcript_text}"
     )
 
-    result = compress(system_prompt, user_content, config)
+    result = compress(system_prompt, user_content, config, operation="observer")
 
     if dry_run:
         return result
@@ -209,7 +209,7 @@ def run_observer_backfill(
 
     user_content = f"## New transcript to process\n\n{transcript_text}"
 
-    result = compress(system_prompt, user_content, config)
+    result = compress(system_prompt, user_content, config, operation="observer")
 
     if dry_run:
         return result

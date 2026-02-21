@@ -315,9 +315,7 @@ def context(ctx: click.Context) -> None:
         click.echo(json_mod.dumps(output))
 
 
-def _has_api_key() -> bool:
-    """Check if any LLM API key is configured (env file or environment)."""
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+_SUPPORTED_PROVIDERS = ("anthropic", "openai", "anthropic-vertex", "anthropic-bedrock")
 
 
 def _validate_api_key_format(key: str, provider: str) -> bool:
@@ -329,78 +327,212 @@ def _validate_api_key_format(key: str, provider: str) -> bool:
     return False
 
 
-def _prompt_api_key(config: Config) -> None:
-    """Interactively prompt for an API key if none is configured."""
-    if _has_api_key():
+def _upsert_env_vars(env_file: Path, updates: dict[str, str | None]) -> None:
+    """Upsert env vars while preserving unrelated lines/comments."""
+    cleaned = {k: v for k, v in updates.items() if v is not None}
+    if not cleaned:
         return
 
-    if not sys.stdin.isatty():
-        click.echo("Warning: No API key configured and stdin is not a TTY. Skipping API key setup.")
-        click.echo(f"  Add your key manually to: {config.env_file}")
-        return
-
-    click.echo("\nNo API key found. Let's set one up.")
-    provider = click.prompt(
-        "Which provider?",
-        type=click.Choice(["anthropic", "openai"], case_sensitive=False),
-        default="anthropic",
-    )
-
-    key = click.prompt(f"Paste your {provider} API key", hide_input=True)
-
-    if not key.strip():
-        click.echo("Empty key — skipping.")
-        return
-
-    key = key.strip()
-
-    # Validate format
-    if not _validate_api_key_format(key, provider):
-        click.echo(f"Warning: Key doesn't match expected {provider} format, but saving anyway.")
-
-    # Try a live validation
-    validated = False
-    try:
-        if provider == "anthropic":
-            from anthropic import Anthropic
-
-            client = Anthropic(api_key=key)
-            msg = [{"role": "user", "content": "hi"}]
-            client.messages.create(model="claude-sonnet-4-5-20250929", max_tokens=1, messages=msg)
-            validated = True
-        elif provider == "openai":
-            from openai import OpenAI
-
-            client = OpenAI(api_key=key)
-            msg = [{"role": "user", "content": "hi"}]
-            client.chat.completions.create(model="gpt-4o-mini", max_tokens=1, messages=msg)
-            validated = True
-    except Exception:
-        click.echo("Could not validate key via API (network issue?) — saving based on format check.")
-
-    if validated:
-        click.echo("API key validated successfully.")
-
-    # Write to env file
-    env_var = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
-    env_file = config.env_file
     if env_file.exists():
-        content = env_file.read_text()
-        # Replace commented-out line or append
-        if f"# {env_var}=" in content:
-            content = content.replace(f"# {env_var}=sk-ant-...", f"{env_var}={key}")
-            content = content.replace(f"# {env_var}=sk-...", f"{env_var}={key}")
-        else:
-            content = content.rstrip() + f"\n{env_var}={key}\n"
-        env_file.write_text(content)
+        lines = env_file.read_text().splitlines()
     else:
         env_file.parent.mkdir(parents=True, exist_ok=True)
-        env_file.write_text(f"{env_var}={key}\n")
-        env_file.chmod(0o600)
+        lines = []
 
-    # Also set in current process so subsequent steps see it
-    os.environ[env_var] = key
-    click.echo(f"Saved to {env_file}")
+    seen: set[str] = set()
+    new_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        key = None
+        if "=" in stripped:
+            candidate = stripped
+            if candidate.startswith("#"):
+                candidate = candidate[1:].strip()
+            key = candidate.split("=", 1)[0].strip()
+
+        if key in cleaned:
+            if key not in seen:
+                new_lines.append(f"{key}={cleaned[key]}")
+                seen.add(key)
+            continue
+
+        new_lines.append(line)
+
+    for key, value in cleaned.items():
+        if key not in seen:
+            new_lines.append(f"{key}={value}")
+
+    env_file.write_text("\n".join(new_lines).rstrip() + "\n")
+    env_file.chmod(0o600)
+
+
+def _provider_api_key_env(provider: str) -> str | None:
+    if provider == "anthropic":
+        return "ANTHROPIC_API_KEY"
+    if provider == "openai":
+        return "OPENAI_API_KEY"
+    return None
+
+
+def _import_provider_sdk(provider: str) -> None:
+    if provider in {"anthropic", "anthropic-vertex", "anthropic-bedrock"}:
+        try:
+            import anthropic  # noqa: F401
+        except Exception as e:
+            raise RuntimeError(
+                "Missing 'anthropic' SDK. Install enterprise extras: uv tool install 'observational-memory[enterprise]'"
+            ) from e
+
+    if provider == "openai":
+        try:
+            import openai  # noqa: F401
+        except Exception as e:
+            raise RuntimeError("Missing 'openai' SDK. Install with: uv tool install observational-memory") from e
+
+    if provider == "anthropic-vertex":
+        try:
+            import google.auth  # noqa: F401
+        except Exception as e:
+            raise RuntimeError(
+                "Missing 'google-auth' dependency for Vertex. Install enterprise extras: "
+                "uv tool install 'observational-memory[enterprise]'"
+            ) from e
+
+    if provider == "anthropic-bedrock":
+        try:
+            import boto3  # noqa: F401
+        except Exception as e:
+            raise RuntimeError(
+                "Missing 'boto3' dependency for Bedrock. Install enterprise extras: "
+                "uv tool install 'observational-memory[enterprise]'"
+            ) from e
+
+
+def _validate_llm_access(config: Config) -> str:
+    from .llm import compress
+
+    provider = config.validate_provider_config()
+    compress(
+        "You are a health check. Reply with OK.",
+        "Reply with exactly: OK",
+        config,
+        max_tokens=8,
+        operation="observer",
+    )
+    return provider
+
+
+def _configure_llm(
+    config: Config,
+    provider: str | None,
+    llm_model: str | None,
+    vertex_project_id: str | None,
+    vertex_region: str | None,
+    bedrock_region: str | None,
+    non_interactive: bool,
+) -> None:
+    """Configure provider/model/auth settings for install."""
+    selected = provider.lower() if provider else None
+    if selected and selected not in _SUPPORTED_PROVIDERS:
+        raise click.ClickException(f"Unsupported provider '{provider}'.")
+
+    if selected is None:
+        if non_interactive:
+            try:
+                selected = config.resolve_provider()
+            except RuntimeError as e:
+                raise click.ClickException(
+                    "No provider configured. Use --provider and provider-specific flags in non-interactive mode."
+                ) from e
+        else:
+            default_provider = "anthropic"
+            try:
+                default_provider = config.resolve_provider()
+            except RuntimeError:
+                pass
+            selected = click.prompt(
+                "Which provider?",
+                type=click.Choice(list(_SUPPORTED_PROVIDERS), case_sensitive=False),
+                default=default_provider,
+            ).lower()
+
+    updates: dict[str, str | None] = {"OM_LLM_PROVIDER": selected}
+
+    model = llm_model
+    if not model and not non_interactive:
+        current = config.llm_model or config.resolve_model(provider=selected)
+        model = click.prompt("Model", default=current).strip()
+    if model:
+        updates["OM_LLM_MODEL"] = model
+
+    if selected in {"anthropic", "openai"}:
+        env_var = _provider_api_key_env(selected)
+        assert env_var is not None
+        existing = os.environ.get(env_var)
+        if not existing:
+            if non_interactive:
+                raise click.ClickException(
+                    f"Provider '{selected}' requires {env_var}. Set it in env "
+                    f"or {config.env_file} before --non-interactive install."
+                )
+            key = click.prompt(f"Paste your {selected} API key", hide_input=True).strip()
+            if key:
+                if not _validate_api_key_format(key, selected):
+                    click.echo(f"Warning: key doesn't match expected {selected} format, saving anyway.")
+                updates[env_var] = key
+                os.environ[env_var] = key
+
+        if not non_interactive and click.confirm("Validate LLM access now?", default=False):
+            trial = Config(
+                llm_provider=selected,
+                llm_model=updates.get("OM_LLM_MODEL") or config.llm_model,
+                anthropic_model=config.anthropic_model,
+                openai_model=config.openai_model,
+                vertex_project_id=config.vertex_project_id,
+                vertex_region=config.vertex_region,
+                bedrock_region=config.bedrock_region,
+                env_file=config.env_file,
+            )
+            try:
+                _validate_llm_access(trial)
+                click.echo("LLM access validated.")
+            except Exception as e:
+                click.echo(f"Warning: LLM access validation failed: {e}")
+
+    elif selected == "anthropic-vertex":
+        project = vertex_project_id or config.vertex_project_id
+        region = vertex_region or config.vertex_region
+        if not project and not non_interactive:
+            project = click.prompt("Vertex project ID").strip()
+        if not region and not non_interactive:
+            region = click.prompt("Vertex region", default="us-east5").strip()
+        if not project or not region:
+            raise click.ClickException(
+                "Provider 'anthropic-vertex' requires --vertex-project-id and --vertex-region (or existing env values)."
+            )
+        updates["OM_VERTEX_PROJECT_ID"] = project
+        updates["OM_VERTEX_REGION"] = region
+        os.environ["OM_VERTEX_PROJECT_ID"] = project
+        os.environ["OM_VERTEX_REGION"] = region
+
+    elif selected == "anthropic-bedrock":
+        region = bedrock_region or config.bedrock_region or os.environ.get("AWS_REGION")
+        if not region and not non_interactive:
+            region = click.prompt("Bedrock region", default="us-east-1").strip()
+        if not region:
+            raise click.ClickException(
+                "Provider 'anthropic-bedrock' requires --bedrock-region (or OM_BEDROCK_REGION/AWS_REGION)."
+            )
+        updates["OM_BEDROCK_REGION"] = region
+        os.environ["OM_BEDROCK_REGION"] = region
+
+    updates["OM_LLM_PROVIDER"] = selected
+    if "OM_LLM_MODEL" in updates:
+        os.environ["OM_LLM_MODEL"] = updates["OM_LLM_MODEL"] or ""
+    os.environ["OM_LLM_PROVIDER"] = selected
+
+    _upsert_env_vars(config.env_file, updates)
+    click.echo(f"Configured LLM provider '{selected}' in {config.env_file}")
 
 
 @cli.command()
@@ -408,21 +540,48 @@ def _prompt_api_key(config: Config) -> None:
 @click.option("--codex", "targets", flag_value="codex", help="Install Codex AGENTS.md additions")
 @click.option("--both", "targets", flag_value="both", default=True, help="Install both (default)")
 @click.option("--cron/--no-cron", default=True, help="Set up cron jobs")
+@click.option(
+    "--provider",
+    type=click.Choice(list(_SUPPORTED_PROVIDERS), case_sensitive=False),
+    help="LLM provider profile (anthropic, openai, anthropic-vertex, anthropic-bedrock)",
+)
+@click.option("--llm-model", help="Shared model name for observer + reflector")
+@click.option("--vertex-project-id", help="GCP project ID for anthropic-vertex")
+@click.option("--vertex-region", help="GCP region for anthropic-vertex (for example: us-east5)")
+@click.option("--bedrock-region", help="AWS region for anthropic-bedrock (for example: us-east-1)")
+@click.option("--non-interactive", is_flag=True, help="Do not prompt; require all needed config via flags/env")
 @click.pass_context
-def install(ctx: click.Context, targets: str, cron: bool) -> None:
+def install(
+    ctx: click.Context,
+    targets: str,
+    cron: bool,
+    provider: str | None,
+    llm_model: str | None,
+    vertex_project_id: str | None,
+    vertex_region: str | None,
+    bedrock_region: str | None,
+    non_interactive: bool,
+) -> None:
     """Set up observational memory for Claude Code and/or Codex CLI."""
     config = ctx.obj["config"]
     config.ensure_memory_dir()
 
-    # Create env file for API keys
+    # Create env file for provider/auth config
     if config.ensure_env_file():
         click.echo(f"Created {config.env_file}")
-        click.echo(f"  Add your API key: {config.env_file}")
+        click.echo(f"  Add your LLM provider settings: {config.env_file}")
     else:
         click.echo(f"Env file: {config.env_file} (already exists)")
 
-    # Prompt for API key if none configured
-    _prompt_api_key(config)
+    _configure_llm(
+        config,
+        provider=provider,
+        llm_model=llm_model,
+        vertex_project_id=vertex_project_id,
+        vertex_region=vertex_region,
+        bedrock_region=bedrock_region,
+        non_interactive=non_interactive,
+    )
 
     # Create initial memory files
     if not config.observations_path.exists():
@@ -537,11 +696,26 @@ def status(ctx: click.Context) -> None:
     else:
         click.echo("  Exists: no (run 'om install' to create)")
 
-    # API keys (from env file + environment)
-    import os
+    # LLM provider/model status
+    click.echo("\nLLM:")
+    try:
+        provider = config.resolve_provider()
+        click.echo(f"  Provider: {provider}")
+        click.echo(f"  Observer model: {config.resolve_model(operation='observer', provider=provider)}")
+        click.echo(f"  Reflector model: {config.resolve_model(operation='reflector', provider=provider)}")
+    except RuntimeError as e:
+        click.echo(f"  Provider: unresolved ({e})")
 
-    click.echo(f"\nAnthropic API key: {'set' if os.environ.get('ANTHROPIC_API_KEY') else 'not set'}")
-    click.echo(f"OpenAI API key: {'set' if os.environ.get('OPENAI_API_KEY') else 'not set'}")
+    click.echo(f"  Anthropic API key: {'set' if os.environ.get('ANTHROPIC_API_KEY') else 'not set'}")
+    click.echo(f"  OpenAI API key: {'set' if os.environ.get('OPENAI_API_KEY') else 'not set'}")
+    click.echo(f"  Vertex project: {config.vertex_project_id or 'not set'}")
+    click.echo(f"  Vertex region: {config.vertex_region or 'not set'}")
+    click.echo(f"  Bedrock region: {config.bedrock_region or os.environ.get('AWS_REGION') or 'not set'}")
+
+    if config.llm_provider == "anthropic-vertex":
+        click.echo("  Auth mode: Google ADC (application default credentials)")
+    elif config.llm_provider == "anthropic-bedrock":
+        click.echo("  Auth mode: AWS credential chain (profile/role/env)")
 
     # Claude Code hooks
     if config.claude_settings_path.exists():
@@ -572,7 +746,7 @@ def status(ctx: click.Context) -> None:
 
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
-@click.option("--validate-key", is_flag=True, help="Test API key with a live API call")
+@click.option("--validate-key", is_flag=True, help="Test configured LLM access with a live API call")
 @click.pass_context
 def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     """Run diagnostic checks on your observational memory installation."""
@@ -600,56 +774,52 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("om binary", "FAIL", "not found on PATH", fix="Run: uv tool install observational-memory")
 
-    # 3. API key present
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    if anthropic_key or openai_key:
-        providers = []
-        if anthropic_key:
-            providers.append("anthropic")
-        if openai_key:
-            providers.append("openai")
-        _check("API key present", "PASS", ", ".join(providers))
+    # 3. Provider config
+    resolved_provider: str | None = None
+    try:
+        resolved_provider = config.validate_provider_config()
+        _check("LLM provider config", "PASS", resolved_provider)
+    except Exception as e:
+        _check("LLM provider config", "FAIL", str(e), fix="Run: om install --provider <provider>")
+
+    # 4. Provider SDK dependencies
+    if resolved_provider:
+        try:
+            _import_provider_sdk(resolved_provider)
+            _check("LLM SDK dependencies", "PASS", f"{resolved_provider} dependencies available")
+        except Exception as e:
+            _check(
+                "LLM SDK dependencies",
+                "FAIL",
+                str(e),
+                fix="Install enterprise extras if needed: uv tool install 'observational-memory[enterprise]'",
+            )
     else:
-        _check(
-            "API key present",
-            "FAIL",
-            "neither ANTHROPIC_API_KEY nor OPENAI_API_KEY set",
-            fix=f"Add your key to {config.env_file}",
-        )
+        _check("LLM SDK dependencies", "WARN", "skipped (provider not configured)")
 
-    # 4. API key valid (opt-in)
+    # 5. Validate configured access (opt-in)
     if validate_key:
-        if anthropic_key:
-            try:
-                from anthropic import Anthropic
-
-                client = Anthropic(api_key=anthropic_key)
-                msg = [{"role": "user", "content": "hi"}]
-                client.messages.create(model="claude-sonnet-4-5-20250929", max_tokens=1, messages=msg)
-                _check("API key valid", "PASS", "anthropic key works")
-            except Exception as e:
-                _check("API key valid", "FAIL", f"anthropic: {e}", fix="Check your ANTHROPIC_API_KEY")
-        elif openai_key:
-            try:
-                from openai import OpenAI
-
-                client = OpenAI(api_key=openai_key)
-                msg = [{"role": "user", "content": "hi"}]
-                client.chat.completions.create(model="gpt-4o-mini", max_tokens=1, messages=msg)
-                _check("API key valid", "PASS", "openai key works")
-            except Exception as e:
-                _check("API key valid", "FAIL", f"openai: {e}", fix="Check your OPENAI_API_KEY")
+        if not resolved_provider:
+            _check(
+                "Configured LLM access",
+                "FAIL",
+                "no provider configured",
+                fix="Run: om install --provider <provider>",
+            )
         else:
-            _check("API key valid", "FAIL", "no key to validate", fix=f"Add your key to {config.env_file}")
+            try:
+                provider = _validate_llm_access(config)
+                _check("Configured LLM access", "PASS", f"{provider} call succeeded")
+            except Exception as e:
+                _check("Configured LLM access", "FAIL", str(e), fix="Check provider auth/config and retry")
 
-    # 5. Memory directory
+    # 6. Memory directory
     if config.memory_dir.exists():
         _check("Memory directory", "PASS", str(config.memory_dir))
     else:
         _check("Memory directory", "FAIL", "missing", fix="Run: om install")
 
-    # 6. Env file permissions
+    # 7. Env file permissions
     if config.env_file.exists():
         mode = config.env_file.stat().st_mode & 0o777
         if mode == 0o600:
@@ -659,13 +829,13 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Env file permissions", "WARN", "env file not found", fix="Run: om install")
 
-    # 7. jq installed
+    # 8. jq installed
     if shutil.which("jq"):
         _check("jq installed", "PASS", shutil.which("jq"))
     else:
         _check("jq installed", "FAIL", "not found", fix="Install with: brew install jq")
 
-    # 8. Claude hooks
+    # 9. Claude hooks
     if config.claude_settings_path.exists():
         try:
             settings = json_mod.loads(config.claude_settings_path.read_text())
@@ -682,7 +852,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Claude hooks", "WARN", "settings.json not found", fix="Run: om install --claude")
 
-    # 9. Hook paths valid (only check hooks that look like file paths, not inline shell commands)
+    # 10. Hook paths valid (only check hooks that look like file paths, not inline shell commands)
     if config.claude_settings_path.exists():
         try:
             settings = json_mod.loads(config.claude_settings_path.read_text())
@@ -703,7 +873,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         except Exception:
             pass  # Already reported above
 
-    # 10. Cron jobs
+    # 11. Cron jobs
     try:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5)
         if result.returncode == 0 and "om" in result.stdout:
@@ -716,7 +886,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     except Exception:
         _check("Cron jobs", "WARN", "could not read crontab")
 
-    # 11. Platform
+    # 12. Platform
     if sys.platform == "win32":
         _check("Platform", "WARN", "Windows — some features may not work")
     else:

@@ -2,7 +2,28 @@
 
 import os
 
+import pytest
+
 from observational_memory.config import Config
+
+
+@pytest.fixture(autouse=True)
+def clear_llm_env(monkeypatch):
+    for key in [
+        "OM_LLM_PROVIDER",
+        "OM_LLM_MODEL",
+        "OM_LLM_OBSERVER_MODEL",
+        "OM_LLM_REFLECTOR_MODEL",
+        "OM_ANTHROPIC_MODEL",
+        "OM_OPENAI_MODEL",
+        "OM_VERTEX_PROJECT_ID",
+        "OM_VERTEX_REGION",
+        "OM_BEDROCK_REGION",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "AWS_REGION",
+    ]:
+        monkeypatch.delenv(key, raising=False)
 
 
 class TestEnvFile:
@@ -99,4 +120,73 @@ class TestDetectProvider:
             config.detect_provider()
             assert False, "Should have raised"
         except RuntimeError as e:
-            assert "env" in str(e).lower()
+            assert "provider" in str(e).lower()
+
+    def test_explicit_vertex_provider(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = Config(env_file=tmp_path / "env", llm_provider="anthropic-vertex")
+        assert config.resolve_provider() == "anthropic-vertex"
+
+    def test_explicit_bedrock_provider(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = Config(env_file=tmp_path / "env", llm_provider="anthropic-bedrock")
+        assert config.resolve_provider() == "anthropic-bedrock"
+
+    def test_invalid_provider_value(self, tmp_path):
+        config = Config(env_file=tmp_path / "env", llm_provider="bad-provider")
+        try:
+            config.resolve_provider()
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert "invalid om_llm_provider" in str(e).lower()
+
+
+class TestModelResolution:
+    def test_operation_override_takes_precedence(self, tmp_path):
+        config = Config(
+            env_file=tmp_path / "env",
+            llm_provider="anthropic",
+            llm_model="shared-model",
+            llm_observer_model="observer-model",
+            llm_reflector_model="reflector-model",
+        )
+        assert config.resolve_model("observer", provider="anthropic") == "observer-model"
+        assert config.resolve_model("reflector", provider="anthropic") == "reflector-model"
+
+    def test_shared_model_used_when_operation_override_missing(self, tmp_path):
+        config = Config(env_file=tmp_path / "env", llm_provider="anthropic", llm_model="shared-model")
+        assert config.resolve_model("observer", provider="anthropic") == "shared-model"
+        assert config.resolve_model("reflector", provider="anthropic") == "shared-model"
+
+    def test_provider_defaults_when_no_shared_model(self, tmp_path):
+        config = Config(env_file=tmp_path / "env", llm_provider="openai")
+        assert config.resolve_model("observer", provider="openai") == "gpt-4o-mini"
+        config2 = Config(env_file=tmp_path / "env", llm_provider="anthropic-bedrock")
+        assert config2.resolve_model("observer", provider="anthropic-bedrock") == "claude-sonnet-4-5-20250929"
+
+
+class TestProviderValidation:
+    def test_vertex_missing_required_values(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OM_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("OM_VERTEX_REGION", raising=False)
+        config = Config(env_file=tmp_path / "env", llm_provider="anthropic-vertex")
+        try:
+            config.validate_provider_config()
+            assert False, "Should have raised"
+        except RuntimeError as e:
+            assert "om_vertex_project_id" in str(e).lower()
+
+    def test_vertex_valid_config(self, tmp_path):
+        config = Config(
+            env_file=tmp_path / "env",
+            llm_provider="anthropic-vertex",
+            vertex_project_id="proj",
+            vertex_region="us-east5",
+        )
+        assert config.validate_provider_config() == "anthropic-vertex"
+
+    def test_bedrock_uses_aws_region(self, tmp_path):
+        config = Config(env_file=tmp_path / "env", llm_provider="anthropic-bedrock", bedrock_region="us-east-1")
+        assert config.validate_provider_config() == "anthropic-bedrock"
