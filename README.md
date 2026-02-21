@@ -5,7 +5,7 @@
 
 **Cross-agent shared memory for Claude Code and Codex CLI — no RAG, no embeddings, no databases.**
 
-Two background processes (Observer + Reflector) compress your conversation history from multiple AI coding agents into a single shared long-term memory. Every agent reads it on startup and instantly knows about you, your projects, your preferences, and what happened in previous sessions — even sessions with a *different* agent.
+Two background processes (Observer + Reflector) compress your conversation history from multiple AI coding agents into a single shared long-term memory. Every agent reads it on startup and instantly knows about you, your projects, your preferences, and what happened in previous sessions — even sessions with a _different_ agent.
 
 > Adapted from [Mastra's Observational Memory](https://mastra.ai/docs/memory/observational-memory) pattern. See the [OpenClaw version](https://github.com/intertwine/openclaw-observational-memory) for the original.
 
@@ -17,7 +17,7 @@ You use Claude Code in one terminal and Codex CLI in another. Each session start
 
 Observational Memory fixes this. A single set of compressed memory files lives at `~/.local/share/observational-memory/` and is shared across all your agents:
 
-```
+```text
   Claude Code session              Codex CLI session
   ┌──────────────────────┐        ┌──────────────────────┐
   │ SessionStart hook     │        │ AGENTS.md reads       │
@@ -48,11 +48,11 @@ Observational Memory fixes this. A single set of compressed memory files lives a
 
 ### Three tiers of memory
 
-| Tier | Updated | Retention | Size | Contents |
-|------|---------|-----------|------|----------|
-| **Raw transcripts** | Real-time | Session only | ~50K tokens/day | Full conversation |
-| **Observations** | Per session + periodic checkpoints (~15 min default) | 7 days | ~2K tokens/day | Timestamped, prioritized notes |
-| **Reflections** | Daily | Indefinite | 200–600 lines total | Identity, projects, preferences |
+| Tier                | Updated                                              | Retention    | Size                | Contents                        |
+| ------------------- | ---------------------------------------------------- | ------------ | ------------------- | ------------------------------- |
+| **Raw transcripts** | Real-time                                            | Session only | ~50K tokens/day     | Full conversation               |
+| **Observations**    | Per session + periodic checkpoints (~15 min default) | 7 days       | ~2K tokens/day      | Timestamped, prioritized notes  |
+| **Reflections**     | Daily                                                | Indefinite   | 200–600 lines total | Identity, projects, preferences |
 
 ---
 
@@ -68,8 +68,12 @@ Observational Memory fixes this. A single set of compressed memory files lives a
 ### Install
 
 ```bash
-# Install from PyPI
+# Option A: Install from PyPI
 uv tool install observational-memory
+
+# Option B (macOS): Install from Homebrew tap
+brew tap intertwine/tap
+brew install intertwine/tap/observational-memory
 
 # Set up hooks, API key, and cron
 om install
@@ -118,6 +122,7 @@ All hooks are installed automatically to `~/.claude/settings.json`.
 ### Reflector (Both)
 
 A daily cron job (04:00 UTC) runs the reflector, which:
+
 1. Reads the `Last reflected` timestamp from the existing reflections
 2. Filters observations to only those from that date onward (incremental — skips already-processed days)
 3. If the filtered observations fit in one LLM call (<30K tokens), processes them in a single pass
@@ -129,17 +134,17 @@ A daily cron job (04:00 UTC) runs the reflector, which:
 
 ### Priority System
 
-| Level | Meaning | Examples | Retention |
-|-------|---------|----------|-----------|
-| 🔴 | Important / persistent | User facts, decisions, project architecture | Months+ |
-| 🟡 | Contextual | Current tasks, in-progress work | Days–weeks |
-| 🟢 | Minor / transient | Greetings, routine checks | Hours |
+| Level | Meaning                | Examples                                    | Retention  |
+| ----- | ---------------------- | ------------------------------------------- | ---------- |
+| 🔴    | Important / persistent | User facts, decisions, project architecture | Months+    |
+| 🟡    | Contextual             | Current tasks, in-progress work             | Days–weeks |
+| 🟢    | Minor / transient      | Greetings, routine checks                   | Hours      |
 
 ### LLM Provider & API Keys
 
 The observer and reflector call an LLM API to perform compression. Your API key is stored in a dedicated env file:
 
-```
+```bash
 ~/.config/observational-memory/env
 ```
 
@@ -208,7 +213,7 @@ om doctor --validate-key      # test API key with a live call
 
 ### API Keys
 
-```
+```bash
 ~/.config/observational-memory/env
 ```
 
@@ -227,13 +232,16 @@ This file is sourced by the `om` CLI, the Claude Code hooks, and the cron jobs. 
 Default: `~/.local/share/observational-memory/`
 
 Override with `XDG_DATA_HOME`:
+
 ```bash
 export XDG_DATA_HOME=~/my-data
 # Memory will be at ~/my-data/observational-memory/
 ```
 
 ### Cron Schedules
+
 The installer sets up:
+
 - **Observer (Codex):** `*/15 * * * *` by default (controlled by `OM_CODEX_OBSERVER_INTERVAL_MINUTES`, e.g. `*/10 * * * *` for 10 min)
 - **Reflector:** `0 4 * * *` (daily at 04:00 UTC)
 
@@ -245,12 +253,12 @@ Edit with `crontab -e` to adjust.
 
 Memory search uses a pluggable backend architecture. Three backends are available:
 
-| Backend | Default | Requires | Method |
-|---------|---------|----------|--------|
-| `bm25` | Yes | Nothing (bundled) | Token-based keyword matching via `rank-bm25` |
-| `qmd` | No | [QMD CLI](https://github.com/tobi/qmd) + bun | BM25 keyword search via QMD's FTS5 engine |
-| `qmd-hybrid` | No | [QMD CLI](https://github.com/tobi/qmd) + bun | Hybrid BM25 + vector embeddings + LLM reranking (~2GB models, auto-downloaded) |
-| `none` | No | Nothing | Disables search entirely |
+| Backend      | Default | Requires                                     | Method                                                                         |
+| ------------ | ------- | -------------------------------------------- | ------------------------------------------------------------------------------ |
+| `bm25`       | Yes     | Nothing (bundled)                            | Token-based keyword matching via `rank-bm25`                                   |
+| `qmd`        | No      | [QMD CLI](https://github.com/tobi/qmd) + bun | BM25 keyword search via QMD's FTS5 engine                                      |
+| `qmd-hybrid` | No      | [QMD CLI](https://github.com/tobi/qmd) + bun | Hybrid BM25 + vector embeddings + LLM reranking (~2GB models, auto-downloaded) |
+| `none`       | No      | Nothing                                      | Disables search entirely                                                       |
 
 The default `bm25` backend works out of the box. The index is rebuilt automatically after each observe/reflect run and stored at `~/.local/share/observational-memory/.search-index/bm25.pkl`.
 
@@ -292,6 +300,7 @@ When using QMD, memory documents are written as `.md` files under `~/.local/shar
 ### Tuning
 
 Edit the prompts in `prompts/` to adjust:
+
 - **What gets captured** — priority definitions in `observer.md`
 - **How aggressively things are merged** — rules in `reflector.md`
 - **Target size** — the reflector aims for 200–600 lines
@@ -308,12 +317,14 @@ Edit the prompts in `prompts/` to adjust:
 ## 2026-02-10
 
 ### Current Context
+
 - **Active task:** Setting up FastAPI project for task manager app
 - **Mood/tone:** Focused, decisive
 - **Key entities:** Atlas, FastAPI, PostgreSQL, Tortoise ORM
 - **Suggested next:** Help with database models
 
 ### Observations
+
 - 🔴 14:00 User is building a task management REST API with FastAPI
 - 🔴 14:05 User prefers PostgreSQL over SQLite for production (concurrency)
 - 🟡 14:10 Changed mind from SQLAlchemy to Tortoise ORM (finds SQLAlchemy too verbose)
@@ -325,10 +336,11 @@ Edit the prompts in `prompts/` to adjust:
 ```markdown
 # Reflections — Long-Term Memory
 
-*Last updated: 2026-02-10 04:00 UTC*
-*Last reflected: 2026-02-10*
+_Last updated: 2026-02-10 04:00 UTC_
+_Last reflected: 2026-02-10_
 
 ## Core Identity
+
 - **Name:** Alex
 - **Role:** Backend engineer
 - **Communication style:** Direct, prefers code over explanation
@@ -337,11 +349,13 @@ Edit the prompts in `prompts/` to adjust:
 ## Active Projects
 
 ### Task Manager (Atlas)
+
 - **Status:** Active
 - **Stack:** Python, FastAPI, PostgreSQL, Tortoise ORM
 - **Key decisions:** Postgres for concurrency; Tortoise ORM over SQLAlchemy
 
 ## Preferences & Opinions
+
 - 🔴 PostgreSQL over SQLite for production
 - 🔴 Concise code examples over long explanations
 - 🟡 Tortoise ORM over SQLAlchemy (less verbose)
@@ -357,6 +371,8 @@ make check          # lint + test
 make test           # tests only
 make lint           # linter only
 make format         # auto-format
+make brew-formula   # generate Homebrew formula from current PyPI release
+make brew-check     # audit Homebrew formula (requires brew)
 
 # Or directly with uv
 uv sync
@@ -365,11 +381,38 @@ uv run pytest tests/test_transcripts.py
 uv run pytest -v
 ```
 
+## Homebrew Release (Maintainers)
+
+`observational-memory` is published to Homebrew via a tap formula (to avoid name collisions with short/common formula names). The executable remains `om`.
+The Homebrew release workflow also checks Homebrew/core to catch formula-name collisions before pushing tap updates.
+
+### One-time setup
+
+1. Create tap repo: `intertwine/homebrew-tap`
+2. Add repo variable in this repo: `HOMEBREW_TAP_REPO=intertwine/homebrew-tap`
+3. Add repo secret in this repo: `HOMEBREW_TAP_GITHUB_TOKEN` (token with push access to the tap repo)
+
+### Per-release flow
+
+1. Publish new version to PyPI.
+2. Tag the same version in git (for example `v0.1.2`) and push the tag.
+3. GitHub Actions workflow `.github/workflows/homebrew-release.yml` regenerates `packaging/homebrew/observational-memory.rb` from PyPI, updates `Formula/observational-memory.rb` in the tap repo, then commits and pushes the tap update.
+
+### Local maintainership commands
+
+```bash
+# Regenerate formula locally
+make brew-formula
+
+# Copy into a local tap checkout
+make release-homebrew HOMEBREW_TAP_DIR=../homebrew-tap
+```
+
 ---
 
 ## File Structure
 
-```
+```text
 observational-memory/
 ├── README.md                         # This file
 ├── LICENSE                           # MIT
@@ -408,22 +451,22 @@ observational-memory/
 
 ## How It Compares to the OpenClaw Version
 
-| Feature | OpenClaw Version | This Version |
-|---------|-----------------|--------------|
-| **Agents supported** | OpenClaw only | Claude Code + Codex CLI |
-| **Scope** | Per-workspace | User-level (shared across all projects) |
-| **Observer trigger** | OpenClaw cron job | Claude: SessionEnd hook; Codex: system cron |
-| **Context injection** | AGENTS.md instructions | Claude: SessionStart hook; Codex: AGENTS.md |
-| **Memory location** | `workspace/memory/` | `~/.local/share/observational-memory/` |
-| **Compression engine** | OpenClaw agent sessions | Direct LLM API calls (Anthropic/OpenAI) |
-| **Cross-agent memory** | No | Yes |
+| Feature                | OpenClaw Version        | This Version                                |
+| ---------------------- | ----------------------- | ------------------------------------------- |
+| **Agents supported**   | OpenClaw only           | Claude Code + Codex CLI                     |
+| **Scope**              | Per-workspace           | User-level (shared across all projects)     |
+| **Observer trigger**   | OpenClaw cron job       | Claude: SessionEnd hook; Codex: system cron |
+| **Context injection**  | AGENTS.md instructions  | Claude: SessionStart hook; Codex: AGENTS.md |
+| **Memory location**    | `workspace/memory/`     | `~/.local/share/observational-memory/`      |
+| **Compression engine** | OpenClaw agent sessions | Direct LLM API calls (Anthropic/OpenAI)     |
+| **Cross-agent memory** | No                      | Yes                                         |
 
 ---
 
 ## FAQ
 
 **Q: Does this replace RAG / vector search?**
-A: For personal context, yes. Observational memory is for remembering *about you* — preferences, projects, communication style. RAG is for searching document collections. They're complementary. The built-in BM25 search handles keyword retrieval over your memories; for hybrid search (BM25 + vector embeddings + LLM reranking), use the `qmd-hybrid` backend with [QMD](https://github.com/tobi/qmd).
+A: For personal context, yes. Observational memory is for remembering _about you_ — preferences, projects, communication style. RAG is for searching document collections. They're complementary. The built-in BM25 search handles keyword retrieval over your memories; for hybrid search (BM25 + vector embeddings + LLM reranking), use the `qmd-hybrid` backend with [QMD](https://github.com/tobi/qmd).
 
 **Q: How much does it cost?**
 A: The observer processes only new messages per session (~200–1K input tokens typical). The reflector runs once daily. Expect ~$0.05–0.20/day with Sonnet-class models.

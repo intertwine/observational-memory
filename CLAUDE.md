@@ -15,6 +15,10 @@ make clean              # remove build artifacts
 make bump-version       # bump patch (BUMP=minor|major)
 make publish-test       # publish to TestPyPI
 make publish            # publish to PyPI (production)
+make brew-formula       # generate Homebrew formula from PyPI artifacts
+make brew-check         # run brew audit on generated formula
+make release-homebrew   # copy formula into a local tap checkout
+make brew-install       # install from configured Homebrew target
 make install-dev        # editable install with dev deps
 make doctor             # run om doctor diagnostics
 
@@ -33,7 +37,7 @@ Cross-agent observational memory that works at the **user level** (not per-proje
 
 ### Data flow
 
-```
+```text
 Transcripts (Claude JSONL / Codex sessions)
   → observe.py (LLM compression → observations.md)
   → reflect.py (daily consolidation → reflections.md)
