@@ -239,6 +239,7 @@ def render_formula(
     desc: str,
     homepage: str,
     root: Artifact,
+    root_wheel: Artifact,
     license_name: str,
     python_dep: str,
     common_resources: list[Artifact],
@@ -288,6 +289,19 @@ def render_formula(
         sections.append(render_resource_section(common_resources))
         sections.append("")
 
+    root_wheel_resource_name = f"{normalize_name(root.name)}-wheel"
+    sections.append(
+        render_resource(
+            Artifact(
+                name=root_wheel_resource_name,
+                version=root_wheel.version,
+                url=root_wheel.url,
+                sha256=root_wheel.sha256,
+            )
+        )
+    )
+    sections.append("")
+
     sections.extend(
         [
             "  def install",
@@ -295,12 +309,16 @@ def render_formula(
             f'    python = Formula["{python_dep}"].opt_bin/"{python_bin}"',
             "",
             "    resources.each do |resource|",
+            f'      next if resource.name == "{root_wheel_resource_name}"',
+            "",
             "      wheel = buildpath/File.basename(resource.url)",
             "      cp resource.cached_download, wheel",
             '      system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", wheel',
             "    end",
             "",
-            '    system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", buildpath',
+            f'    root_wheel = buildpath/"{root_wheel_resource_name}.whl"',
+            f'    cp resource("{root_wheel_resource_name}").cached_download, root_wheel',
+            '    system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", root_wheel',
             '    bin.install_symlink libexec/"bin/om"',
             "  end",
             "",
@@ -410,6 +428,7 @@ def main() -> int:
         desc=metadata["description"],
         homepage=metadata["homepage"],
         root=root_sdist,
+        root_wheel=arm_root,
         license_name=metadata["license"],
         python_dep=args.python_dep,
         common_resources=common_resources,

@@ -140,17 +140,26 @@ class ObservationalMemory < Formula
     sha256 "4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7"
   end
 
+  resource "observational-memory-wheel" do
+    url "https://files.pythonhosted.org/packages/47/eb/6028838b6eaa63444dd4897b4e1d86c2e3ba1768262e8f4d992266b2dee0/observational_memory-0.1.1-py3-none-any.whl"
+    sha256 "8d9ae2db4c80a22999bd6411c71ca94585e6e265394e5d0cccb4418468976bbd"
+  end
+
   def install
     virtualenv_create(libexec, "python3.13")
     python = Formula["python@3.13"].opt_bin/"python3.13"
 
     resources.each do |resource|
+      next if resource.name == "observational-memory-wheel"
+
       wheel = buildpath/File.basename(resource.url)
       cp resource.cached_download, wheel
       system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", wheel
     end
 
-    system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", buildpath
+    root_wheel = buildpath/"observational-memory-wheel.whl"
+    cp resource("observational-memory-wheel").cached_download, root_wheel
+    system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", root_wheel
     bin.install_symlink libexec/"bin/om"
   end
 
