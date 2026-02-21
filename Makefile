@@ -3,7 +3,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: help test lint format check build clean bump-version publish-test publish install-dev doctor
+.PHONY: help test lint format check build clean bump-version publish-test publish install-dev doctor brew-formula brew-check release-homebrew brew-install
 
 # ---------- Colors (portable) ----------
 ifdef NO_COLOR
@@ -22,6 +22,8 @@ ECHO = printf "%b\n"
 
 # Version bump type (patch, minor, major)
 BUMP ?= patch
+HOMEBREW_TAP_DIR ?= ../homebrew-tap
+HOMEBREW_INSTALL_TARGET ?= intertwine/tap/observational-memory
 
 help:
 	@$(ECHO) "$(GREEN)Observational Memory - Development Commands$(NC)"
@@ -44,6 +46,10 @@ help:
 	@$(ECHO) "$(YELLOW)Publishing:$(NC)"
 	@$(ECHO) "  make publish-test   - Publish to TestPyPI"
 	@$(ECHO) "  make publish        - Publish to PyPI (production)"
+	@$(ECHO) "  make brew-formula   - Generate Homebrew formula at packaging/homebrew/observational-memory.rb"
+	@$(ECHO) "  make brew-check     - Run Homebrew formula audit locally (if brew is installed)"
+	@$(ECHO) "  make release-homebrew - Copy formula into local tap checkout (HOMEBREW_TAP_DIR)"
+	@$(ECHO) "  make brew-install   - Install from Homebrew tap target ($(HOMEBREW_INSTALL_TARGET))"
 	@$(ECHO) ""
 	@$(ECHO) "$(YELLOW)Development:$(NC)"
 	@$(ECHO) "  make install-dev    - Install in editable mode with dev deps"
@@ -123,3 +129,49 @@ install-dev:
 # Run diagnostics
 doctor:
 	@uv run om doctor
+
+# Generate Homebrew formula from PyPI artifacts (root package + transitive resources)
+brew-formula:
+	@$(ECHO) "$(YELLOW)Generating Homebrew formula...$(NC)"
+	@uv run --with pip python scripts/generate_homebrew_formula.py --output packaging/homebrew/observational-memory.rb
+	@$(ECHO) "$(GREEN)✓ Homebrew formula generated$(NC)"
+
+# Audit Homebrew formula locally
+brew-check: brew-formula
+	@$(ECHO) "$(YELLOW)Auditing Homebrew formula...$(NC)"
+	@if ! command -v brew >/dev/null 2>&1; then \
+		$(ECHO) "$(RED)Error: brew not found$(NC)"; \
+		$(ECHO) "Install Homebrew first: https://brew.sh"; \
+		exit 1; \
+	fi
+	@brew style packaging/homebrew/observational-memory.rb
+	@if brew info --formula $(HOMEBREW_INSTALL_TARGET) >/dev/null 2>&1; then \
+		brew audit --strict --formula $(HOMEBREW_INSTALL_TARGET); \
+	else \
+		$(ECHO) "$(YELLOW)Skipped brew audit by formula name; add tap first: brew tap intertwine/tap$(NC)"; \
+	fi
+	@$(ECHO) "$(GREEN)✓ Homebrew formula audit passed$(NC)"
+
+# Sync formula into a local tap checkout for publishing
+release-homebrew: brew-formula
+	@$(ECHO) "$(YELLOW)Syncing formula into tap checkout: $(HOMEBREW_TAP_DIR)$(NC)"
+	@if [ ! -d "$(HOMEBREW_TAP_DIR)/.git" ]; then \
+		$(ECHO) "$(RED)Error: $(HOMEBREW_TAP_DIR) is not a git repository$(NC)"; \
+		$(ECHO) "Clone your tap repo first, e.g.:"; \
+		$(ECHO) "  git clone git@github.com:intertwine/homebrew-tap.git $(HOMEBREW_TAP_DIR)"; \
+		exit 1; \
+	fi
+	@mkdir -p "$(HOMEBREW_TAP_DIR)/Formula"
+	@cp packaging/homebrew/observational-memory.rb "$(HOMEBREW_TAP_DIR)/Formula/observational-memory.rb"
+	@$(ECHO) "$(GREEN)✓ Synced $(HOMEBREW_TAP_DIR)/Formula/observational-memory.rb$(NC)"
+	@$(ECHO) "Next: cd $(HOMEBREW_TAP_DIR) && git add Formula/observational-memory.rb && git commit -m 'Update observational-memory formula' && git push"
+
+# Install from Homebrew tap target
+brew-install:
+	@$(ECHO) "$(YELLOW)Installing via Homebrew target: $(HOMEBREW_INSTALL_TARGET)$(NC)"
+	@if ! command -v brew >/dev/null 2>&1; then \
+		$(ECHO) "$(RED)Error: brew not found$(NC)"; \
+		$(ECHO) "Install Homebrew first: https://brew.sh"; \
+		exit 1; \
+	fi
+	@brew install $(HOMEBREW_INSTALL_TARGET)
