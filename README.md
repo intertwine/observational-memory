@@ -17,34 +17,9 @@ You use Claude Code in one terminal and Codex CLI in another. Each session start
 
 Observational Memory fixes this. A single set of compressed memory files lives at `~/.local/share/observational-memory/` and is shared across all your agents:
 
-```text
-  Claude Code session              Codex CLI session
-  ┌──────────────────────┐        ┌──────────────────────┐
-  │ SessionStart hook     │        │ AGENTS.md reads       │
-  │ → injects memory      │        │ → memory on startup   │
-  │                       │        │                       │
-  │ SessionEnd hook       │        │ Cron-based observer   │
-  │ → triggers observer   │        │ → scans sessions      │
-  │                       │        │                       │
-  │ UserPromptSubmit /    │        │                       │
-  │ PreCompact checkpoint │        │                       │
-  └───────────┬───────────┘        └───────────┬───────────┘
-              │ transcript                      │ transcript
-              ▼                                 ▼
-  ┌─────────────────────────────────────────────────────┐
-  │              observe.py (LLM compression)           │
-  └──────────────────────┬──────────────────────────────┘
-                         ▼
-  ┌─────────────────────────────────────────────────────┐
-  │ ~/.local/share/observational-memory/                │
-  │   observations.md   — recent compressed notes       │
-  │   reflections.md    — stable long-term memory       │
-  └──────────────────────┬──────────────────────────────┘
-                         ▼
-  ┌─────────────────────────────────────────────────────┐
-  │         reflect.py (daily consolidation)            │
-  └─────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/system-diagram.webp" alt="Observational Memory system diagram" width="640" />
+</p>
 
 ### Three tiers of memory
 
