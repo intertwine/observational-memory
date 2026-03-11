@@ -23,44 +23,81 @@ def _coerce_records(value: Any) -> list[dict]:
 
 def _extract_records(raw: str, source_path: Path) -> list[dict]:
     """Extract message-like dicts from either full JSON sessions or JSONL sessions."""
-    records: list[dict] = []
+    if source_path.suffix.lower() == ".jsonl":
+        records = _extract_jsonl_records(raw, source_path)
+        # Prefer JSONL only when the parsed shape actually looks like a JSONL
+        # event stream. A single-line full JSON payload such as {"items":[...]}
+        # should still flow through the full-JSON parser so nested items unwrap.
+        if len(records) > 1 or (records and "type" in records[0]):
+            return records
+        return _extract_json_records(raw, source_path) or records
 
-    # Try full JSON document first (Codex sessions are sometimes pretty-printed JSON objects).
+    records = _extract_json_records(raw, source_path)
+    if records:
+        return records
+    return _extract_jsonl_records(raw, source_path)
+
+
+def _extract_json_records(raw: str, source_path: Path) -> list[dict]:
+    """Extract records from a full JSON transcript payload."""
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         _LOGGER.warning("Failed to parse Codex transcript %s as JSON: %s", source_path, exc)
-        payload = None
-    else:
-        if isinstance(payload, dict):
-            items = payload.get("items")
-            if isinstance(items, list):
-                records.extend(_coerce_records(items))
-            else:
-                records.extend(_coerce_records(payload))
-        else:
-            records.extend(_coerce_records(payload))
+        return []
 
-    # Fall back to JSONL line parsing (legacy format).
-    if not records:
-        for line in raw.splitlines():
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError as exc:
-                _LOGGER.warning(
-                    "Skipping malformed JSON line in Codex transcript %s: %s",
-                    source_path,
-                    exc,
-                )
-                continue
-            if isinstance(entry, list):
-                records.extend(_coerce_records(entry))
-            else:
-                records.extend(_coerce_records(entry))
+    if isinstance(payload, dict):
+        items = payload.get("items")
+        if isinstance(items, list):
+            return _coerce_records(items)
+        return _coerce_records(payload)
 
+    return _coerce_records(payload)
+
+
+def _extract_jsonl_records(raw: str, source_path: Path) -> list[dict]:
+    """Extract records from a JSONL transcript payload."""
+    records: list[dict] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as exc:
+            _LOGGER.warning(
+                "Skipping malformed JSON line in Codex transcript %s: %s",
+                source_path,
+                exc,
+            )
+            continue
+        records.extend(_coerce_records(entry))
     return records
+
+
+def _extract_message_entry(entry: dict) -> tuple[str, str, str] | None:
+    """Normalize a raw Codex record into ``(role, content, timestamp)``."""
+    role = entry.get("role", "")
+    timestamp = entry.get("timestamp", entry.get("created_at", ""))
+
+    if role in ("user", "assistant"):
+        content = _extract_content(entry)
+        return role, content, timestamp
+
+    payload = entry.get("payload")
+    if isinstance(payload, dict) and payload.get("type") == "message":
+        role = payload.get("role", "")
+        if role in ("user", "assistant"):
+            content = _extract_content(payload)
+            return role, content, timestamp
+
+    msg = entry.get("message", {})
+    if isinstance(msg, dict):
+        role = msg.get("role", "")
+        if role in ("user", "assistant"):
+            content = _extract_content(msg)
+            return role, content, timestamp
+
+    return None
 
 
 def line_offset_to_message_count(path: Path, line_offset: int) -> int:
@@ -96,12 +133,7 @@ def line_offset_to_message_count(path: Path, line_offset: int) -> int:
             continue
 
         for item in _coerce_records(entry):
-            role = item.get("role", "")
-            if role not in ("user", "assistant"):
-                nested_message = item.get("message")
-                if isinstance(nested_message, dict):
-                    role = nested_message.get("role", "")
-            if role in ("user", "assistant"):
+            if _extract_message_entry(item) is not None:
                 message_count += 1
 
     return message_count
@@ -129,19 +161,10 @@ def parse_transcript(path: Path, after_index: int | None = None) -> list[Message
         if not isinstance(entry, dict):
             continue
 
-        role = entry.get("role", "")
-        if role not in ("user", "assistant"):
-            # Try nested message structure
-            msg = entry.get("message", {})
-            role = msg.get("role", "")
-            if role not in ("user", "assistant"):
-                continue
-            content = _extract_content(msg)
-            timestamp = entry.get("timestamp", entry.get("created_at", ""))
-        else:
-            content = _extract_content(entry)
-            timestamp = entry.get("timestamp", entry.get("created_at", ""))
-
+        extracted = _extract_message_entry(entry)
+        if extracted is None:
+            continue
+        role, content, timestamp = extracted
         if content:
             messages.append(
                 Message(
