@@ -89,7 +89,7 @@ All hooks are installed automatically to `~/.claude/settings.json`.
 
 **AGENTS.md:** The installer adds instructions to `~/.codex/AGENTS.md` so Codex reads memory files at session start.
 
-**Cron observer:** A cron job runs every 15 minutes, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations.
+**Cron observer:** A cron job runs every 15 minutes, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations. At the end of each observer run, `om` also checks whether reflections have fallen behind and runs a reflector catch-up when needed.
 
 ### Reflector (both)
 
@@ -103,6 +103,8 @@ A daily cron job (04:00 UTC) runs the reflector, which:
 6. Stamps `Last updated` and `Last reflected` timestamps programmatically
 7. Writes the updated `reflections.md`
 8. Trims observations older than 7 days
+
+If that daily run is missed, for example because a laptop is asleep, the next successful `om observe` run will automatically catch reflections up to the newest observation date.
 
 ### Priority system
 

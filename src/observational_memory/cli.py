@@ -44,6 +44,8 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
                 click.echo(result)
         else:
             click.echo("No new messages to process.")
+        if not dry_run:
+            _maybe_run_reflector_catchup(config)
         return
 
     results = []
@@ -64,6 +66,9 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
     else:
         click.echo("No new messages to process.")
 
+    if not dry_run:
+        _maybe_run_reflector_catchup(config)
+
 
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Print reflections without writing")
@@ -80,6 +85,26 @@ def reflect(ctx: click.Context, dry_run: bool) -> None:
         click.echo(f"Reflections updated ({len(result)} chars)")
         if dry_run:
             click.echo(result)
+    else:
+        click.echo("No observations to reflect on.")
+
+
+def _maybe_run_reflector_catchup(config: Config) -> None:
+    """Run the reflector when daily reflections have fallen behind observations."""
+    from .reflect import reflector_catchup_needed, run_reflector
+
+    if not reflector_catchup_needed(config):
+        return
+
+    click.echo("Running reflector catch-up...")
+    try:
+        result = run_reflector(config)
+    except Exception as e:
+        click.echo(f"Reflector catch-up failed: {e}")
+        return
+
+    if result:
+        click.echo(f"Reflections updated ({len(result)} chars)")
     else:
         click.echo("No observations to reflect on.")
 
@@ -1108,8 +1133,8 @@ def _install_cron(config: Config, targets: str) -> None:
     except FileNotFoundError:
         existing = ""
 
-    # Remove old OM cron lines
-    lines = [line for line in existing.splitlines() if "om observe" not in line and "om reflect" not in line]
+    # Remove old OM cron blocks and legacy loose lines from earlier installs.
+    lines = _strip_om_cron_entries(existing.splitlines())
 
     lines.append("# --- observational-memory ---")
     lines.extend(jobs)
@@ -1135,23 +1160,44 @@ def _uninstall_cron() -> None:
     except FileNotFoundError:
         return
 
-    lines = result.stdout.splitlines()
-    filtered = []
-    in_om_block = False
-    for line in lines:
-        if "--- observational-memory ---" in line:
-            in_om_block = not in_om_block
-            continue
-        if in_om_block:
-            continue
-        # Also remove loose OM lines
-        if "om observe" in line or "om reflect" in line:
-            continue
-        filtered.append(line)
+    filtered = _strip_om_cron_entries(result.stdout.splitlines())
 
     new_crontab = "\n".join(filtered) + "\n" if filtered else ""
     subprocess.run(["crontab", "-"], input=new_crontab, capture_output=True, text=True)
     click.echo("Removed cron jobs")
+
+
+def _strip_om_cron_entries(lines: list[str]) -> list[str]:
+    """Remove observational-memory cron blocks and legacy loose OM lines."""
+    filtered = []
+    in_om_block = False
+    block_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "# --- observational-memory ---":
+            in_om_block = True
+            block_lines = [line]
+            continue
+        if stripped == "# --- end observational-memory ---":
+            in_om_block = False
+            block_lines = []
+            continue
+        if in_om_block:
+            block_lines.append(line)
+            continue
+        if "om observe" in line or "om reflect" in line:
+            continue
+        filtered.append(line)
+
+    if in_om_block and block_lines:
+        click.echo(
+            "Warning: unclosed observational-memory cron block detected; "
+            "preserving trailing lines for manual inspection.",
+            err=True,
+        )
+        filtered.extend(block_lines)
+
+    return filtered
 
 
 def _find_om_path() -> str | None:
