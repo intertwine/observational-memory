@@ -11,6 +11,7 @@ from observational_memory.reflect import (
     _reflect_chunked,
     _stamp_timestamps,
     _trim_old_observations,
+    reflector_catchup_needed,
     run_reflector,
 )
 
@@ -63,6 +64,43 @@ class TestRunReflector:
         run_reflector(config, dry_run=False)
         assert config.reflections_path.exists()
         assert "Alex" in config.reflections_path.read_text()
+
+
+class TestReflectorCatchupNeeded:
+    def test_returns_false_without_observations(self, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+
+        assert reflector_catchup_needed(config) is False
+
+    def test_returns_true_when_observations_exist_but_reflections_do_not(self, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.observations_path.write_text("# Observations\n\n## 2026-03-10\n\n- 🔴 14:00 Test\n")
+
+        assert reflector_catchup_needed(config) is True
+
+    def test_returns_true_when_latest_observation_is_newer(self, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.observations_path.write_text(
+            "# Observations\n\n## 2026-03-10\n\n- 🔴 14:00 Test\n\n## 2026-03-11\n\n- 🔴 09:00 Newer test\n"
+        )
+        config.reflections_path.write_text(
+            "# Reflections\n\n*Last updated: 2026-03-10 09:00 UTC*\n*Last reflected: 2026-03-10*\n"
+        )
+
+        assert reflector_catchup_needed(config) is True
+
+    def test_returns_false_when_reflections_are_current(self, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.observations_path.write_text("# Observations\n\n## 2026-03-10\n\n- 🔴 14:00 Test\n")
+        config.reflections_path.write_text(
+            "# Reflections\n\n*Last updated: 2026-03-10 20:00 UTC*\n*Last reflected: 2026-03-10*\n"
+        )
+
+        assert reflector_catchup_needed(config) is False
 
 
 class TestTrimObservations:

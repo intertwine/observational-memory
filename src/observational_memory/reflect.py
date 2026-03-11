@@ -89,6 +89,34 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     return result
 
 
+def reflector_catchup_needed(config: Config | None = None) -> bool:
+    """Return True when reflections lag behind the newest observation date.
+
+    This lets normal observer runs repair missed daily reflection windows,
+    such as when a laptop is asleep during the scheduled cron time.
+    """
+    if config is None:
+        config = Config()
+
+    if not config.observations_path.exists():
+        return False
+
+    observations = config.observations_path.read_text()
+    latest_obs_date = _extract_latest_observation_date(observations)
+    if latest_obs_date is None:
+        return False
+
+    reflections = ""
+    if config.reflections_path.exists():
+        reflections = config.reflections_path.read_text()
+
+    last_reflected_date = _parse_last_reflected(reflections)
+    if last_reflected_date is None:
+        return True
+
+    return latest_obs_date > last_reflected_date
+
+
 def _reflect_single(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
     """Single-pass reflection for small observation sets."""
     user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n## Current observations\n\n{observations}"
