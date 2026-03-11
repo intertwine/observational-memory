@@ -72,3 +72,20 @@ def test_strip_om_cron_entries_removes_blocks_and_legacy_lines():
         "MAILTO=user@example.com",
         "5 * * * * /usr/bin/true",
     ]
+
+
+def test_strip_om_cron_entries_preserves_unclosed_block_with_warning(capsys):
+    lines = [
+        "MAILTO=user@example.com",
+        "# --- observational-memory ---",
+        "*/15 * * * * /old/om observe --source codex",
+        "15 9 * * * /usr/bin/true",
+    ]
+
+    assert _strip_om_cron_entries(lines) == [
+        "MAILTO=user@example.com",
+        "# --- observational-memory ---",
+        "*/15 * * * * /old/om observe --source codex",
+        "15 9 * * * /usr/bin/true",
+    ]
+    assert "unclosed observational-memory cron block detected" in capsys.readouterr().err

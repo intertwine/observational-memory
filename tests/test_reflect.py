@@ -1,5 +1,6 @@
 """Tests for the reflector module."""
 
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from observational_memory.config import Config
@@ -8,6 +9,7 @@ from observational_memory.reflect import (
     _extract_latest_observation_date,
     _filter_new_observations,
     _parse_last_reflected,
+    _parse_last_updated,
     _reflect_chunked,
     _stamp_timestamps,
     _trim_old_observations,
@@ -80,7 +82,7 @@ class TestReflectorCatchupNeeded:
 
         assert reflector_catchup_needed(config) is True
 
-    def test_returns_true_when_latest_observation_is_newer(self, tmp_path):
+    def test_returns_false_when_new_day_has_started_but_daily_window_is_not_overdue(self, tmp_path):
         config = Config(memory_dir=tmp_path / "memory")
         config.ensure_memory_dir()
         config.observations_path.write_text(
@@ -90,7 +92,21 @@ class TestReflectorCatchupNeeded:
             "# Reflections\n\n*Last updated: 2026-03-10 09:00 UTC*\n*Last reflected: 2026-03-10*\n"
         )
 
-        assert reflector_catchup_needed(config) is True
+        now_utc = datetime(2026, 3, 11, 8, 59, tzinfo=timezone.utc)
+        assert reflector_catchup_needed(config, now_utc=now_utc) is False
+
+    def test_returns_true_when_latest_observation_is_newer_and_reflection_is_overdue(self, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.observations_path.write_text(
+            "# Observations\n\n## 2026-03-10\n\n- 🔴 14:00 Test\n\n## 2026-03-11\n\n- 🔴 09:00 Newer test\n"
+        )
+        config.reflections_path.write_text(
+            "# Reflections\n\n*Last updated: 2026-03-10 09:00 UTC*\n*Last reflected: 2026-03-10*\n"
+        )
+
+        now_utc = datetime(2026, 3, 11, 9, 1, tzinfo=timezone.utc)
+        assert reflector_catchup_needed(config, now_utc=now_utc) is True
 
     def test_returns_false_when_reflections_are_current(self, tmp_path):
         config = Config(memory_dir=tmp_path / "memory")
@@ -154,6 +170,20 @@ class TestParseLastReflected:
 
     def test_returns_none_for_empty_string(self):
         assert _parse_last_reflected("") is None
+
+
+class TestParseLastUpdated:
+    def test_extracts_timestamp(self):
+        reflections = "# Reflections\n\n*Last updated: 2026-03-10 09:00 UTC*\n"
+        assert _parse_last_updated(reflections) == datetime(2026, 3, 10, 9, 0, tzinfo=timezone.utc)
+
+    def test_returns_none_for_never(self):
+        reflections = "# Reflections\n\n*Last updated: never*\n"
+        assert _parse_last_updated(reflections) is None
+
+    def test_returns_none_for_invalid_value(self):
+        reflections = "# Reflections\n\n*Last updated: someday maybe*\n"
+        assert _parse_last_updated(reflections) is None
 
 
 class TestFilterNewObservations:

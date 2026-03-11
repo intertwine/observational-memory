@@ -22,6 +22,7 @@ _REFLECTOR_MAX_OUTPUT_TOKENS = 8192
 _LAST_REFLECTED_RE = re.compile(r"^\*Last reflected:\s*(\d{4}-\d{2}-\d{2})\b.*\*$", re.MULTILINE)
 # Regex for the "Last updated" timestamp line
 _LAST_UPDATED_RE = re.compile(r"^\*Last updated:.*\*$", re.MULTILINE)
+_LAST_UPDATED_VALUE_RE = re.compile(r"^\*Last updated:\s*(.+?)\s*\*$", re.MULTILINE)
 
 
 def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | None:
@@ -89,7 +90,7 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     return result
 
 
-def reflector_catchup_needed(config: Config | None = None) -> bool:
+def reflector_catchup_needed(config: Config | None = None, now_utc: datetime | None = None) -> bool:
     """Return True when reflections lag behind the newest observation date.
 
     This lets normal observer runs repair missed daily reflection windows,
@@ -114,7 +115,24 @@ def reflector_catchup_needed(config: Config | None = None) -> bool:
     if last_reflected_date is None:
         return True
 
-    return latest_obs_date > last_reflected_date
+    if latest_obs_date <= last_reflected_date:
+        return False
+
+    last_updated_at = _parse_last_updated(reflections)
+    if last_updated_at is None:
+        return True
+
+    # Catch up only after the daily reflection window is actually overdue.
+    # This avoids duplicate LLM calls on normal days when observations roll
+    # into the next UTC date before the local 04:00 cron has fired.
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    else:
+        now_utc = now_utc.astimezone(timezone.utc)
+
+    return now_utc - last_updated_at > timedelta(hours=24)
 
 
 def _reflect_single(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
@@ -203,6 +221,22 @@ def _parse_last_reflected(reflections: str) -> str | None:
     """
     m = _LAST_REFLECTED_RE.search(reflections)
     return m.group(1) if m else None
+
+
+def _parse_last_updated(reflections: str) -> datetime | None:
+    """Extract the ``Last updated`` timestamp from reflections.md."""
+    m = _LAST_UPDATED_VALUE_RE.search(reflections)
+    if not m:
+        return None
+
+    raw_value = m.group(1).strip()
+    if raw_value.lower() == "never":
+        return None
+
+    try:
+        return datetime.strptime(raw_value, "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _filter_new_observations(observations: str, since_date: str | None) -> str:

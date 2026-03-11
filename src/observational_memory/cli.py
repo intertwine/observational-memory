@@ -1171,19 +1171,32 @@ def _strip_om_cron_entries(lines: list[str]) -> list[str]:
     """Remove observational-memory cron blocks and legacy loose OM lines."""
     filtered = []
     in_om_block = False
+    block_lines: list[str] = []
     for line in lines:
         stripped = line.strip()
         if stripped == "# --- observational-memory ---":
             in_om_block = True
+            block_lines = [line]
             continue
         if stripped == "# --- end observational-memory ---":
             in_om_block = False
+            block_lines = []
             continue
         if in_om_block:
+            block_lines.append(line)
             continue
         if "om observe" in line or "om reflect" in line:
             continue
         filtered.append(line)
+
+    if in_om_block and block_lines:
+        click.echo(
+            "Warning: unclosed observational-memory cron block detected; "
+            "preserving trailing lines for manual inspection.",
+            err=True,
+        )
+        filtered.extend(block_lines)
+
     return filtered
 
 
