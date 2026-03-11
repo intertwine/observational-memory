@@ -1,5 +1,6 @@
 """Tests for transcript parsers."""
 
+import logging
 import time
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from observational_memory.transcripts.claude import (
 from observational_memory.transcripts.claude import (
     parse_transcript as parse_claude,
 )
+from observational_memory.transcripts.codex import line_offset_to_message_count
 from observational_memory.transcripts.codex import parse_transcript as parse_codex
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -122,3 +124,78 @@ class TestCodexParser:
         user_messages = [m for m in messages if m.role == "user"]
         contents = " ".join(m.content for m in user_messages)
         assert "CSV" in contents or "S3" in contents
+
+    def test_parse_modern_response_item_payload_messages(self, tmp_path):
+        transcript = tmp_path / "codex-modern.jsonl"
+        transcript.write_text(
+            (
+                '{"timestamp":"2026-03-11T04:08:58.126Z","type":"response_item",'
+                '"payload":{"type":"message","role":"developer","content":'
+                '[{"type":"input_text","text":"ignore me"}]}}\n'
+            )
+            + (
+                '{"timestamp":"2026-03-11T04:08:58.126Z","type":"response_item",'
+                '"payload":{"type":"message","role":"user","content":'
+                '[{"type":"input_text","text":"hello from user"}]}}\n'
+            )
+            + (
+                '{"timestamp":"2026-03-11T04:09:00.000Z","type":"response_item",'
+                '"payload":{"type":"message","role":"assistant","content":'
+                '[{"type":"output_text","text":"hello from assistant"}],'
+                '"phase":"commentary"}}\n'
+            )
+        )
+
+        messages = parse_codex(transcript)
+
+        assert [m.role for m in messages] == ["user", "assistant"]
+        assert messages[0].content == "hello from user"
+        assert messages[1].content == "hello from assistant"
+        assert messages[0].timestamp == "2026-03-11T04:08:58.126Z"
+
+    def test_jsonl_transcripts_do_not_log_whole_file_json_warning(self, tmp_path, caplog):
+        transcript = tmp_path / "codex-modern.jsonl"
+        transcript.write_text(
+            (
+                '{"timestamp":"2026-03-11T04:08:58.126Z","type":"response_item",'
+                '"payload":{"type":"message","role":"user","content":'
+                '[{"type":"input_text","text":"hello"}]}}\n'
+            )
+            + (
+                '{"timestamp":"2026-03-11T04:09:00.000Z","type":"response_item",'
+                '"payload":{"type":"message","role":"assistant","content":'
+                '[{"type":"output_text","text":"world"}]}}\n'
+            )
+        )
+
+        with caplog.at_level(logging.WARNING):
+            messages = parse_codex(transcript)
+
+        assert len(messages) == 2
+        assert "Failed to parse Codex transcript" not in caplog.text
+
+    def test_line_offset_counts_modern_payload_messages(self, tmp_path):
+        transcript = tmp_path / "codex-modern.jsonl"
+        transcript.write_text(
+            (
+                '{"timestamp":"2026-03-11T04:08:58.126Z","type":"response_item",'
+                '"payload":{"type":"message","role":"developer","content":'
+                '[{"type":"input_text","text":"ignore me"}]}}\n'
+            )
+            + (
+                '{"timestamp":"2026-03-11T04:08:58.126Z","type":"response_item",'
+                '"payload":{"type":"message","role":"user","content":'
+                '[{"type":"input_text","text":"first"}]}}\n'
+            )
+            + (
+                '{"timestamp":"2026-03-11T04:09:00.000Z","type":"response_item",'
+                '"payload":{"type":"function_call","name":"exec"}}\n'
+            )
+            + (
+                '{"timestamp":"2026-03-11T04:09:01.000Z","type":"response_item",'
+                '"payload":{"type":"message","role":"assistant","content":'
+                '[{"type":"output_text","text":"second"}]}}\n'
+            )
+        )
+
+        assert line_offset_to_message_count(transcript, 4) == 2
