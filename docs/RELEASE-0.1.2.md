@@ -4,6 +4,7 @@ This branch is prepared for publishing `observational-memory` `0.1.2`.
 
 ## What's in 0.1.2
 
+- Compact startup memory views (`profile.md` + `active.md`) to reduce default session-start context size while keeping deeper memory available on demand.
 - Reflection catch-up after missed daily runs.
 - Safer cron block cleanup during reinstall/uninstall.
 - Fixed Codex Desktop transcript parsing for modern `response_item.payload` message records.
@@ -53,6 +54,7 @@ Suggested release notes:
 ```markdown
 ## Highlights
 
+- Added compact startup memory views (`profile.md` + `active.md`) so default session priming is smaller and more focused, while `reflections.md` / `observations.md` remain available for deeper retrieval.
 - Added reflection catch-up after missed daily runs, which helps laptops recover when the scheduled reflector cron is skipped during sleep.
 - Fixed Codex Desktop transcript parsing so modern `response_item.payload` chat messages are ingested correctly.
 - Fixed a `.jsonl` parser edge case where a single full-JSON payload could parse as zero messages.
