@@ -25,9 +25,12 @@ def _extract_records(raw: str, source_path: Path) -> list[dict]:
     """Extract message-like dicts from either full JSON sessions or JSONL sessions."""
     if source_path.suffix.lower() == ".jsonl":
         records = _extract_jsonl_records(raw, source_path)
-        if records:
+        # Prefer JSONL only when the parsed shape actually looks like a JSONL
+        # event stream. A single-line full JSON payload such as {"items":[...]}
+        # should still flow through the full-JSON parser so nested items unwrap.
+        if len(records) > 1 or (records and "type" in records[0]):
             return records
-        return _extract_json_records(raw, source_path)
+        return _extract_json_records(raw, source_path) or records
 
     records = _extract_json_records(raw, source_path)
     if records:
@@ -67,10 +70,7 @@ def _extract_jsonl_records(raw: str, source_path: Path) -> list[dict]:
                 exc,
             )
             continue
-        if isinstance(entry, list):
-            records.extend(_coerce_records(entry))
-        else:
-            records.extend(_coerce_records(entry))
+        records.extend(_coerce_records(entry))
     return records
 
 

@@ -174,6 +174,23 @@ class TestCodexParser:
         assert len(messages) == 2
         assert "Failed to parse Codex transcript" not in caplog.text
 
+    def test_jsonl_file_with_single_full_json_payload_still_unwraps_items(self, tmp_path, caplog):
+        transcript = tmp_path / "codex-single-doc.jsonl"
+        transcript.write_text(
+            '{"items":['
+            '{"role":"user","content":"hello from user","timestamp":"2026-03-11T04:08:58.126Z"},'
+            '{"role":"assistant","content":"hello from assistant","timestamp":"2026-03-11T04:09:00.000Z"}'
+            "]}\n"
+        )
+
+        with caplog.at_level(logging.WARNING):
+            messages = parse_codex(transcript)
+
+        assert [m.role for m in messages] == ["user", "assistant"]
+        assert messages[0].content == "hello from user"
+        assert messages[1].content == "hello from assistant"
+        assert "Failed to parse Codex transcript" not in caplog.text
+
     def test_line_offset_counts_modern_payload_messages(self, tmp_path):
         transcript = tmp_path / "codex-modern.jsonl"
         transcript.write_text(
