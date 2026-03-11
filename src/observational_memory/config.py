@@ -111,6 +111,14 @@ class Config:
         return self.memory_dir / "reflections.md"
 
     @property
+    def profile_path(self) -> Path:
+        return self.memory_dir / "profile.md"
+
+    @property
+    def active_path(self) -> Path:
+        return self.memory_dir / "active.md"
+
+    @property
     def cursor_path(self) -> Path:
         return self.memory_dir / ".cursor.json"
 

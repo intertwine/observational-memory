@@ -94,3 +94,42 @@ def test_install_upserts_env_without_clobbering(monkeypatch, tmp_path):
     assert "EXISTING_VAR=keep-me" in content
     assert "OM_LLM_PROVIDER=openai" in content
     assert "OM_LLM_MODEL=gpt-4o-mini" in content
+
+
+def test_install_generates_compact_files_and_updates_codex_block(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    runner = CliRunner()
+
+    codex_agents = tmp_path / "codex" / "AGENTS.md"
+    codex_agents.parent.mkdir(parents=True, exist_ok=True)
+    codex_agents.write_text(
+        "<!-- observational-memory -->\n"
+        "1. `~/.local/share/observational-memory/reflections.md`\n"
+        "2. `~/.local/share/observational-memory/observations.md`\n"
+        "<!-- observational-memory -->\n"
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--codex",
+            "--no-cron",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    memory_dir = tmp_path / "data" / "observational-memory"
+    assert (memory_dir / "profile.md").exists()
+    assert (memory_dir / "active.md").exists()
+
+    updated_agents = codex_agents.read_text()
+    assert "profile.md" in updated_agents
+    assert "active.md" in updated_agents
+    assert "om search" in updated_agents

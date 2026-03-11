@@ -334,8 +334,11 @@ def _load_reflector_prompt() -> str:
 
 def _write_reflections(reflections: str, config: Config) -> None:
     """Write the reflections file."""
+    from .startup_memory import refresh_startup_memory
+
     config.ensure_memory_dir()
     config.reflections_path.write_text(reflections.rstrip() + "\n")
+    refresh_startup_memory(config)
 
 
 def _trim_old_observations(config: Config) -> None:

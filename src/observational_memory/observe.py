@@ -292,12 +292,15 @@ def observe_claude_transcript_backfill(
 
 def _append_observations(new_observations: str, config: Config, *, skip_reindex: bool = False) -> None:
     """Append new observations to the observations file (never overwrite)."""
+    from .startup_memory import refresh_startup_memory
+
     config.ensure_memory_dir()
     if config.observations_path.exists():
         existing = config.observations_path.read_text()
         config.observations_path.write_text(existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n")
     else:
         config.observations_path.write_text(new_observations.rstrip() + "\n")
+    refresh_startup_memory(config)
     if not skip_reindex:
         _reindex_if_enabled(config)
 
@@ -339,6 +342,8 @@ def _reindex_if_enabled(config: Config) -> None:
 
 def _write_observations(new_observations: str, config: Config) -> None:
     """Write or append observations to the file."""
+    from .startup_memory import refresh_startup_memory
+
     config.ensure_memory_dir()
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -353,4 +358,5 @@ def _write_observations(new_observations: str, config: Config) -> None:
             config.observations_path.write_text(existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n")
     else:
         config.observations_path.write_text(new_observations.rstrip() + "\n")
+    refresh_startup_memory(config)
     _reindex_if_enabled(config)

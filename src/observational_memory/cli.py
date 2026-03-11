@@ -301,33 +301,39 @@ def context(ctx: click.Context) -> None:
     import json as json_mod
 
     from .search import get_backend
+    from .startup_memory import ensure_startup_memory
 
     config = ctx.obj["config"]
+    ensure_startup_memory(config)
     parts = []
 
-    # Always include full reflections (small by design, 200-600 lines)
-    if config.reflections_path.exists() and config.reflections_path.stat().st_size > 0:
-        parts.append("## Long-Term Memory (Reflections)\n\n" + config.reflections_path.read_text())
+    if config.profile_path.exists() and config.profile_path.stat().st_size > 0:
+        parts.append(config.profile_path.read_text())
 
-    # Try search-based observation retrieval
-    observations_added = False
-    backend = get_backend(config.search_backend, config)
-    if backend.is_ready():
-        # Search for recent context — use a broad query
-        results = backend.search("recent context current tasks projects", limit=10)
-        if results:
-            obs_parts = []
-            for r in results:
-                if r.document.source.value == "observations":
-                    obs_parts.append(r.document.content)
-            if obs_parts:
-                parts.append("## Recent Observations\n\n" + "\n\n".join(obs_parts))
-                observations_added = True
+    if config.active_path.exists() and config.active_path.stat().st_size > 0:
+        parts.append(config.active_path.read_text())
 
-    # Fallback: include full observations file
-    if not observations_added:
-        if config.observations_path.exists() and config.observations_path.stat().st_size > 0:
-            parts.append("## Recent Observations\n\n" + config.observations_path.read_text())
+    # Backward-compatible fallback for older installs if derived files are unavailable.
+    if not parts:
+        if config.reflections_path.exists() and config.reflections_path.stat().st_size > 0:
+            parts.append("## Long-Term Memory (Reflections)\n\n" + config.reflections_path.read_text())
+
+        observations_added = False
+        backend = get_backend(config.search_backend, config)
+        if backend.is_ready():
+            results = backend.search("recent context current tasks projects", limit=10)
+            if results:
+                obs_parts = []
+                for r in results:
+                    if r.document.source.value == "observations":
+                        obs_parts.append(r.document.content)
+                if obs_parts:
+                    parts.append("## Recent Observations\n\n" + "\n\n".join(obs_parts))
+                    observations_added = True
+
+        if not observations_added:
+            if config.observations_path.exists() and config.observations_path.stat().st_size > 0:
+                parts.append("## Recent Observations\n\n" + config.observations_path.read_text())
 
     if parts:
         context_text = "\n\n---\n\n".join(parts)
@@ -628,6 +634,12 @@ def install(
         )
         click.echo(f"Created {config.reflections_path}")
 
+    from .startup_memory import refresh_startup_memory
+
+    refresh_startup_memory(config)
+    click.echo(f"Created {config.profile_path}")
+    click.echo(f"Created {config.active_path}")
+
     if targets in ("claude", "both"):
         _install_claude_hooks(config)
 
@@ -700,6 +712,21 @@ def status(ctx: click.Context) -> None:
         click.echo(f"  Lines: {lines}, Size: {size} bytes")
     else:
         click.echo("\nReflections: not created yet")
+
+    # Compact startup files
+    if config.profile_path.exists():
+        profile = config.profile_path.read_text()
+        click.echo(f"\nStartup profile: {config.profile_path}")
+        click.echo(f"  Lines: {len(profile.splitlines())}, Size: {len(profile)} bytes")
+    else:
+        click.echo("\nStartup profile: not created yet")
+
+    if config.active_path.exists():
+        active = config.active_path.read_text()
+        click.echo(f"\nActive context: {config.active_path}")
+        click.echo(f"  Lines: {len(active.splitlines())}, Size: {len(active)} bytes")
+    else:
+        click.echo("\nActive context: not created yet")
 
     # Cursor
     cursor = config.load_cursor()
@@ -1022,13 +1049,18 @@ _CODEX_OM_BLOCK = f"""{_CODEX_OM_MARKER}
 
 At the start of every session, read these files for context about the user:
 
-1. `~/.local/share/observational-memory/reflections.md` — long-term memory (identity, projects, preferences)
-2. `~/.local/share/observational-memory/observations.md` — recent compressed observations
+1. `~/.local/share/observational-memory/profile.md` — compact stable profile
+2. `~/.local/share/observational-memory/active.md` — compact active context
 
 If this is a long-lived Codex session, Codex observations run every 15 minutes by default.
 To adjust that interval, edit `~/.config/observational-memory/env` and set
 `OM_CODEX_OBSERVER_INTERVAL_MINUTES` (for example: `OM_CODEX_OBSERVER_INTERVAL_MINUTES=5`).
 You can run a manual checkpoint with `om observe --source codex`.
+
+For deeper context when needed, consult:
+- `~/.local/share/observational-memory/reflections.md`
+- `~/.local/share/observational-memory/observations.md`
+- `om search "<query>"`
 
 These files are auto-maintained. Do not modify them directly.
 {_CODEX_OM_MARKER}"""
@@ -1036,12 +1068,17 @@ These files are auto-maintained. Do not modify them directly.
 
 def _install_codex(config: Config) -> None:
     """Add observational memory instructions to ~/.codex/AGENTS.md."""
+    import re
+
     agents_md = config.codex_agents_md
 
     if agents_md.exists():
         content = agents_md.read_text()
         if _CODEX_OM_MARKER in content:
-            click.echo("Codex AGENTS.md already has observational memory instructions")
+            pattern = rf"\n*{re.escape(_CODEX_OM_MARKER)}.*?{re.escape(_CODEX_OM_MARKER)}\n*"
+            content = re.sub(pattern, "\n\n" + _CODEX_OM_BLOCK + "\n", content, flags=re.DOTALL)
+            agents_md.write_text(content.strip() + "\n")
+            click.echo(f"Updated observational memory instructions in {agents_md}")
             return
         content = content.rstrip() + "\n\n" + _CODEX_OM_BLOCK + "\n"
     else:

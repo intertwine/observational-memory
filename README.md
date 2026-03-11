@@ -60,13 +60,14 @@ Observational Memory fixes this. A single set of compressed memory files lives a
   <img src="assets/system-diagram.webp" alt="Observational Memory system diagram" width="640" />
 </p>
 
-### Three tiers of memory
+### Four tiers of memory
 
-| Tier                | Updated                                              | Retention    | Size                | Contents                        |
-| ------------------- | ---------------------------------------------------- | ------------ | ------------------- | ------------------------------- |
-| **Raw transcripts** | Real-time                                            | Session only | ~50K tokens/day     | Full conversation               |
-| **Observations**    | Per session + periodic checkpoints (~15 min default) | 7 days       | ~2K tokens/day      | Timestamped, prioritized notes  |
-| **Reflections**     | Daily                                                | Indefinite   | 200–600 lines total | Identity, projects, preferences |
+| Tier                    | Updated                                              | Retention    | Size                | Contents                                   |
+| ----------------------- | ---------------------------------------------------- | ------------ | ------------------- | ------------------------------------------ |
+| **Raw transcripts**     | Real-time                                            | Session only | ~50K tokens/day     | Full conversation                          |
+| **Observations**        | Per session + periodic checkpoints (~15 min default) | 7 days       | ~2K tokens/day      | Timestamped, prioritized notes             |
+| **Reflections**         | Daily                                                | Indefinite   | 200–600 lines total | Durable long-term memory                   |
+| **Startup profile/act** | Derived on install + observe/reflect                 | Derived      | small startup slice | Compact default context for session start  |
 
 ---
 
@@ -74,7 +75,7 @@ Observational Memory fixes this. A single set of compressed memory files lives a
 
 ### Claude Code integration
 
-**SessionStart hook:** On session start, `om context` retrieves relevant observations (BM25/QMD backend) and injects them with full reflections via `additionalContext`. If search is unavailable, it falls back to the full file dump.
+**SessionStart hook:** On session start, `om context` injects compact derived startup files (`profile.md` + `active.md`) via `additionalContext`. If those files are missing, it regenerates them from reflections/observations. If `om` is unavailable, the shell fallback still supports the older full-file dump behavior.
 
 **SessionEnd hook:** When a session ends, the observer runs on that transcript and compresses it into observations.
 
@@ -87,7 +88,7 @@ All hooks are installed automatically to `~/.claude/settings.json`.
 
 ### Codex CLI integration
 
-**AGENTS.md:** The installer adds instructions to `~/.codex/AGENTS.md` so Codex reads memory files at session start.
+**AGENTS.md:** The installer adds instructions to `~/.codex/AGENTS.md` so Codex reads compact startup memory files at session start, with deeper memory available on demand via `om search` or the raw memory files.
 
 **Cron observer:** A cron job runs every 15 minutes, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations. At the end of each observer run, `om` also checks whether reflections have fallen behind and runs a reflector catch-up when needed.
 
@@ -239,6 +240,13 @@ This file is sourced by the `om` CLI, the Claude Code hooks, and the cron jobs. 
 ### Memory location
 
 Default: `~/.local/share/observational-memory/`
+
+Key files:
+
+- `profile.md` — compact stable startup profile
+- `active.md` — compact active startup context
+- `reflections.md` — full long-term memory
+- `observations.md` — recent detailed notes
 
 Override with `XDG_DATA_HOME`:
 

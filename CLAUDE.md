@@ -57,7 +57,7 @@ Transcripts (Claude JSONL / Codex sessions)
 ### Agent integration
 
 - **Claude Code**: `SessionStart` injects memory via `additionalContext`; `SessionEnd`, `UserPromptSubmit`, and `PreCompact` hooks trigger checkpoints. In-session checkpoints are throttled by `OM_SESSION_OBSERVER_INTERVAL_SECONDS` and can be disabled with `OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS`.
-- **Codex CLI**: Instructions appended to `~/.codex/AGENTS.md`; cron job for observer.
+- **Codex CLI**: Instructions appended to `~/.codex/AGENTS.md`; cron job for observer. Startup priming is now driven by derived compact files (`profile.md` + `active.md`) instead of always loading full reflections/observations.
 
 ### API keys
 
