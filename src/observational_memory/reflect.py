@@ -57,15 +57,19 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
 
     # Check for auto-memory context, but only invoke the reflector for it
     # if auto-memory has actually changed since the last reflection.
+    # Note: auto-memory may be empty string (all files deleted) — the reflector
+    # still needs to run to clean up stale facts from reflections.
     auto_memory = ""
+    amem_changed = _auto_memory_changed_since_reflection(config)
     if not observations.strip():
         # No new observations — only proceed if auto-memory changed
-        auto_memory = _gather_auto_memory_if_changed(config)
-        if not auto_memory:
+        if not amem_changed:
             return None
+        auto_memory = _gather_auto_memory_context(config)
     else:
         # New observations exist — include auto-memory as supplementary context
-        auto_memory = _gather_auto_memory_context(config)
+        if amem_changed:
+            auto_memory = _gather_auto_memory_context(config)
 
     system_prompt = _load_reflector_prompt()
 
@@ -75,10 +79,10 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
 
     if estimated_tokens <= _MAX_INPUT_TOKENS:
         # Small enough — single pass
-        result = _reflect_single(system_prompt, reflections, observations, config, auto_memory)
+        result = _reflect_single(system_prompt, reflections, observations, config, auto_memory, amem_changed)
     else:
         # Too large — chunk observations and fold incrementally
-        result = _reflect_chunked(system_prompt, reflections, observations, config, auto_memory)
+        result = _reflect_chunked(system_prompt, reflections, observations, config, auto_memory, amem_changed)
 
     # Programmatically stamp the "Last reflected" timestamp so we don't
     # rely on the LLM to format it correctly.
@@ -141,22 +145,19 @@ def reflector_catchup_needed(config: Config | None = None, now_utc: datetime | N
     return now_utc - last_updated_at > timedelta(hours=24)
 
 
-def _gather_auto_memory_if_changed(config: Config) -> str:
-    """Return auto-memory context only if it changed since the last reflection.
+def _auto_memory_changed_since_reflection(config: Config) -> bool:
+    """Return True if auto-memory was scanned more recently than the last reflection.
 
     Compares the cursor's ``claude-memory.last_scan`` against the reflections'
-    ``Last updated`` timestamp. Returns empty string if auto-memory has not
-    changed, avoiding unnecessary LLM calls.
+    ``Last updated`` timestamp.
     """
     cursor = config.load_cursor()
     amem_cursor = cursor.get("claude-memory", {})
 
     last_scan_str = amem_cursor.get("last_scan")
     if not last_scan_str:
-        return ""  # auto-memory was never scanned
+        return False  # auto-memory was never scanned
 
-    # Check if any files actually changed in the most recent scan by comparing
-    # the scan timestamp against reflections' Last updated timestamp.
     reflections = ""
     if config.reflections_path.exists():
         reflections = config.reflections_path.read_text()
@@ -168,11 +169,11 @@ def _gather_auto_memory_if_changed(config: Config) -> str:
             if last_scan_dt.tzinfo is None:
                 last_scan_dt = last_scan_dt.replace(tzinfo=timezone.utc)
             if last_scan_dt <= last_updated:
-                return ""  # auto-memory hasn't changed since last reflection
+                return False  # auto-memory hasn't changed since last reflection
         except (ValueError, TypeError):
-            pass  # parse error — fall through to gather
+            pass  # parse error — assume changed
 
-    return _gather_auto_memory_context(config)
+    return True
 
 
 def _gather_auto_memory_context(config: Config) -> str:
@@ -215,17 +216,37 @@ def _gather_auto_memory_context(config: Config) -> str:
 
 
 def _reflect_single(
-    system_prompt: str, reflections: str, observations: str, config: Config, auto_memory: str = ""
+    system_prompt: str,
+    reflections: str,
+    observations: str,
+    config: Config,
+    auto_memory: str = "",
+    amem_changed: bool = False,
 ) -> str:
     """Single-pass reflection for small observation sets."""
-    amem_section = f"\n\n---\n\n{auto_memory}" if auto_memory else ""
+    if auto_memory:
+        amem_section = f"\n\n---\n\n{auto_memory}"
+    elif amem_changed:
+        # Auto-memory files were deleted — tell the reflector to clean up stale facts
+        amem_section = (
+            "\n\n---\n\n## Auto-Memory (cross-project facts)\n\n"
+            "(All auto-memory files have been removed. Remove any facts in reflections "
+            "that were sourced exclusively from auto-memory and are not corroborated by observations.)"
+        )
+    else:
+        amem_section = ""
     obs_section = f"## Current observations\n\n{observations}" if observations.strip() else "(no new observations)"
     user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n{obs_section}{amem_section}"
     return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
 
 
 def _reflect_chunked(
-    system_prompt: str, reflections: str, observations: str, config: Config, auto_memory: str = ""
+    system_prompt: str,
+    reflections: str,
+    observations: str,
+    config: Config,
+    auto_memory: str = "",
+    amem_changed: bool = False,
 ) -> str:
     """Chunked reflection: split observations into date sections, fold each into reflections."""
     chunks = _chunk_observations(observations)
