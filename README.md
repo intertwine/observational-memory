@@ -60,11 +60,12 @@ Observational Memory fixes this. A single set of compressed memory files lives a
   <img src="assets/system-diagram.webp" alt="Observational Memory system diagram" width="640" />
 </p>
 
-### Four tiers of memory
+### Five tiers of memory
 
 | Tier                    | Updated                                              | Retention    | Size                | Contents                                   |
 | ----------------------- | ---------------------------------------------------- | ------------ | ------------------- | ------------------------------------------ |
 | **Raw transcripts**     | Real-time                                            | Session only | ~50K tokens/day     | Full conversation                          |
+| **Auto-memory**         | Hourly scan (no LLM)                                 | Mirrors source | Per-project       | Claude Code per-project discrete facts     |
 | **Observations**        | Per session + periodic checkpoints (~15 min default) | 7 days       | ~2K tokens/day      | Timestamped, prioritized notes             |
 | **Reflections**         | Daily                                                | Indefinite   | 200–600 lines total | Durable long-term memory                   |
 | **Startup profile/act** | Derived on install + observe/reflect                 | Derived      | small startup slice | Compact default context for session start  |
@@ -85,6 +86,14 @@ To disable in-session checkpoints while keeping normal end-of-session capture, s
 `OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS=1` in `~/.config/observational-memory/env`.
 
 All hooks are installed automatically to `~/.claude/settings.json`.
+
+### Claude Code auto-memory integration
+
+**Auto-memory as input source:** Claude Code stores per-project discrete facts (preferences, feedback, decisions) in `~/.claude/projects/*/memory/*.md`. The `om observe --source claude-memory` command scans these files, detects changes via content hashing, and indexes them into the search layer. Unlike transcript-based sources, auto-memory files are already distilled — they bypass the observer LLM entirely.
+
+**Cross-project enrichment:** Auto-memory facts from all projects are supplied to the reflector as supplementary context, so knowledge from one project can surface when working in another.
+
+**Hourly cron:** An hourly cron job runs the auto-memory scan (no LLM calls — just hash comparison and reindex). Deletions are detected and the reflector is instructed to clean up stale facts.
 
 ### Codex CLI integration
 
@@ -181,9 +190,10 @@ om observe
 # Run observer on a specific transcript
 om observe --transcript ~/.claude/projects/.../abc123.jsonl
 
-# Run observer for one agent only
+# Run observer for one source only
 om observe --source claude
 om observe --source codex
+om observe --source claude-memory
 
 # Run reflector
 om reflect
@@ -260,6 +270,7 @@ export XDG_DATA_HOME=~/my-data
 The installer sets up:
 
 - **Observer (Codex):** `*/15 * * * *` by default (controlled by `OM_CODEX_OBSERVER_INTERVAL_MINUTES`, e.g. `*/10 * * * *` for 10 min)
+- **Auto-memory scan:** `0 * * * *` (hourly, no LLM calls — just hash comparison and reindex)
 - **Reflector:** `0 4 * * *` (daily at 04:00 UTC)
 
 Set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` in `~/.config/observational-memory/env` to tune Codex polling (`1` = every minute).

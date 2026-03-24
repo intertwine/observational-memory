@@ -72,11 +72,12 @@ observational-memory/
 │   ├── reflect.py                    # Reflector logic
 │   ├── transcripts/
 │   │   ├── claude.py                 # Claude Code JSONL parser
-│   │   └── codex.py                  # Codex CLI session parser
+│   │   ├── codex.py                  # Codex CLI session parser
+│   │   └── auto_memory.py            # Claude Code auto-memory scanner
 │   ├── search/                       # Pluggable search over memory files
 │   │   ├── __init__.py               # Document model, factory, reindex orchestrator
 │   │   ├── backend.py                # SearchBackend Protocol
-│   │   ├── parser.py                 # Parse observations/reflections into Documents
+│   │   ├── parser.py                 # Parse observations/reflections/auto-memory into Documents
 │   │   ├── bm25.py                   # BM25 backend (default, uses rank-bm25)
 │   │   ├── qmd.py                    # QMD backend (optional, shells out to qmd CLI)
 │   │   └── none.py                   # No-op backend
@@ -91,5 +92,6 @@ observational-memory/
     ├── test_observe.py               # Observer tests
     ├── test_reflect.py               # Reflector tests
     ├── test_search.py                # Search module tests
+    ├── test_auto_memory.py           # Auto-memory scanner tests
     └── fixtures/                     # Sample transcripts
 ```
