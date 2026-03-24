@@ -114,7 +114,7 @@ def observe_all_claude(config: Config | None = None, dry_run: bool = False) -> l
     return results
 
 
-def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> list[str]:
+def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> tuple[list[str], list[str]]:
     """Scan Claude Code auto-memory files and update the search index.
 
     Unlike transcript observers, this does NOT call the LLM — auto-memory
@@ -126,7 +126,7 @@ def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> 
         dry_run: If True, report changes without updating cursor or index.
 
     Returns:
-        List of changed file paths (empty if no changes detected).
+        Tuple of (changed_paths, deleted_paths).
     """
     from .transcripts.auto_memory import (
         detect_changes,
@@ -150,7 +150,7 @@ def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> 
     changed, deleted = detect_changes(amem_cursor, all_files)
 
     if not changed and not deleted:
-        return []
+        return [], []
 
     changed_paths = [str(mf.path) for mf in changed]
 
@@ -159,7 +159,7 @@ def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> 
         config.save_cursor(cursor)
         _reindex_if_enabled(config)
 
-    return changed_paths
+    return changed_paths, deleted
 
 
 def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> list[str]:

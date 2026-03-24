@@ -357,8 +357,9 @@ class TestObserveAutoMemory:
         _make_project(projects_dir, "project-a", {"MEMORY.md": SAMPLE_MEMORY_MD})
 
         config = Config(memory_dir=tmp_path, search_backend="bm25", claude_projects_dir=projects_dir)
-        changed = observe_auto_memory(config)
+        changed, deleted = observe_auto_memory(config)
         assert len(changed) == 1
+        assert deleted == []
 
     def test_no_changes_on_second_run(self, tmp_path):
         from observational_memory.observe import observe_auto_memory
@@ -368,8 +369,9 @@ class TestObserveAutoMemory:
 
         config = Config(memory_dir=tmp_path, search_backend="bm25", claude_projects_dir=projects_dir)
         observe_auto_memory(config)  # first run
-        changed = observe_auto_memory(config)  # second run
+        changed, deleted = observe_auto_memory(config)  # second run
         assert changed == []
+        assert deleted == []
 
     def test_detects_modified_file(self, tmp_path):
         from observational_memory.observe import observe_auto_memory
@@ -382,7 +384,7 @@ class TestObserveAutoMemory:
 
         # Modify the file
         (mem_dir / "MEMORY.md").write_text("# Updated Index\n\nNew content.")
-        changed = observe_auto_memory(config)
+        changed, _deleted = observe_auto_memory(config)
         assert len(changed) == 1
 
     def test_dry_run_does_not_update_cursor(self, tmp_path):
@@ -392,7 +394,7 @@ class TestObserveAutoMemory:
         _make_project(projects_dir, "project-a", {"MEMORY.md": SAMPLE_MEMORY_MD})
 
         config = Config(memory_dir=tmp_path, search_backend="bm25", claude_projects_dir=projects_dir)
-        changed = observe_auto_memory(config, dry_run=True)
+        changed, _deleted = observe_auto_memory(config, dry_run=True)
         assert len(changed) == 1
 
         # Cursor should not have been updated
@@ -413,7 +415,7 @@ class TestObserveAutoMemory:
             raise AssertionError("LLM compress() should never be called for auto-memory")
 
         monkeypatch.setattr(observe, "compress", _fail)
-        changed = observe.observe_auto_memory(config)
+        changed, _deleted = observe.observe_auto_memory(config)
         assert len(changed) == 1
 
     def test_deleted_last_file_clears_stale_cursor(self, tmp_path):
@@ -432,8 +434,10 @@ class TestObserveAutoMemory:
         # Delete the file
         (mem_dir / "MEMORY.md").unlink()
 
-        # Second run — must detect deletion even though all_files is empty
-        observe_auto_memory(config)
-        # The key assertion: cursor should now track zero files
+        # Second run — must detect deletion and report it
+        changed, deleted = observe_auto_memory(config)
+        assert changed == []
+        assert len(deleted) == 1
+        # Cursor should now track zero files
         cursor = config.load_cursor()
         assert len(cursor["claude-memory"]["files"]) == 0

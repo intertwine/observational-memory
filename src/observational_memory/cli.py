@@ -62,11 +62,16 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
 
     if source in ("claude-memory", "all"):
         click.echo("Scanning Claude Code auto-memory files...")
-        changed = observe_auto_memory(config, dry_run)
-        if changed:
-            click.echo(f"  {len(changed)} file(s) changed:")
-            for path in changed:
-                click.echo(f"    {path}")
+        changed, deleted = observe_auto_memory(config, dry_run)
+        if changed or deleted:
+            if changed:
+                click.echo(f"  {len(changed)} file(s) changed:")
+                for path in changed:
+                    click.echo(f"    {path}")
+            if deleted:
+                click.echo(f"  {len(deleted)} file(s) removed:")
+                for path in deleted:
+                    click.echo(f"    {path}")
         else:
             click.echo("  No changes detected.")
 

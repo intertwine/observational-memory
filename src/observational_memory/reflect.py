@@ -55,11 +55,17 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     last_reflected_date = _parse_last_reflected(reflections)
     observations = _filter_new_observations(raw_observations, last_reflected_date) if raw_observations.strip() else ""
 
-    # Check for auto-memory context even when there are no new observations
-    auto_memory = _gather_auto_memory_context(config)
-
-    if not observations.strip() and not auto_memory:
-        return None
+    # Check for auto-memory context, but only invoke the reflector for it
+    # if auto-memory has actually changed since the last reflection.
+    auto_memory = ""
+    if not observations.strip():
+        # No new observations — only proceed if auto-memory changed
+        auto_memory = _gather_auto_memory_if_changed(config)
+        if not auto_memory:
+            return None
+    else:
+        # New observations exist — include auto-memory as supplementary context
+        auto_memory = _gather_auto_memory_context(config)
 
     system_prompt = _load_reflector_prompt()
 
@@ -133,6 +139,40 @@ def reflector_catchup_needed(config: Config | None = None, now_utc: datetime | N
         now_utc = now_utc.astimezone(timezone.utc)
 
     return now_utc - last_updated_at > timedelta(hours=24)
+
+
+def _gather_auto_memory_if_changed(config: Config) -> str:
+    """Return auto-memory context only if it changed since the last reflection.
+
+    Compares the cursor's ``claude-memory.last_scan`` against the reflections'
+    ``Last updated`` timestamp. Returns empty string if auto-memory has not
+    changed, avoiding unnecessary LLM calls.
+    """
+    cursor = config.load_cursor()
+    amem_cursor = cursor.get("claude-memory", {})
+
+    last_scan_str = amem_cursor.get("last_scan")
+    if not last_scan_str:
+        return ""  # auto-memory was never scanned
+
+    # Check if any files actually changed in the most recent scan by comparing
+    # the scan timestamp against reflections' Last updated timestamp.
+    reflections = ""
+    if config.reflections_path.exists():
+        reflections = config.reflections_path.read_text()
+
+    last_updated = _parse_last_updated(reflections)
+    if last_updated is not None:
+        try:
+            last_scan_dt = datetime.fromisoformat(last_scan_str)
+            if last_scan_dt.tzinfo is None:
+                last_scan_dt = last_scan_dt.replace(tzinfo=timezone.utc)
+            if last_scan_dt <= last_updated:
+                return ""  # auto-memory hasn't changed since last reflection
+        except (ValueError, TypeError):
+            pass  # parse error — fall through to gather
+
+    return _gather_auto_memory_context(config)
 
 
 def _gather_auto_memory_context(config: Config) -> str:
