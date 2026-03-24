@@ -9,6 +9,7 @@ from enum import Enum
 class DocumentSource(Enum):
     OBSERVATIONS = "observations"
     REFLECTIONS = "reflections"
+    AUTO_MEMORY = "auto_memory"
 
 
 @dataclass
@@ -61,11 +62,12 @@ def reindex(config) -> int:
     Returns:
         Number of documents indexed.
     """
-    from .parser import parse_observations, parse_reflections
+    from .parser import parse_auto_memory, parse_observations, parse_reflections
 
     documents = []
     documents.extend(parse_observations(config.observations_path))
     documents.extend(parse_reflections(config.reflections_path))
+    documents.extend(parse_auto_memory(config.claude_projects_dir))
 
     backend = get_backend(config.search_backend, config)
     backend.index(documents)

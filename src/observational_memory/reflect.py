@@ -47,32 +47,42 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     if config.observations_path.exists():
         raw_observations = config.observations_path.read_text()
 
-    if not raw_observations.strip():
-        return None
-
     reflections = ""
     if config.reflections_path.exists():
         reflections = config.reflections_path.read_text()
 
     # Filter to only new observations since last reflection
     last_reflected_date = _parse_last_reflected(reflections)
-    observations = _filter_new_observations(raw_observations, last_reflected_date)
+    observations = _filter_new_observations(raw_observations, last_reflected_date) if raw_observations.strip() else ""
 
+    # Check for auto-memory context, but only invoke the reflector for it
+    # if auto-memory has actually changed since the last reflection.
+    # Note: auto-memory may be empty string (all files deleted) — the reflector
+    # still needs to run to clean up stale facts from reflections.
+    auto_memory = ""
+    amem_changed = _auto_memory_changed_since_reflection(config)
     if not observations.strip():
-        return None
+        # No new observations — only proceed if auto-memory changed
+        if not amem_changed:
+            return None
+        auto_memory = _gather_auto_memory_context(config)
+    else:
+        # New observations exist — include auto-memory as supplementary context
+        if amem_changed:
+            auto_memory = _gather_auto_memory_context(config)
 
     system_prompt = _load_reflector_prompt()
 
     # Estimate total input size
-    total_input_chars = len(system_prompt) + len(reflections) + len(observations)
+    total_input_chars = len(system_prompt) + len(reflections) + len(observations) + len(auto_memory)
     estimated_tokens = total_input_chars / _CHARS_PER_TOKEN
 
     if estimated_tokens <= _MAX_INPUT_TOKENS:
         # Small enough — single pass
-        result = _reflect_single(system_prompt, reflections, observations, config)
+        result = _reflect_single(system_prompt, reflections, observations, config, auto_memory, amem_changed)
     else:
         # Too large — chunk observations and fold incrementally
-        result = _reflect_chunked(system_prompt, reflections, observations, config)
+        result = _reflect_chunked(system_prompt, reflections, observations, config, auto_memory, amem_changed)
 
     # Programmatically stamp the "Last reflected" timestamp so we don't
     # rely on the LLM to format it correctly.
@@ -135,13 +145,113 @@ def reflector_catchup_needed(config: Config | None = None, now_utc: datetime | N
     return now_utc - last_updated_at > timedelta(hours=24)
 
 
-def _reflect_single(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
+def _auto_memory_changed_since_reflection(config: Config) -> bool:
+    """Return True if auto-memory was scanned more recently than the last reflection.
+
+    Compares the cursor's ``claude-memory.last_scan`` against the reflections'
+    ``Last updated`` timestamp.
+    """
+    cursor = config.load_cursor()
+    amem_cursor = cursor.get("claude-memory", {})
+
+    last_scan_str = amem_cursor.get("last_scan")
+    if not last_scan_str:
+        return False  # auto-memory was never scanned
+
+    reflections = ""
+    if config.reflections_path.exists():
+        reflections = config.reflections_path.read_text()
+
+    last_updated = _parse_last_updated(reflections)
+    if last_updated is not None:
+        try:
+            last_scan_dt = datetime.fromisoformat(last_scan_str)
+            if last_scan_dt.tzinfo is None:
+                last_scan_dt = last_scan_dt.replace(tzinfo=timezone.utc)
+            if last_scan_dt <= last_updated:
+                return False  # auto-memory hasn't changed since last reflection
+        except (ValueError, TypeError):
+            pass  # parse error — assume changed
+
+    return True
+
+
+def _gather_auto_memory_context(config: Config) -> str:
+    """Collect auto-memory content as supplementary reflector input.
+
+    Reads all Claude Code auto-memory files and formats them as a
+    cross-project facts section. Returns empty string if no auto-memory
+    files exist.
+    """
+    from .transcripts.auto_memory import find_memory_directories, parse_memory_file, scan_memory_files
+
+    dirs = find_memory_directories(config.claude_projects_dir)
+    if not dirs:
+        return ""
+
+    sections: list[str] = []
+    for memory_dir in dirs:
+        files = scan_memory_files(memory_dir)
+        if not files:
+            continue
+
+        project_slug = files[0].project_slug
+        items: list[str] = []
+        for mf in files:
+            doc = parse_memory_file(mf)
+            # Truncate long entries to keep reflector context manageable
+            body = doc.content[:500].strip()
+            if len(doc.content) > 500:
+                body += " [...]"
+            label = doc.metadata.get("name", mf.path.stem)
+            items.append(f"- **{label}**: {body}")
+
+        if items:
+            sections.append(f"### Project: {project_slug}\n" + "\n".join(items))
+
+    if not sections:
+        return ""
+
+    return "## Auto-Memory (cross-project facts)\n\n" + "\n\n".join(sections)
+
+
+def _auto_memory_section(auto_memory: str, amem_changed: bool) -> str:
+    """Build the optional auto-memory section for reflector input."""
+    if auto_memory:
+        return f"\n\n---\n\n{auto_memory}"
+    if amem_changed:
+        # Auto-memory files were deleted — tell the reflector to clean up stale facts.
+        return (
+            "\n\n---\n\n## Auto-Memory (cross-project facts)\n\n"
+            "(All auto-memory files have been removed. Remove any facts in reflections "
+            "that were sourced exclusively from auto-memory and are not corroborated by observations.)"
+        )
+    return ""
+
+
+def _reflect_single(
+    system_prompt: str,
+    reflections: str,
+    observations: str,
+    config: Config,
+    auto_memory: str = "",
+    amem_changed: bool = False,
+) -> str:
     """Single-pass reflection for small observation sets."""
-    user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n## Current observations\n\n{observations}"
+    amem_section = _auto_memory_section(auto_memory, amem_changed)
+    obs_section = f"## Current observations\n\n{observations}" if observations.strip() else "(no new observations)"
+    user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n{obs_section}{amem_section}"
     return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
 
 
-def _reflect_chunked(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
+def _reflect_chunked(
+    system_prompt: str,
+    reflections: str,
+    observations: str,
+    config: Config,
+    auto_memory: str = "",
+    amem_changed: bool = False,
+) -> str:
     """Chunked reflection: split observations into date sections, fold each into reflections."""
     chunks = _chunk_observations(observations)
 
@@ -158,10 +268,15 @@ def _reflect_chunked(system_prompt: str, reflections: str, observations: str, co
                 "Produce the complete updated reflections document."
             ).format(i=i, total=len(chunks))
 
+        # Include auto-memory context only in the final chunk
+        amem_section = ""
+        if is_last:
+            amem_section = _auto_memory_section(auto_memory, amem_changed)
+
         user_content = (
             f"## Current reflections\n\n{running_reflections}\n\n"
             f"---\n\n"
-            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}"
+            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}{amem_section}"
         )
         running_reflections = compress(
             fold_prompt,

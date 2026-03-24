@@ -114,6 +114,54 @@ def observe_all_claude(config: Config | None = None, dry_run: bool = False) -> l
     return results
 
 
+def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> tuple[list[str], list[str]]:
+    """Scan Claude Code auto-memory files and update the search index.
+
+    Unlike transcript observers, this does NOT call the LLM — auto-memory
+    files are already distilled facts. It detects changed files via content
+    hashing and triggers a reindex when changes are found.
+
+    Args:
+        config: Runtime config. Uses defaults if None.
+        dry_run: If True, report changes without updating cursor or index.
+
+    Returns:
+        Tuple of (changed_paths, deleted_paths).
+    """
+    from .transcripts.auto_memory import (
+        detect_changes,
+        find_memory_directories,
+        scan_memory_files,
+        update_cursor,
+    )
+
+    if config is None:
+        config = Config()
+
+    # Collect all memory files across projects
+    all_files = []
+    for memory_dir in find_memory_directories(config.claude_projects_dir):
+        all_files.extend(scan_memory_files(memory_dir))
+
+    # Detect changes against cursor (even when all_files is empty —
+    # deletions of the last file must still clear stale index entries)
+    cursor = config.load_cursor()
+    amem_cursor = cursor.get("claude-memory", {})
+    changed, deleted = detect_changes(amem_cursor, all_files)
+
+    if not changed and not deleted:
+        return [], []
+
+    changed_paths = [str(mf.path) for mf in changed]
+
+    if not dry_run:
+        update_cursor(cursor, all_files)
+        config.save_cursor(cursor)
+        _reindex_if_enabled(config)
+
+    return changed_paths, deleted
+
+
 def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> list[str]:
     """Scan all recent Codex sessions and run observer on each."""
     from .transcripts.codex import (

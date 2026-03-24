@@ -25,13 +25,16 @@ def cli(ctx: click.Context) -> None:
 @cli.command()
 @click.option("--transcript", type=click.Path(exists=True, path_type=Path), help="Specific transcript file to process")
 @click.option(
-    "--source", type=click.Choice(["claude", "codex", "all"]), default="all", help="Which agent transcripts to process"
+    "--source",
+    type=click.Choice(["claude", "codex", "claude-memory", "all"]),
+    default="all",
+    help="Which agent transcripts to process",
 )
 @click.option("--dry-run", is_flag=True, help="Print observations without writing")
 @click.pass_context
 def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: bool) -> None:
     """Run the observer to compress transcripts into observations."""
-    from .observe import observe_all_claude, observe_all_codex, observe_claude_transcript
+    from .observe import observe_all_claude, observe_all_codex, observe_auto_memory, observe_claude_transcript
 
     config = ctx.obj["config"]
 
@@ -57,6 +60,21 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
         click.echo("Scanning Codex sessions...")
         results.extend(observe_all_codex(config, dry_run))
 
+    if source in ("claude-memory", "all"):
+        click.echo("Scanning Claude Code auto-memory files...")
+        changed, deleted = observe_auto_memory(config, dry_run)
+        if changed or deleted:
+            if changed:
+                click.echo(f"  {len(changed)} file(s) changed:")
+                for path in changed:
+                    click.echo(f"    {path}")
+            if deleted:
+                click.echo(f"  {len(deleted)} file(s) removed:")
+                for path in deleted:
+                    click.echo(f"    {path}")
+        else:
+            click.echo("  No changes detected.")
+
     if results:
         click.echo(f"Processed {len(results)} transcript(s)")
         if dry_run:
@@ -64,7 +82,8 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
                 click.echo("---")
                 click.echo(r)
     else:
-        click.echo("No new messages to process.")
+        if source not in ("claude-memory",):
+            click.echo("No new messages to process.")
 
     if not dry_run:
         _maybe_run_reflector_catchup(config)
@@ -111,7 +130,10 @@ def _maybe_run_reflector_catchup(config: Config) -> None:
 
 @cli.command()
 @click.option(
-    "--source", type=click.Choice(["claude", "codex", "all"]), default="all", help="Which transcripts to process"
+    "--source",
+    type=click.Choice(["claude", "codex", "claude-memory", "all"]),
+    default="all",
+    help="Which transcripts to process",
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be processed without writing")
 @click.option("--limit", type=int, default=0, help="Max transcripts to process (0 = unlimited)")
@@ -795,6 +817,20 @@ def status(ctx: click.Context) -> None:
     else:
         click.echo(f"\nCodex: AGENTS.md not found at {config.codex_agents_md}")
 
+    # Auto-memory (Claude Code per-project memory)
+    from .transcripts.auto_memory import find_memory_directories
+
+    memory_dirs = find_memory_directories(config.claude_projects_dir)
+    if memory_dirs:
+        total_files = sum(len(list(d.glob("*.md"))) for d in memory_dirs)
+        click.echo(f"\nAuto-memory: {len(memory_dirs)} project(s), {total_files} file(s)")
+        amem_cursor = cursor.get("claude-memory", {})
+        tracked = len(amem_cursor.get("files", {}))
+        last_scan = amem_cursor.get("last_scan", "never")
+        click.echo(f"  Tracked: {tracked} file(s), last scan: {last_scan}")
+    else:
+        click.echo("\nAuto-memory: no project memory directories found")
+
 
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
@@ -1160,6 +1196,9 @@ def _install_cron(config: Config, targets: str) -> None:
     if targets in ("codex", "both"):
         # Observer cron for Codex (Claude uses hooks instead)
         jobs.append(f"{codex_interval} * * * * {prefix}{om_path} observe --source codex 2>/dev/null")
+
+    # Hourly auto-memory scan (no LLM calls — just hash comparison + reindex)
+    jobs.append(f"0 * * * * {prefix}{om_path} observe --source claude-memory 2>/dev/null")
 
     # Daily reflector for all
     jobs.append(f"0 4 * * * {prefix}{om_path} reflect 2>/dev/null")

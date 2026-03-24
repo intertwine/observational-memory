@@ -20,13 +20,13 @@ from observational_memory.reflect import (
 
 class TestRunReflector:
     def test_no_observations_returns_none(self, tmp_path):
-        config = Config(memory_dir=tmp_path / "memory")
+        config = Config(memory_dir=tmp_path / "memory", claude_projects_dir=tmp_path / "projects")
         config.ensure_memory_dir()
         result = run_reflector(config, dry_run=True)
         assert result is None
 
     def test_empty_observations_returns_none(self, tmp_path):
-        config = Config(memory_dir=tmp_path / "memory")
+        config = Config(memory_dir=tmp_path / "memory", claude_projects_dir=tmp_path / "projects")
         config.ensure_memory_dir()
         config.observations_path.write_text("")
         result = run_reflector(config, dry_run=True)
@@ -366,6 +366,25 @@ class TestReflectChunked:
         last_call_system = mock_compress.call_args_list[1][0][0]
         assert "chunk" not in last_call_system or "NOTE" not in last_call_system
 
+    @patch("observational_memory.reflect.compress")
+    def test_final_chunk_gets_auto_memory_cleanup_note_on_deletion(self, mock_compress, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+
+        mock_compress.side_effect = [
+            "# Reflections after 1",
+            "# Reflections after 2",
+        ]
+
+        big = "- 🔴 10:00 " + "x" * 50000 + "\n\n"
+        observations = f"# Observations\n\n## 2026-02-07\n\n{big}## 2026-02-08\n\n{big}"
+
+        _reflect_chunked("system prompt", "", observations, config, auto_memory="", amem_changed=True)
+
+        first_call_user = mock_compress.call_args_list[0][0][1]
+        last_call_user = mock_compress.call_args_list[1][0][1]
+        assert "All auto-memory files have been removed" not in first_call_user
+        assert "All auto-memory files have been removed" in last_call_user
+
 
 class TestRunReflectorTimestampIntegration:
     """Integration tests for timestamp filtering in the full run_reflector flow."""
@@ -416,7 +435,7 @@ class TestRunReflectorTimestampIntegration:
 
     @patch("observational_memory.reflect.compress")
     def test_returns_none_when_no_new_observations(self, mock_compress, tmp_path):
-        config = Config(memory_dir=tmp_path / "memory")
+        config = Config(memory_dir=tmp_path / "memory", claude_projects_dir=tmp_path / "projects")
         config.ensure_memory_dir()
 
         config.reflections_path.write_text("# Reflections\n\n*Last reflected: 2026-02-10*\n\n## Core Identity\n")
