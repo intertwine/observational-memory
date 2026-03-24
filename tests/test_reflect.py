@@ -366,6 +366,25 @@ class TestReflectChunked:
         last_call_system = mock_compress.call_args_list[1][0][0]
         assert "chunk" not in last_call_system or "NOTE" not in last_call_system
 
+    @patch("observational_memory.reflect.compress")
+    def test_final_chunk_gets_auto_memory_cleanup_note_on_deletion(self, mock_compress, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+
+        mock_compress.side_effect = [
+            "# Reflections after 1",
+            "# Reflections after 2",
+        ]
+
+        big = "- 🔴 10:00 " + "x" * 50000 + "\n\n"
+        observations = f"# Observations\n\n## 2026-02-07\n\n{big}## 2026-02-08\n\n{big}"
+
+        _reflect_chunked("system prompt", "", observations, config, auto_memory="", amem_changed=True)
+
+        first_call_user = mock_compress.call_args_list[0][0][1]
+        last_call_user = mock_compress.call_args_list[1][0][1]
+        assert "All auto-memory files have been removed" not in first_call_user
+        assert "All auto-memory files have been removed" in last_call_user
+
 
 class TestRunReflectorTimestampIntegration:
     """Integration tests for timestamp filtering in the full run_reflector flow."""

@@ -215,6 +215,20 @@ def _gather_auto_memory_context(config: Config) -> str:
     return "## Auto-Memory (cross-project facts)\n\n" + "\n\n".join(sections)
 
 
+def _auto_memory_section(auto_memory: str, amem_changed: bool) -> str:
+    """Build the optional auto-memory section for reflector input."""
+    if auto_memory:
+        return f"\n\n---\n\n{auto_memory}"
+    if amem_changed:
+        # Auto-memory files were deleted — tell the reflector to clean up stale facts.
+        return (
+            "\n\n---\n\n## Auto-Memory (cross-project facts)\n\n"
+            "(All auto-memory files have been removed. Remove any facts in reflections "
+            "that were sourced exclusively from auto-memory and are not corroborated by observations.)"
+        )
+    return ""
+
+
 def _reflect_single(
     system_prompt: str,
     reflections: str,
@@ -224,17 +238,7 @@ def _reflect_single(
     amem_changed: bool = False,
 ) -> str:
     """Single-pass reflection for small observation sets."""
-    if auto_memory:
-        amem_section = f"\n\n---\n\n{auto_memory}"
-    elif amem_changed:
-        # Auto-memory files were deleted — tell the reflector to clean up stale facts
-        amem_section = (
-            "\n\n---\n\n## Auto-Memory (cross-project facts)\n\n"
-            "(All auto-memory files have been removed. Remove any facts in reflections "
-            "that were sourced exclusively from auto-memory and are not corroborated by observations.)"
-        )
-    else:
-        amem_section = ""
+    amem_section = _auto_memory_section(auto_memory, amem_changed)
     obs_section = f"## Current observations\n\n{observations}" if observations.strip() else "(no new observations)"
     user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n{obs_section}{amem_section}"
     return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
@@ -266,8 +270,8 @@ def _reflect_chunked(
 
         # Include auto-memory context only in the final chunk
         amem_section = ""
-        if is_last and auto_memory:
-            amem_section = f"\n\n---\n\n{auto_memory}"
+        if is_last:
+            amem_section = _auto_memory_section(auto_memory, amem_changed)
 
         user_content = (
             f"## Current reflections\n\n{running_reflections}\n\n"
