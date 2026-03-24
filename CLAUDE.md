@@ -41,18 +41,24 @@ Cross-agent observational memory that works at the **user level** (not per-proje
 Transcripts (Claude JSONL / Codex sessions)
   → observe.py (LLM compression → observations.md)
   → reflect.py (daily consolidation → reflections.md)
+
+Auto-memory (~/.claude/projects/*/memory/*.md)
+  → observe.py:observe_auto_memory (content-hash scan, NO LLM)
+  → search index (DocumentSource.AUTO_MEMORY)
+  → reflect.py (supplementary cross-project context)
 ```
 
 ### Key modules
 
 - **`src/observational_memory/transcripts/claude.py`** — Parses Claude Code `.jsonl` transcripts. Each line is a JSON object with `type` (user/assistant/progress), `message.content` (text or array of blocks), `uuid`, `timestamp`.
 - **`src/observational_memory/transcripts/codex.py`** — Parses Codex CLI session files (`*.json` and `*.jsonl`) from `~/.codex/sessions/`.
-- **`src/observational_memory/observe.py`** — Observer: reads transcripts, finds new messages via cursor bookmarks, calls LLM to compress, appends to `observations.md`.
-- **`src/observational_memory/reflect.py`** — Reflector: reads observations + reflections, calls LLM to condense, writes `reflections.md`, trims old observations.
+- **`src/observational_memory/transcripts/auto_memory.py`** — Scans Claude Code auto-memory files (`~/.claude/projects/*/memory/*.md`). Content-hash change detection, project slug extraction, YAML frontmatter parsing. Read-only — never writes to auto-memory directories.
+- **`src/observational_memory/observe.py`** — Observer: reads transcripts, finds new messages via cursor bookmarks, calls LLM to compress, appends to `observations.md`. Also contains `observe_auto_memory()` which bypasses the LLM (auto-memory files are already distilled) and only updates the search index.
+- **`src/observational_memory/reflect.py`** — Reflector: reads observations + reflections + auto-memory context, calls LLM to condense, writes `reflections.md`, trims old observations. Auto-memory is only included when it has changed since last reflection (timestamp comparison). On deletion, the reflector receives cleanup instructions.
 - **`src/observational_memory/llm.py`** — Thin abstraction over Anthropic and OpenAI APIs. Auto-detects provider from env vars.
 - **`src/observational_memory/config.py`** — All paths, defaults, cursor management. Memory dir follows XDG spec. Search backend is configurable via `OM_SEARCH_BACKEND` env var.
 - **`src/observational_memory/cli.py`** — Click CLI (`om` command). Commands: observe, reflect, backfill, search, context, install, uninstall, status, doctor.
-- **`src/observational_memory/search/`** — Pluggable search over memory files. BM25 backend (default, uses `rank-bm25`), QMD backend (optional, shells out to `qmd` CLI — `"qmd"` for keyword search, `"qmd-hybrid"` for hybrid BM25 + vector + LLM reranking), None backend (no-op). Parser splits observations by date, reflections by section. The `reindex()` orchestrator is called automatically after observe/reflect writes.
+- **`src/observational_memory/search/`** — Pluggable search over memory files. Three document sources: `OBSERVATIONS`, `REFLECTIONS`, `AUTO_MEMORY`. BM25 backend (default, uses `rank-bm25`), QMD backend (optional, shells out to `qmd` CLI — `"qmd"` for keyword search, `"qmd-hybrid"` for hybrid BM25 + vector + LLM reranking), None backend (no-op). Parser splits observations by date, reflections by section, auto-memory by file. The `reindex()` orchestrator is called automatically after observe/reflect writes. Auto-memory doc IDs use `amem:<project-slug>/<stem>` prefix.
 
 ### Agent integration
 
