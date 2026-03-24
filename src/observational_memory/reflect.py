@@ -47,32 +47,32 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     if config.observations_path.exists():
         raw_observations = config.observations_path.read_text()
 
-    if not raw_observations.strip():
-        return None
-
     reflections = ""
     if config.reflections_path.exists():
         reflections = config.reflections_path.read_text()
 
     # Filter to only new observations since last reflection
     last_reflected_date = _parse_last_reflected(reflections)
-    observations = _filter_new_observations(raw_observations, last_reflected_date)
+    observations = _filter_new_observations(raw_observations, last_reflected_date) if raw_observations.strip() else ""
 
-    if not observations.strip():
+    # Check for auto-memory context even when there are no new observations
+    auto_memory = _gather_auto_memory_context(config)
+
+    if not observations.strip() and not auto_memory:
         return None
 
     system_prompt = _load_reflector_prompt()
 
     # Estimate total input size
-    total_input_chars = len(system_prompt) + len(reflections) + len(observations)
+    total_input_chars = len(system_prompt) + len(reflections) + len(observations) + len(auto_memory)
     estimated_tokens = total_input_chars / _CHARS_PER_TOKEN
 
     if estimated_tokens <= _MAX_INPUT_TOKENS:
         # Small enough — single pass
-        result = _reflect_single(system_prompt, reflections, observations, config)
+        result = _reflect_single(system_prompt, reflections, observations, config, auto_memory)
     else:
         # Too large — chunk observations and fold incrementally
-        result = _reflect_chunked(system_prompt, reflections, observations, config)
+        result = _reflect_chunked(system_prompt, reflections, observations, config, auto_memory)
 
     # Programmatically stamp the "Last reflected" timestamp so we don't
     # rely on the LLM to format it correctly.
@@ -174,17 +174,19 @@ def _gather_auto_memory_context(config: Config) -> str:
     return "## Auto-Memory (cross-project facts)\n\n" + "\n\n".join(sections)
 
 
-def _reflect_single(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
+def _reflect_single(
+    system_prompt: str, reflections: str, observations: str, config: Config, auto_memory: str = ""
+) -> str:
     """Single-pass reflection for small observation sets."""
-    auto_memory = _gather_auto_memory_context(config)
     amem_section = f"\n\n---\n\n{auto_memory}" if auto_memory else ""
-    user_content = (
-        f"## Current reflections\n\n{reflections}\n\n---\n\n## Current observations\n\n{observations}{amem_section}"
-    )
+    obs_section = f"## Current observations\n\n{observations}" if observations.strip() else "(no new observations)"
+    user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n{obs_section}{amem_section}"
     return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
 
 
-def _reflect_chunked(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
+def _reflect_chunked(
+    system_prompt: str, reflections: str, observations: str, config: Config, auto_memory: str = ""
+) -> str:
     """Chunked reflection: split observations into date sections, fold each into reflections."""
     chunks = _chunk_observations(observations)
 
@@ -203,10 +205,8 @@ def _reflect_chunked(system_prompt: str, reflections: str, observations: str, co
 
         # Include auto-memory context only in the final chunk
         amem_section = ""
-        if is_last:
-            auto_memory = _gather_auto_memory_context(config)
-            if auto_memory:
-                amem_section = f"\n\n---\n\n{auto_memory}"
+        if is_last and auto_memory:
+            amem_section = f"\n\n---\n\n{auto_memory}"
 
         user_content = (
             f"## Current reflections\n\n{running_reflections}\n\n"

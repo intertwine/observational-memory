@@ -143,10 +143,8 @@ def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> 
     for memory_dir in find_memory_directories(config.claude_projects_dir):
         all_files.extend(scan_memory_files(memory_dir))
 
-    if not all_files:
-        return []
-
-    # Detect changes against cursor
+    # Detect changes against cursor (even when all_files is empty —
+    # deletions of the last file must still clear stale index entries)
     cursor = config.load_cursor()
     amem_cursor = cursor.get("claude-memory", {})
     changed, deleted = detect_changes(amem_cursor, all_files)

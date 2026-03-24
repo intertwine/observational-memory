@@ -49,21 +49,25 @@ def extract_project_slug(project_dir_name: str) -> str:
     """Extract a human-readable slug from a sanitized project directory name.
 
     Claude Code sanitizes paths by replacing ``/`` with ``-``, producing names
-    like ``-Users-bryanyoung-experiments-hive-orchestrator``. This extracts the
-    last two meaningful segments to produce ``hive-orchestrator``.
+    like ``-Users-bryanyoung-experiments-hive-orchestrator``. This strips the
+    user home prefix (``Users-<username>``) and joins the remaining segments,
+    preserving uniqueness across projects with the same leaf name.
 
     Args:
         project_dir_name: The sanitized directory name (e.g. from ``~/.claude/projects/``).
 
     Returns:
-        A short, readable project slug.
+        A unique, readable project slug.
     """
     # Split on hyphens, filter empty segments
     parts = [p for p in project_dir_name.split("-") if p]
-    if len(parts) >= 2:
-        return "-".join(parts[-2:])
-    elif parts:
-        return parts[-1]
+
+    # Strip "Users" + username prefix (first two real segments)
+    if len(parts) >= 3 and parts[0] == "Users":
+        parts = parts[2:]  # drop ["Users", "<username>"]
+
+    if parts:
+        return "-".join(parts)
     return project_dir_name.strip("-") or "unknown"
 
 

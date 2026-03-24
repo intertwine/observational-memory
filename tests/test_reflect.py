@@ -20,13 +20,13 @@ from observational_memory.reflect import (
 
 class TestRunReflector:
     def test_no_observations_returns_none(self, tmp_path):
-        config = Config(memory_dir=tmp_path / "memory")
+        config = Config(memory_dir=tmp_path / "memory", claude_projects_dir=tmp_path / "projects")
         config.ensure_memory_dir()
         result = run_reflector(config, dry_run=True)
         assert result is None
 
     def test_empty_observations_returns_none(self, tmp_path):
-        config = Config(memory_dir=tmp_path / "memory")
+        config = Config(memory_dir=tmp_path / "memory", claude_projects_dir=tmp_path / "projects")
         config.ensure_memory_dir()
         config.observations_path.write_text("")
         result = run_reflector(config, dry_run=True)
@@ -416,7 +416,7 @@ class TestRunReflectorTimestampIntegration:
 
     @patch("observational_memory.reflect.compress")
     def test_returns_none_when_no_new_observations(self, mock_compress, tmp_path):
-        config = Config(memory_dir=tmp_path / "memory")
+        config = Config(memory_dir=tmp_path / "memory", claude_projects_dir=tmp_path / "projects")
         config.ensure_memory_dir()
 
         config.reflections_path.write_text("# Reflections\n\n*Last reflected: 2026-02-10*\n\n## Core Identity\n")

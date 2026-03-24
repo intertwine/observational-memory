@@ -59,13 +59,13 @@ The system uses a plugin-based backend.
 
 class TestProjectSlugExtraction:
     def test_standard_path(self):
-        assert extract_project_slug("-Users-bryanyoung-experiments-hive-orchestrator") == "hive-orchestrator"
+        assert (
+            extract_project_slug("-Users-bryanyoung-experiments-hive-orchestrator") == "experiments-hive-orchestrator"
+        )
 
     def test_short_path(self):
-        assert (
-            extract_project_slug("-Users-bryanyoung") == "experiments-bryanyoung"
-            or extract_project_slug("-Users-bryanyoung") == "Users-bryanyoung"
-        )
+        # Only "Users" + username — not enough parts to strip, keeps as-is
+        assert extract_project_slug("-Users-bryanyoung") == "Users-bryanyoung"
 
     def test_single_segment(self):
         assert extract_project_slug("-myproject") == "myproject"
@@ -74,8 +74,17 @@ class TestProjectSlugExtraction:
         result = extract_project_slug("---")
         assert result == "unknown" or result  # should not crash
 
-    def test_deep_path(self):
-        assert extract_project_slug("-Users-bryanyoung-code-projects-deep-repo") == "deep-repo"
+    def test_deep_path_preserves_uniqueness(self):
+        """Two projects with the same leaf but different parents must not collide."""
+        slug_a = extract_project_slug("-Users-bryanyoung-work-client-portal")
+        slug_b = extract_project_slug("-Users-bryanyoung-repos-client-portal")
+        assert slug_a == "work-client-portal"
+        assert slug_b == "repos-client-portal"
+        assert slug_a != slug_b
+
+    def test_non_users_prefix(self):
+        """Paths not starting with Users keep all segments."""
+        assert extract_project_slug("-opt-projects-myapp") == "opt-projects-myapp"
 
 
 # --- Find Memory Directories ---
@@ -164,7 +173,7 @@ class TestScanMemoryFiles:
         )
 
         files = scan_memory_files(mem_dir)
-        assert files[0].project_slug == "hive-orchestrator"
+        assert files[0].project_slug == "experiments-hive-orchestrator"
 
 
 # --- Frontmatter Stripping ---
@@ -406,3 +415,25 @@ class TestObserveAutoMemory:
         monkeypatch.setattr(observe, "compress", _fail)
         changed = observe.observe_auto_memory(config)
         assert len(changed) == 1
+
+    def test_deleted_last_file_clears_stale_cursor(self, tmp_path):
+        """Deleting the last auto-memory file must clear cursor and trigger reindex."""
+        from observational_memory.observe import observe_auto_memory
+
+        projects_dir = tmp_path / "projects"
+        mem_dir = _make_project(projects_dir, "project-a", {"MEMORY.md": SAMPLE_MEMORY_MD})
+
+        config = Config(memory_dir=tmp_path, search_backend="bm25", claude_projects_dir=projects_dir)
+        observe_auto_memory(config)  # first run — tracks file
+
+        cursor = config.load_cursor()
+        assert len(cursor["claude-memory"]["files"]) == 1
+
+        # Delete the file
+        (mem_dir / "MEMORY.md").unlink()
+
+        # Second run — must detect deletion even though all_files is empty
+        observe_auto_memory(config)
+        # The key assertion: cursor should now track zero files
+        cursor = config.load_cursor()
+        assert len(cursor["claude-memory"]["files"]) == 0
