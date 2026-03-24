@@ -135,9 +135,52 @@ def reflector_catchup_needed(config: Config | None = None, now_utc: datetime | N
     return now_utc - last_updated_at > timedelta(hours=24)
 
 
+def _gather_auto_memory_context(config: Config) -> str:
+    """Collect auto-memory content as supplementary reflector input.
+
+    Reads all Claude Code auto-memory files and formats them as a
+    cross-project facts section. Returns empty string if no auto-memory
+    files exist.
+    """
+    from .transcripts.auto_memory import find_memory_directories, parse_memory_file, scan_memory_files
+
+    dirs = find_memory_directories(config.claude_projects_dir)
+    if not dirs:
+        return ""
+
+    sections: list[str] = []
+    for memory_dir in dirs:
+        files = scan_memory_files(memory_dir)
+        if not files:
+            continue
+
+        project_slug = files[0].project_slug
+        items: list[str] = []
+        for mf in files:
+            doc = parse_memory_file(mf)
+            # Truncate long entries to keep reflector context manageable
+            body = doc.content[:500].strip()
+            if len(doc.content) > 500:
+                body += " [...]"
+            label = doc.metadata.get("name", mf.path.stem)
+            items.append(f"- **{label}**: {body}")
+
+        if items:
+            sections.append(f"### Project: {project_slug}\n" + "\n".join(items))
+
+    if not sections:
+        return ""
+
+    return "## Auto-Memory (cross-project facts)\n\n" + "\n\n".join(sections)
+
+
 def _reflect_single(system_prompt: str, reflections: str, observations: str, config: Config) -> str:
     """Single-pass reflection for small observation sets."""
-    user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n## Current observations\n\n{observations}"
+    auto_memory = _gather_auto_memory_context(config)
+    amem_section = f"\n\n---\n\n{auto_memory}" if auto_memory else ""
+    user_content = (
+        f"## Current reflections\n\n{reflections}\n\n---\n\n## Current observations\n\n{observations}{amem_section}"
+    )
     return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
 
 
@@ -158,10 +201,17 @@ def _reflect_chunked(system_prompt: str, reflections: str, observations: str, co
                 "Produce the complete updated reflections document."
             ).format(i=i, total=len(chunks))
 
+        # Include auto-memory context only in the final chunk
+        amem_section = ""
+        if is_last:
+            auto_memory = _gather_auto_memory_context(config)
+            if auto_memory:
+                amem_section = f"\n\n---\n\n{auto_memory}"
+
         user_content = (
             f"## Current reflections\n\n{running_reflections}\n\n"
             f"---\n\n"
-            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}"
+            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}{amem_section}"
         )
         running_reflections = compress(
             fold_prompt,

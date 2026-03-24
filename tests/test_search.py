@@ -286,7 +286,9 @@ class TestGetBackend:
 
 class TestReindex:
     def test_reindex_parses_and_indexes(self, tmp_path):
-        config = Config(memory_dir=tmp_path, search_backend="bm25")
+        empty_projects = tmp_path / "projects"
+        empty_projects.mkdir()
+        config = Config(memory_dir=tmp_path, search_backend="bm25", claude_projects_dir=empty_projects)
         (tmp_path / "observations.md").write_text(SAMPLE_OBSERVATIONS)
         (tmp_path / "reflections.md").write_text(SAMPLE_REFLECTIONS)
 
@@ -297,7 +299,9 @@ class TestReindex:
         assert backend.is_ready()
 
     def test_reindex_empty_files(self, tmp_path):
-        config = Config(memory_dir=tmp_path, search_backend="bm25")
+        empty_projects = tmp_path / "projects"
+        empty_projects.mkdir()
+        config = Config(memory_dir=tmp_path, search_backend="bm25", claude_projects_dir=empty_projects)
         (tmp_path / "observations.md").write_text("")
         (tmp_path / "reflections.md").write_text("")
 
@@ -305,6 +309,8 @@ class TestReindex:
         assert n == 0
 
     def test_reindex_missing_files(self, tmp_path):
-        config = Config(memory_dir=tmp_path, search_backend="bm25")
+        empty_projects = tmp_path / "projects"
+        empty_projects.mkdir()
+        config = Config(memory_dir=tmp_path, search_backend="bm25", claude_projects_dir=empty_projects)
         n = reindex(config)
         assert n == 0

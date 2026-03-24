@@ -82,7 +82,12 @@ class QMDBackend:
                 content = hit.get("snippet", hit.get("content", ""))
 
             doc_id = stem.replace("_", ":", 1) if stem else ""
-            source = DocumentSource.OBSERVATIONS if doc_id.startswith("obs:") else DocumentSource.REFLECTIONS
+            if doc_id.startswith("obs:"):
+                source = DocumentSource.OBSERVATIONS
+            elif doc_id.startswith("amem:"):
+                source = DocumentSource.AUTO_MEMORY
+            else:
+                source = DocumentSource.REFLECTIONS
             results.append(
                 SearchResult(
                     document=Document(

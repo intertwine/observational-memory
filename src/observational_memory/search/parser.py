@@ -8,6 +8,20 @@ from pathlib import Path
 from . import Document, DocumentSource
 
 
+def parse_auto_memory(claude_projects_dir: Path) -> list[Document]:
+    """Parse all Claude Code auto-memory files into searchable Documents.
+
+    Args:
+        claude_projects_dir: Path to ``~/.claude/projects/``.
+
+    Returns:
+        List of Documents from all project memory directories.
+    """
+    from ..transcripts.auto_memory import scan_all_auto_memory
+
+    return scan_all_auto_memory(claude_projects_dir)
+
+
 def parse_observations(path: Path) -> list[Document]:
     """Split observations.md into one Document per date section."""
     if not path.exists():
