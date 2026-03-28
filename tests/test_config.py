@@ -92,6 +92,14 @@ class TestEnvFile:
         config = Config(env_file=tmp_path / "nonexistent")
         config.load_env_file()  # should not raise
 
+    def test_codex_paths_live_under_codex_home(self, tmp_path):
+        codex_home = tmp_path / "codex-home"
+        config = Config(codex_home=codex_home)
+
+        assert config.codex_agents_md == codex_home / "AGENTS.md"
+        assert config.codex_config_path == codex_home / "config.toml"
+        assert config.codex_hooks_path == codex_home / "hooks.json"
+
 
 class TestDetectProvider:
     def test_detects_anthropic(self, tmp_path, monkeypatch):

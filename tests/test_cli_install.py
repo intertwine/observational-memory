@@ -1,5 +1,7 @@
 """Tests for om install provider onboarding."""
 
+import json
+
 from click.testing import CliRunner
 
 from observational_memory.cli import cli
@@ -96,7 +98,7 @@ def test_install_upserts_env_without_clobbering(monkeypatch, tmp_path):
     assert "OM_LLM_MODEL=gpt-4o-mini" in content
 
 
-def test_install_generates_compact_files_and_updates_codex_block(monkeypatch, tmp_path):
+def test_install_generates_compact_files_and_updates_codex_startup_integration(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     runner = CliRunner()
@@ -129,7 +131,147 @@ def test_install_generates_compact_files_and_updates_codex_block(monkeypatch, tm
     assert (memory_dir / "profile.md").exists()
     assert (memory_dir / "active.md").exists()
 
+    config_toml = (tmp_path / "codex" / "config.toml").read_text()
+    assert "[features]" in config_toml
+    assert "codex_hooks = true" in config_toml
+
+    hooks_payload = json.loads((tmp_path / "codex" / "hooks.json").read_text())
+    session_start = hooks_payload["hooks"]["SessionStart"]
+    om_groups = [
+        group
+        for group in session_start
+        if group["hooks"][0].get("statusMessage") == "Loading observational memory..."
+    ]
+    assert om_groups
+    assert om_groups[0]["matcher"] == "startup|resume"
+    assert om_groups[0]["hooks"][0]["command"].endswith(" context")
+
     updated_agents = codex_agents.read_text()
+    assert "Codex startup context is normally injected through hooks." in updated_agents
+    assert "does not already include sections titled `# Startup Profile` and `# Active Context`" in updated_agents
     assert "profile.md" in updated_agents
     assert "active.md" in updated_agents
     assert "om search" in updated_agents
+
+
+def test_install_codex_preserves_existing_config_and_hooks(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    runner = CliRunner()
+
+    codex_home = tmp_path / "codex"
+    config_toml = codex_home / "config.toml"
+    config_toml.write_text('model = "gpt-5.4"\n\n[features]\nshell_snapshot = true\n')
+
+    hooks_path = codex_home / "hooks.json"
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "resume",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "echo existing",
+                                    "statusMessage": "Existing startup hook",
+                                }
+                            ],
+                        }
+                    ],
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": "echo pre-tool"}],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--codex",
+            "--no-cron",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+    updated_config = config_toml.read_text()
+    assert 'model = "gpt-5.4"' in updated_config
+    assert "shell_snapshot = true" in updated_config
+    assert "codex_hooks = true" in updated_config
+
+    updated_hooks = json.loads(hooks_path.read_text())
+    assert "PreToolUse" in updated_hooks["hooks"]
+    session_start = updated_hooks["hooks"]["SessionStart"]
+    assert any(group["hooks"][0].get("statusMessage") == "Existing startup hook" for group in session_start)
+    assert any(group["hooks"][0].get("statusMessage") == "Loading observational memory..." for group in session_start)
+
+
+def test_uninstall_codex_removes_only_om_hook_and_agents_block(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    codex_home = tmp_path / "codex"
+    hooks_path = codex_home / "hooks.json"
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "resume",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "echo existing",
+                                    "statusMessage": "Existing startup hook",
+                                }
+                            ],
+                        },
+                        {
+                            "matcher": "startup|resume",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "om context",
+                                    "statusMessage": "Loading observational memory...",
+                                }
+                            ],
+                        },
+                    ]
+                }
+            }
+        )
+    )
+
+    codex_agents = codex_home / "AGENTS.md"
+    codex_agents.write_text(
+        "Team instructions\n\n"
+        "<!-- observational-memory -->\n"
+        "Codex startup context is normally injected through hooks.\n"
+        "<!-- observational-memory -->\n"
+    )
+
+    result = runner.invoke(cli, ["uninstall", "--codex"])
+
+    assert result.exit_code == 0, result.output
+    updated_hooks = json.loads(hooks_path.read_text())
+    session_start = updated_hooks["hooks"]["SessionStart"]
+    assert len(session_start) == 1
+    assert session_start[0]["hooks"][0]["statusMessage"] == "Existing startup hook"
+
+    updated_agents = codex_agents.read_text()
+    assert "Team instructions" in updated_agents
+    assert "<!-- observational-memory -->" not in updated_agents

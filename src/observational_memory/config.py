@@ -130,6 +130,14 @@ class Config:
     def codex_agents_md(self) -> Path:
         return self.codex_home / "AGENTS.md"
 
+    @property
+    def codex_config_path(self) -> Path:
+        return self.codex_home / "config.toml"
+
+    @property
+    def codex_hooks_path(self) -> Path:
+        return self.codex_home / "hooks.json"
+
     def ensure_memory_dir(self) -> None:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 

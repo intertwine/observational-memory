@@ -590,7 +590,7 @@ def _configure_llm(
 
 @cli.command()
 @click.option("--claude", "targets", flag_value="claude", help="Install Claude Code hooks")
-@click.option("--codex", "targets", flag_value="codex", help="Install Codex AGENTS.md additions")
+@click.option("--codex", "targets", flag_value="codex", help="Install Codex hooks plus AGENTS fallback")
 @click.option("--both", "targets", flag_value="both", default=True, help="Install both (default)")
 @click.option("--cron/--no-cron", default=True, help="Set up cron jobs")
 @click.option(
@@ -809,13 +809,31 @@ def status(ctx: click.Context) -> None:
     else:
         click.echo(f"\nClaude Code: settings not found at {config.claude_settings_path}")
 
-    # Codex AGENTS.md
-    if config.codex_agents_md.exists():
-        content = config.codex_agents_md.read_text()
-        has_om = "observational-memory" in content.lower()
-        click.echo(f"\nCodex AGENTS.md: {'contains OM instructions' if has_om else 'no OM instructions'}")
+    click.echo("\nCodex startup integration:")
+    feature_enabled, feature_error = _codex_hooks_feature_enabled(config)
+    if feature_error:
+        click.echo(f"  Hook feature: error ({feature_error})")
+    elif feature_enabled is None:
+        click.echo(f"  Hook feature: config not found at {config.codex_config_path}")
     else:
-        click.echo(f"\nCodex: AGENTS.md not found at {config.codex_agents_md}")
+        click.echo(f"  Hook feature: {'enabled' if feature_enabled else 'disabled'}")
+
+    session_start_hook, hooks_error = _find_codex_session_start_hook(config)
+    if hooks_error:
+        click.echo(f"  hooks.json: error ({hooks_error})")
+    else:
+        click.echo(f"  hooks.json: {'found' if config.codex_hooks_path.exists() else 'not found'}")
+        click.echo(f"  SessionStart: {'installed' if session_start_hook else 'not installed'}")
+
+    agents_status = _codex_agents_fallback_status(config)
+    if agents_status == "fallback":
+        click.echo("  AGENTS fallback: installed")
+    elif agents_status == "legacy":
+        click.echo("  AGENTS fallback: legacy OM block present")
+    elif config.codex_agents_md.exists():
+        click.echo("  AGENTS fallback: not installed")
+    else:
+        click.echo(f"  AGENTS fallback: AGENTS.md not found at {config.codex_agents_md}")
 
     # Auto-memory (Claude Code per-project memory)
     from .transcripts.auto_memory import find_memory_directories
@@ -940,7 +958,51 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Claude hooks", "WARN", "settings.json not found", fix="Run: om install --claude")
 
-    # 10. Hook paths valid (only check hooks that look like file paths, not inline shell commands)
+    # 10. Codex startup integration
+    agents_status = _codex_agents_fallback_status(config)
+    has_agents_fallback = agents_status in {"fallback", "legacy"}
+    feature_enabled, feature_error = _codex_hooks_feature_enabled(config)
+    if feature_error:
+        _check("Codex hooks feature", "FAIL", feature_error, fix="Check ~/.codex/config.toml")
+    elif feature_enabled:
+        _check("Codex hooks feature", "PASS", "enabled")
+    elif has_agents_fallback:
+        _check("Codex hooks feature", "WARN", "disabled or not configured", fix="Run: om install --codex")
+    else:
+        _check("Codex hooks feature", "FAIL", "disabled or not configured", fix="Run: om install --codex")
+
+    session_start_hook, hooks_error = _find_codex_session_start_hook(config)
+    if hooks_error:
+        _check("Codex SessionStart hook", "FAIL", hooks_error, fix="Check ~/.codex/hooks.json")
+    elif session_start_hook:
+        _check("Codex SessionStart hook", "PASS", "installed")
+    elif has_agents_fallback:
+        _check(
+            "Codex SessionStart hook",
+            "WARN",
+            "not installed; AGENTS fallback still available",
+            fix="Run: om install --codex",
+        )
+    else:
+        _check("Codex SessionStart hook", "FAIL", "not installed", fix="Run: om install --codex")
+
+    if agents_status == "fallback":
+        _check("Codex AGENTS fallback", "PASS", "installed")
+    elif agents_status == "legacy":
+        _check("Codex AGENTS fallback", "WARN", "legacy OM block present", fix="Run: om install --codex")
+    else:
+        _check("Codex AGENTS fallback", "WARN", "not installed", fix="Run: om install --codex")
+
+    if session_start_hook:
+        command = session_start_hook.get("command", "")
+        if _hook_command_exists(command):
+            _check("Codex hook commands valid", "PASS", command)
+        else:
+            _check("Codex hook commands valid", "FAIL", command or "missing command", fix="Run: om install --codex")
+    else:
+        _check("Codex hook commands valid", "WARN", "skipped (SessionStart hook not installed)")
+
+    # 11. Hook paths valid (only check Claude hook commands that look like file paths, not inline shell commands)
     if config.claude_settings_path.exists():
         try:
             settings = json_mod.loads(config.claude_settings_path.read_text())
@@ -961,7 +1023,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         except Exception:
             pass  # Already reported above
 
-    # 11. Cron jobs
+    # 12. Cron jobs
     try:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5)
         if result.returncode == 0 and "om" in result.stdout:
@@ -974,7 +1036,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     except Exception:
         _check("Cron jobs", "WARN", "could not read crontab")
 
-    # 12. Platform
+    # 13. Platform
     if sys.platform == "win32":
         _check("Platform", "WARN", "Windows — some features may not work")
     else:
@@ -1079,14 +1141,21 @@ def _uninstall_claude_hooks(config: Config) -> None:
 # --- Codex integration ---
 
 _CODEX_OM_MARKER = "<!-- observational-memory -->"
+_CODEX_SESSION_START_MATCHER = "startup|resume"
+_CODEX_SESSION_START_STATUS = "Loading observational memory..."
 
 _CODEX_OM_BLOCK = f"""{_CODEX_OM_MARKER}
 ## Observational Memory
 
-At the start of every session, read these files for context about the user:
+Codex startup context is normally injected through hooks.
+
+If this session does not already include sections titled `# Startup Profile` and `# Active Context`,
+read these files before substantial work:
 
 1. `~/.local/share/observational-memory/profile.md` — compact stable profile
 2. `~/.local/share/observational-memory/active.md` — compact active context
+
+If hooks are unavailable, that manual read is the fallback.
 
 If this is a long-lived Codex session, Codex observations run every 15 minutes by default.
 To adjust that interval, edit `~/.config/observational-memory/env` and set
@@ -1102,9 +1171,297 @@ These files are auto-maintained. Do not modify them directly.
 {_CODEX_OM_MARKER}"""
 
 
-def _install_codex(config: Config) -> None:
-    """Add observational memory instructions to ~/.codex/AGENTS.md."""
+def _build_codex_session_start_command() -> str:
+    """Return the command string for the Codex SessionStart hook."""
+    import shlex
+
+    om_path = _find_om_path() or "om"
+    return f"{shlex.quote(om_path)} context"
+
+
+def _command_invokes_om_context(command: str) -> bool:
+    """Return True when *command* looks like the OM SessionStart hook command."""
+    import shlex
+
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+
+    return len(parts) == 2 and Path(parts[0]).name == "om" and parts[1] == "context"
+
+
+def _hook_command_exists(command: str) -> bool:
+    """Return True when the hook command's executable resolves locally."""
+    import shlex
+
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+
+    if not parts:
+        return False
+
+    executable = os.path.expanduser(parts[0])
+    if "/" in executable:
+        return Path(executable).exists()
+    return shutil.which(executable) is not None
+
+
+def _load_codex_hooks_payload(path: Path) -> dict:
+    """Load hooks.json, validating the expected top-level shape."""
+    import json
+
+    if not path.exists():
+        return {"hooks": {}}
+
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"Failed to parse {path}: {e}") from e
+
+    if not isinstance(payload, dict):
+        raise click.ClickException(f"{path} must contain a JSON object.")
+
+    hooks = payload.get("hooks")
+    if hooks is None:
+        payload["hooks"] = {}
+    elif not isinstance(hooks, dict):
+        raise click.ClickException(f"{path} must contain a top-level 'hooks' object.")
+
+    return payload
+
+
+def _om_codex_session_start_group() -> dict:
+    """Return the OM-managed Codex SessionStart hook group."""
+    return {
+        "matcher": _CODEX_SESSION_START_MATCHER,
+        "hooks": [
+            {
+                "type": "command",
+                "command": _build_codex_session_start_command(),
+                "timeout": 5,
+                "statusMessage": _CODEX_SESSION_START_STATUS,
+            }
+        ],
+    }
+
+
+def _is_om_codex_session_start_group(group: object) -> bool:
+    """Return True when *group* is the OM-managed Codex SessionStart hook group."""
+    if not isinstance(group, dict):
+        return False
+    if group.get("matcher") != _CODEX_SESSION_START_MATCHER:
+        return False
+
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list) or len(hooks) != 1:
+        return False
+
+    hook = hooks[0]
+    if not isinstance(hook, dict):
+        return False
+
+    return (
+        hook.get("type") == "command"
+        and hook.get("statusMessage") == _CODEX_SESSION_START_STATUS
+        and _command_invokes_om_context(hook.get("command", ""))
+    )
+
+
+def _find_codex_session_start_hook(config: Config) -> tuple[dict | None, str | None]:
+    """Return the installed OM SessionStart hook, or an error string if unreadable."""
+    import json
+
+    path = config.codex_hooks_path
+    if not path.exists():
+        return None, None
+
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        return None, str(e)
+
+    hooks = payload.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return None, "top-level 'hooks' must be an object"
+
+    groups = hooks.get("SessionStart", [])
+    if not isinstance(groups, list):
+        return None, "'hooks.SessionStart' must be a list"
+
+    for group in groups:
+        if _is_om_codex_session_start_group(group):
+            hook_list = group.get("hooks", [])
+            if hook_list:
+                hook = hook_list[0]
+                if isinstance(hook, dict):
+                    return hook, None
+            return None, "invalid OM SessionStart hook group"
+
+    return None, None
+
+
+def _codex_agents_fallback_status(config: Config) -> str:
+    """Return 'fallback', 'legacy', or 'missing' for the Codex AGENTS OM block."""
+    if not config.codex_agents_md.exists():
+        return "missing"
+
+    content = config.codex_agents_md.read_text()
+    if _CODEX_OM_MARKER not in content:
+        return "missing"
+
+    if "does not already include sections titled `# Startup Profile` and `# Active Context`" in content:
+        return "fallback"
+
+    return "legacy"
+
+
+def _codex_hooks_feature_enabled(config: Config) -> tuple[bool | None, str | None]:
+    """Return whether the Codex hooks feature is enabled, plus any read error."""
+    import tomllib
+
+    path = config.codex_config_path
+    if not path.exists():
+        return None, None
+
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception as e:
+        return None, str(e)
+
+    features = data.get("features", {})
+    if not isinstance(features, dict):
+        return False, None
+
+    return features.get("codex_hooks") is True, None
+
+
+def _enable_codex_hooks_feature(config: Config) -> None:
+    """Ensure ~/.codex/config.toml enables the experimental Codex hooks feature."""
     import re
+
+    path = config.codex_config_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.exists():
+        lines = path.read_text().splitlines()
+    else:
+        lines = []
+
+    section_re = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+    key_re = re.compile(r"^\s*codex_hooks\s*=")
+    changed = False
+    feature_start = None
+    feature_end = len(lines)
+
+    for i, line in enumerate(lines):
+        match = section_re.match(line)
+        if not match:
+            continue
+        if match.group(1).strip() == "features":
+            feature_start = i
+            feature_end = len(lines)
+            for j in range(i + 1, len(lines)):
+                if section_re.match(lines[j]):
+                    feature_end = j
+                    break
+            break
+
+    if feature_start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(["[features]", "codex_hooks = true"])
+        changed = True
+    else:
+        for j in range(feature_start + 1, feature_end):
+            if lines[j].lstrip().startswith("#"):
+                continue
+            if key_re.match(lines[j]):
+                if lines[j].strip() != "codex_hooks = true":
+                    indent = lines[j][: len(lines[j]) - len(lines[j].lstrip())]
+                    lines[j] = f"{indent}codex_hooks = true"
+                    changed = True
+                break
+        else:
+            insert_at = feature_end
+            while insert_at > feature_start + 1 and not lines[insert_at - 1].strip():
+                insert_at -= 1
+            lines.insert(insert_at, "codex_hooks = true")
+            changed = True
+
+    if changed or not path.exists():
+        path.write_text("\n".join(lines).rstrip() + "\n")
+
+    if changed:
+        click.echo(f"Enabled Codex hooks feature in {path}")
+    else:
+        click.echo(f"Codex hooks feature already enabled in {path}")
+
+
+def _install_codex_session_start_hook(config: Config) -> None:
+    """Install the OM-managed Codex SessionStart hook in hooks.json."""
+    import json
+
+    path = config.codex_hooks_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _load_codex_hooks_payload(path)
+    hooks = payload.setdefault("hooks", {})
+
+    groups = hooks.get("SessionStart", [])
+    if not isinstance(groups, list):
+        raise click.ClickException(f"{path} has invalid 'hooks.SessionStart'; expected a list.")
+
+    filtered = [group for group in groups if not _is_om_codex_session_start_group(group)]
+    filtered.append(_om_codex_session_start_group())
+    hooks["SessionStart"] = filtered
+
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+    click.echo(f"Installed Codex SessionStart hook in {path}")
+
+
+def _uninstall_codex_session_start_hook(config: Config) -> None:
+    """Remove the OM-managed Codex SessionStart hook from hooks.json."""
+    import json
+
+    path = config.codex_hooks_path
+    if not path.exists():
+        return
+
+    payload = _load_codex_hooks_payload(path)
+    hooks = payload.get("hooks", {})
+    groups = hooks.get("SessionStart", [])
+    if not isinstance(groups, list):
+        raise click.ClickException(f"{path} has invalid 'hooks.SessionStart'; expected a list.")
+
+    filtered = [group for group in groups if not _is_om_codex_session_start_group(group)]
+    if filtered:
+        hooks["SessionStart"] = filtered
+    else:
+        hooks.pop("SessionStart", None)
+
+    if hooks:
+        path.write_text(json.dumps(payload, indent=2) + "\n")
+        click.echo(f"Removed OM Codex SessionStart hook from {path}")
+    else:
+        remaining_top_level = {key: value for key, value in payload.items() if key != "hooks"}
+        if remaining_top_level:
+            payload["hooks"] = {}
+            path.write_text(json.dumps(payload, indent=2) + "\n")
+            click.echo(f"Removed OM Codex SessionStart hook from {path}")
+        else:
+            path.unlink()
+            click.echo(f"Removed {path}")
+
+
+def _install_codex(config: Config) -> None:
+    """Install Codex startup integration with hooks-first behavior."""
+    import re
+
+    _enable_codex_hooks_feature(config)
+    _install_codex_session_start_hook(config)
 
     agents_md = config.codex_agents_md
 
@@ -1122,11 +1479,13 @@ def _install_codex(config: Config) -> None:
         content = _CODEX_OM_BLOCK + "\n"
 
     agents_md.write_text(content)
-    click.echo(f"Added observational memory instructions to {agents_md}")
+    click.echo(f"Installed Codex AGENTS fallback in {agents_md}")
 
 
 def _uninstall_codex(config: Config) -> None:
-    """Remove observational memory block from Codex AGENTS.md."""
+    """Remove OM Codex startup integration while preserving user hook settings."""
+    _uninstall_codex_session_start_hook(config)
+
     agents_md = config.codex_agents_md
     if not agents_md.exists():
         return
