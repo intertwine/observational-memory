@@ -94,11 +94,14 @@ class TestEnvFile:
 
     def test_codex_paths_live_under_codex_home(self, tmp_path):
         codex_home = tmp_path / "codex-home"
-        config = Config(codex_home=codex_home)
+        memory_dir = tmp_path / "memory"
+        config = Config(codex_home=codex_home, memory_dir=memory_dir)
 
         assert config.codex_agents_md == codex_home / "AGENTS.md"
         assert config.codex_config_path == codex_home / "config.toml"
         assert config.codex_hooks_path == codex_home / "hooks.json"
+        assert config.codex_checkpoint_state_path == memory_dir / ".codex-checkpoint-state.json"
+        assert config.codex_checkpoint_lock_dir == memory_dir / ".codex-checkpoint-locks"
 
 
 class TestDetectProvider:

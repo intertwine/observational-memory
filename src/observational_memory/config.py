@@ -138,6 +138,14 @@ class Config:
     def codex_hooks_path(self) -> Path:
         return self.codex_home / "hooks.json"
 
+    @property
+    def codex_checkpoint_state_path(self) -> Path:
+        return self.memory_dir / ".codex-checkpoint-state.json"
+
+    @property
+    def codex_checkpoint_lock_dir(self) -> Path:
+        return self.memory_dir / ".codex-checkpoint-locks"
+
     def ensure_memory_dir(self) -> None:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 

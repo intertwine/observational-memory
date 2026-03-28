@@ -1,16 +1,21 @@
 """Tests for the observer module."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 from observational_memory.config import Config
 from observational_memory.observe import (
     _append_observations,
     _chunk_messages,
+    _codex_messages_since_cursor,
     _format_messages,
+    observe_codex_transcript,
     run_observer,
     run_observer_backfill,
 )
 from observational_memory.transcripts import Message
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _sample_messages() -> list[Message]:
@@ -205,3 +210,26 @@ class TestBackfillObserver:
         content = config.observations_path.read_text()
         assert "Existing" in content
         assert "New section" in content
+
+
+class TestCodexObserver:
+    @patch("observational_memory.observe.run_observer")
+    def test_observe_codex_transcript_updates_cursor_by_message_count(self, mock_run_observer, tmp_path):
+        mock_run_observer.return_value = "## 2026-02-10\n\n- checkpoint"
+
+        config = Config(memory_dir=tmp_path / "memory")
+        transcript = FIXTURES / "codex-transcript.jsonl"
+
+        result = observe_codex_transcript(transcript, config, dry_run=False)
+
+        assert result == "## 2026-02-10\n\n- checkpoint"
+        assert config.load_cursor()[str(transcript)] == 7
+
+    def test_codex_messages_since_cursor_migrates_legacy_line_offsets(self):
+        transcript = FIXTURES / "codex-transcript.jsonl"
+
+        messages, total = _codex_messages_since_cursor(transcript, {str(transcript): 3})
+
+        assert total == 7
+        assert len(messages) == 4
+        assert messages[0].content.startswith("I'm using us-west-2")

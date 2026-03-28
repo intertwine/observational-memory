@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -34,13 +35,30 @@ def cli(ctx: click.Context) -> None:
 @click.pass_context
 def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: bool) -> None:
     """Run the observer to compress transcripts into observations."""
-    from .observe import observe_all_claude, observe_all_codex, observe_auto_memory, observe_claude_transcript
+    from .observe import (
+        observe_all_claude,
+        observe_all_codex,
+        observe_auto_memory,
+        observe_claude_transcript,
+        observe_codex_transcript,
+    )
 
     config = ctx.obj["config"]
 
     if transcript:
         click.echo(f"Processing transcript: {transcript}")
-        result = observe_claude_transcript(transcript, config, dry_run)
+        transcript_source = source
+        if transcript_source == "all":
+            transcript_source = _detect_transcript_source(transcript, config)
+
+        if transcript_source == "claude":
+            result = observe_claude_transcript(transcript, config, dry_run)
+        elif transcript_source == "codex":
+            result = observe_codex_transcript(transcript, config, dry_run)
+        elif transcript_source == "claude-memory":
+            raise click.ClickException("--transcript does not support --source claude-memory.")
+        else:
+            raise click.ClickException("Could not detect transcript source. Pass --source claude or --source codex.")
         if result:
             click.echo(f"Observations updated ({len(result)} chars)")
             if dry_run:
@@ -87,6 +105,21 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
 
     if not dry_run:
         _maybe_run_reflector_catchup(config)
+
+
+def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
+    """Best-effort transcript source detection for explicit single-file observe."""
+    try:
+        transcript.relative_to(config.claude_projects_dir)
+        return "claude"
+    except ValueError:
+        pass
+
+    try:
+        transcript.relative_to(config.codex_home / "sessions")
+        return "codex"
+    except ValueError:
+        return None
 
 
 @cli.command()
@@ -366,6 +399,112 @@ def context(ctx: click.Context) -> None:
             }
         }
         click.echo(json_mod.dumps(output))
+
+
+@cli.command(hidden=True, name="codex-checkpoint")
+@click.pass_context
+def codex_checkpoint(ctx: click.Context) -> None:
+    """Queue a Codex transcript-specific checkpoint from the Stop hook payload."""
+    import json as json_mod
+    import subprocess
+
+    config = ctx.obj["config"]
+
+    try:
+        payload = json_mod.load(sys.stdin)
+    except json_mod.JSONDecodeError:
+        return
+
+    if not isinstance(payload, dict):
+        return
+
+    transcript_raw = payload.get("transcript_path")
+    if not isinstance(transcript_raw, str) or not transcript_raw.strip():
+        return
+
+    transcript = Path(transcript_raw).expanduser()
+    if not transcript.is_file():
+        return
+
+    lock_path = _codex_checkpoint_lock_path(config, transcript)
+    if not _acquire_codex_checkpoint_lock(config, lock_path):
+        return
+
+    try:
+        current_count = _count_codex_transcript_messages(transcript)
+        if current_count <= 0:
+            _release_codex_checkpoint_lock(lock_path)
+            return
+
+        state = _load_codex_checkpoint_state(config)
+        previous = state.get(str(transcript), {})
+        previous_count = previous.get("message_count")
+        previous_status = previous.get("status")
+        if (
+            isinstance(previous_count, int)
+            and previous_count >= current_count
+            and previous_status in {"in_progress", "success"}
+        ):
+            _release_codex_checkpoint_lock(lock_path)
+            return
+
+        _update_codex_checkpoint_state(
+            config,
+            transcript,
+            message_count=current_count,
+            status="in_progress",
+        )
+
+        worker_command = _build_codex_checkpoint_worker_command(transcript)
+        subprocess.Popen(
+            worker_command,
+            cwd=payload.get("cwd") or None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        _update_codex_checkpoint_state(
+            config,
+            transcript,
+            message_count=_count_codex_transcript_messages(transcript),
+            status="failed",
+        )
+        _release_codex_checkpoint_lock(lock_path)
+        raise
+
+
+@cli.command(hidden=True, name="codex-checkpoint-worker")
+@click.option("--transcript", type=click.Path(path_type=Path), required=True)
+@click.pass_context
+def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
+    """Observe one Codex transcript and release its checkpoint lock."""
+    from .observe import observe_codex_transcript
+
+    config = ctx.obj["config"]
+    transcript = transcript.expanduser()
+    lock_path = _codex_checkpoint_lock_path(config, transcript)
+
+    try:
+        observe_codex_transcript(transcript, config, dry_run=False)
+        _maybe_run_reflector_catchup(config)
+        _update_codex_checkpoint_state(
+            config,
+            transcript,
+            message_count=_count_codex_transcript_messages(transcript),
+            status="success",
+        )
+    except Exception:
+        _update_codex_checkpoint_state(
+            config,
+            transcript,
+            message_count=_count_codex_transcript_messages(transcript),
+            status="failed",
+        )
+        raise
+    finally:
+        _release_codex_checkpoint_lock(lock_path)
 
 
 _SUPPORTED_PROVIDERS = ("anthropic", "openai", "anthropic-vertex", "anthropic-bedrock")
@@ -809,7 +948,7 @@ def status(ctx: click.Context) -> None:
     else:
         click.echo(f"\nClaude Code: settings not found at {config.claude_settings_path}")
 
-    click.echo("\nCodex startup integration:")
+    click.echo("\nCodex hooks integration:")
     feature_enabled, feature_error = _codex_hooks_feature_enabled(config)
     if feature_error:
         click.echo(f"  Hook feature: error ({feature_error})")
@@ -819,11 +958,16 @@ def status(ctx: click.Context) -> None:
         click.echo(f"  Hook feature: {'enabled' if feature_enabled else 'disabled'}")
 
     session_start_hook, hooks_error = _find_codex_session_start_hook(config)
+    stop_hook, stop_error = _find_codex_stop_hook(config)
     if hooks_error:
         click.echo(f"  hooks.json: error ({hooks_error})")
     else:
         click.echo(f"  hooks.json: {'found' if config.codex_hooks_path.exists() else 'not found'}")
         click.echo(f"  SessionStart: {'installed' if session_start_hook else 'not installed'}")
+        if stop_error:
+            click.echo(f"  Stop: error ({stop_error})")
+        else:
+            click.echo(f"  Stop: {'installed' if stop_hook else 'not installed'}")
 
     agents_status = _codex_agents_fallback_status(config)
     if agents_status == "fallback":
@@ -986,6 +1130,14 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Codex SessionStart hook", "FAIL", "not installed", fix="Run: om install --codex")
 
+    stop_hook, stop_error = _find_codex_stop_hook(config)
+    if stop_error:
+        _check("Codex Stop hook", "FAIL", stop_error, fix="Check ~/.codex/hooks.json")
+    elif stop_hook:
+        _check("Codex Stop hook", "PASS", "installed")
+    else:
+        _check("Codex Stop hook", "WARN", "not installed; cron backstop still available", fix="Run: om install --codex")
+
     if agents_status == "fallback":
         _check("Codex AGENTS fallback", "PASS", "installed")
     elif agents_status == "legacy":
@@ -993,14 +1145,28 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Codex AGENTS fallback", "WARN", "not installed", fix="Run: om install --codex")
 
+    hook_commands = []
     if session_start_hook:
-        command = session_start_hook.get("command", "")
-        if _hook_command_exists(command):
-            _check("Codex hook commands valid", "PASS", command)
+        hook_commands.append(("SessionStart", session_start_hook.get("command", "")))
+    if stop_hook:
+        hook_commands.append(("Stop", stop_hook.get("command", "")))
+
+    if hook_commands:
+        invalid = [
+            f"{event}: {command or 'missing command'}"
+            for event, command in hook_commands
+            if not _hook_command_exists(command)
+        ]
+        if invalid:
+            _check("Codex hook commands valid", "FAIL", ", ".join(invalid), fix="Run: om install --codex")
         else:
-            _check("Codex hook commands valid", "FAIL", command or "missing command", fix="Run: om install --codex")
+            _check(
+                "Codex hook commands valid",
+                "PASS",
+                ", ".join(f"{event}: {command}" for event, command in hook_commands),
+            )
     else:
-        _check("Codex hook commands valid", "WARN", "skipped (SessionStart hook not installed)")
+        _check("Codex hook commands valid", "WARN", "skipped (Codex hooks not installed)")
 
     # 11. Hook paths valid (only check Claude hook commands that look like file paths, not inline shell commands)
     if config.claude_settings_path.exists():
@@ -1144,6 +1310,7 @@ _CODEX_OM_MARKER = "<!-- observational-memory -->"
 _CODEX_OM_FALLBACK_VERSION_MARKER = "<!-- observational-memory:codex-hooks-fallback-v1 -->"
 _CODEX_SESSION_START_MATCHER = "startup|resume"
 _CODEX_SESSION_START_STATUS = "Loading observational memory..."
+_CODEX_STOP_STATUS = "Checkpointing observational memory..."
 
 _CODEX_OM_BLOCK = f"""{_CODEX_OM_MARKER}
 ## Observational Memory
@@ -1182,8 +1349,22 @@ def _build_codex_session_start_command() -> str:
     return f"{shlex.quote(om_path)} context"
 
 
-def _command_invokes_om_context(command: str) -> bool:
-    """Return True when *command* looks like the OM SessionStart hook command."""
+def _build_codex_checkpoint_command() -> str:
+    """Return the command string for the Codex Stop hook."""
+    import shlex
+
+    om_path = _find_om_path() or "om"
+    return f"{shlex.quote(om_path)} codex-checkpoint"
+
+
+def _build_codex_checkpoint_worker_command(transcript: Path) -> list[str]:
+    """Return argv for the detached Codex checkpoint worker process."""
+    om_path = _find_om_path() or sys.argv[0] or "om"
+    return [om_path, "codex-checkpoint-worker", "--transcript", str(transcript)]
+
+
+def _command_invokes_om_subcommand(command: str, subcommand: str) -> bool:
+    """Return True when *command* looks like `om <subcommand>`."""
     import shlex
 
     try:
@@ -1191,7 +1372,17 @@ def _command_invokes_om_context(command: str) -> bool:
     except ValueError:
         return False
 
-    return len(parts) == 2 and Path(parts[0]).name == "om" and parts[1] == "context"
+    return len(parts) == 2 and Path(parts[0]).name == "om" and parts[1] == subcommand
+
+
+def _command_invokes_om_context(command: str) -> bool:
+    """Return True when *command* looks like the OM SessionStart hook command."""
+    return _command_invokes_om_subcommand(command, "context")
+
+
+def _command_invokes_om_codex_checkpoint(command: str) -> bool:
+    """Return True when *command* looks like the OM Codex Stop hook command."""
+    return _command_invokes_om_subcommand(command, "codex-checkpoint")
 
 
 def _hook_command_exists(command: str) -> bool:
@@ -1251,6 +1442,20 @@ def _om_codex_session_start_group() -> dict:
     }
 
 
+def _om_codex_stop_group() -> dict:
+    """Return the OM-managed Codex Stop hook group."""
+    return {
+        "hooks": [
+            {
+                "type": "command",
+                "command": _build_codex_checkpoint_command(),
+                "timeout": 5,
+                "statusMessage": _CODEX_STOP_STATUS,
+            }
+        ]
+    }
+
+
 def _is_om_codex_session_start_group(group: object) -> bool:
     """Return True when *group* is the OM-managed Codex SessionStart hook group."""
     if not isinstance(group, dict):
@@ -1270,6 +1475,26 @@ def _is_om_codex_session_start_group(group: object) -> bool:
         hook.get("type") == "command"
         and hook.get("statusMessage") == _CODEX_SESSION_START_STATUS
         and _command_invokes_om_context(hook.get("command", ""))
+    )
+
+
+def _is_om_codex_stop_group(group: object) -> bool:
+    """Return True when *group* is the OM-managed Codex Stop hook group."""
+    if not isinstance(group, dict):
+        return False
+
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list) or len(hooks) != 1:
+        return False
+
+    hook = hooks[0]
+    if not isinstance(hook, dict):
+        return False
+
+    return (
+        hook.get("type") == "command"
+        and hook.get("statusMessage") == _CODEX_STOP_STATUS
+        and _command_invokes_om_codex_checkpoint(hook.get("command", ""))
     )
 
 
@@ -1302,6 +1527,39 @@ def _find_codex_session_start_hook(config: Config) -> tuple[dict | None, str | N
                 if isinstance(hook, dict):
                     return hook, None
             return None, "invalid OM SessionStart hook group"
+
+    return None, None
+
+
+def _find_codex_stop_hook(config: Config) -> tuple[dict | None, str | None]:
+    """Return the installed OM Stop hook, or an error string if unreadable."""
+    import json
+
+    path = config.codex_hooks_path
+    if not path.exists():
+        return None, None
+
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        return None, str(e)
+
+    hooks = payload.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return None, "top-level 'hooks' must be an object"
+
+    groups = hooks.get("Stop", [])
+    if not isinstance(groups, list):
+        return None, "'hooks.Stop' must be a list"
+
+    for group in groups:
+        if _is_om_codex_stop_group(group):
+            hook_list = group.get("hooks", [])
+            if hook_list:
+                hook = hook_list[0]
+                if isinstance(hook, dict):
+                    return hook, None
+            return None, "invalid OM Stop hook group"
 
     return None, None
 
@@ -1442,6 +1700,27 @@ def _install_codex_session_start_hook(config: Config) -> None:
     click.echo(f"Installed Codex SessionStart hook in {path}")
 
 
+def _install_codex_stop_hook(config: Config) -> None:
+    """Install the OM-managed Codex Stop hook in hooks.json."""
+    import json
+
+    path = config.codex_hooks_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _load_codex_hooks_payload(path)
+    hooks = payload.setdefault("hooks", {})
+
+    groups = hooks.get("Stop", [])
+    if not isinstance(groups, list):
+        raise click.ClickException(f"{path} has invalid 'hooks.Stop'; expected a list.")
+
+    filtered = [group for group in groups if not _is_om_codex_stop_group(group)]
+    filtered.append(_om_codex_stop_group())
+    hooks["Stop"] = filtered
+
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+    click.echo(f"Installed Codex Stop hook in {path}")
+
+
 def _uninstall_codex_session_start_hook(config: Config) -> None:
     """Remove the OM-managed Codex SessionStart hook from hooks.json."""
     import json
@@ -1476,12 +1755,47 @@ def _uninstall_codex_session_start_hook(config: Config) -> None:
             click.echo(f"Removed {path}")
 
 
+def _uninstall_codex_stop_hook(config: Config) -> None:
+    """Remove the OM-managed Codex Stop hook from hooks.json."""
+    import json
+
+    path = config.codex_hooks_path
+    if not path.exists():
+        return
+
+    payload = _load_codex_hooks_payload(path)
+    hooks = payload.get("hooks", {})
+    groups = hooks.get("Stop", [])
+    if not isinstance(groups, list):
+        raise click.ClickException(f"{path} has invalid 'hooks.Stop'; expected a list.")
+
+    filtered = [group for group in groups if not _is_om_codex_stop_group(group)]
+    if filtered:
+        hooks["Stop"] = filtered
+    else:
+        hooks.pop("Stop", None)
+
+    if hooks:
+        path.write_text(json.dumps(payload, indent=2) + "\n")
+        click.echo(f"Removed OM Codex Stop hook from {path}")
+    else:
+        remaining_top_level = {key: value for key, value in payload.items() if key != "hooks"}
+        if remaining_top_level:
+            payload["hooks"] = {}
+            path.write_text(json.dumps(payload, indent=2) + "\n")
+            click.echo(f"Removed OM Codex Stop hook from {path}")
+        else:
+            path.unlink()
+            click.echo(f"Removed {path}")
+
+
 def _install_codex(config: Config) -> None:
     """Install Codex startup integration with hooks-first behavior."""
     import re
 
     _enable_codex_hooks_feature(config)
     _install_codex_session_start_hook(config)
+    _install_codex_stop_hook(config)
 
     agents_md = config.codex_agents_md
 
@@ -1505,6 +1819,7 @@ def _install_codex(config: Config) -> None:
 def _uninstall_codex(config: Config) -> None:
     """Remove OM Codex startup integration while preserving user hook settings."""
     _uninstall_codex_session_start_hook(config)
+    _uninstall_codex_stop_hook(config)
 
     agents_md = config.codex_agents_md
     if not agents_md.exists():
@@ -1521,6 +1836,118 @@ def _uninstall_codex(config: Config) -> None:
     content = re.sub(pattern, "\n", content, flags=re.DOTALL)
     agents_md.write_text(content.strip() + "\n" if content.strip() else "")
     click.echo("Removed observational memory from Codex AGENTS.md")
+
+
+def _count_codex_transcript_messages(transcript: Path) -> int:
+    """Return the number of parsed Codex messages in a transcript."""
+    from .transcripts.codex import parse_transcript
+
+    if not transcript.exists():
+        return 0
+
+    try:
+        return len(parse_transcript(transcript))
+    except OSError:
+        return 0
+
+
+def _codex_checkpoint_lock_path(config: Config, transcript: Path) -> Path:
+    """Return the lock directory path for one Codex transcript."""
+    import hashlib
+
+    digest = hashlib.sha256(str(transcript).encode("utf-8")).hexdigest()
+    return config.codex_checkpoint_lock_dir / digest
+
+
+def _codex_checkpoint_lock_stale_minutes(default: int = 60) -> int:
+    raw_value = os.environ.get("OM_SESSION_OBSERVER_LOCK_STALE_MINUTES", str(default))
+    try:
+        stale_minutes = int(raw_value)
+    except ValueError:
+        return default
+
+    return max(stale_minutes, 0)
+
+
+def _acquire_codex_checkpoint_lock(config: Config, lock_path: Path) -> bool:
+    """Acquire a best-effort mkdir lock for a Codex checkpoint worker."""
+    stale_minutes = _codex_checkpoint_lock_stale_minutes()
+    lock_dir = config.codex_checkpoint_lock_dir
+    lock_dir.mkdir(parents=True, exist_ok=True)
+
+    if stale_minutes > 0:
+        for entry in lock_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            age_seconds = max(0.0, datetime.now(timezone.utc).timestamp() - entry.stat().st_mtime)
+            if age_seconds > stale_minutes * 60:
+                shutil.rmtree(entry, ignore_errors=True)
+
+    try:
+        lock_path.mkdir()
+        return True
+    except FileExistsError:
+        if stale_minutes <= 0 or not lock_path.exists():
+            return False
+
+        age_seconds = max(0.0, datetime.now(timezone.utc).timestamp() - lock_path.stat().st_mtime)
+        if age_seconds <= stale_minutes * 60:
+            return False
+
+        shutil.rmtree(lock_path, ignore_errors=True)
+        try:
+            lock_path.mkdir()
+            return True
+        except FileExistsError:
+            return False
+
+
+def _release_codex_checkpoint_lock(lock_path: Path) -> None:
+    """Release a Codex checkpoint mkdir lock if it exists."""
+    shutil.rmtree(lock_path, ignore_errors=True)
+
+
+def _load_codex_checkpoint_state(config: Config) -> dict[str, dict]:
+    """Load Codex checkpoint hook state, tolerating missing or invalid files."""
+    import json
+
+    path = config.codex_checkpoint_state_path
+    if not path.exists():
+        return {}
+
+    try:
+        payload = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def _update_codex_checkpoint_state(
+    config: Config,
+    transcript: Path,
+    *,
+    message_count: int,
+    status: str,
+) -> None:
+    """Persist the latest Codex checkpoint hook state for one transcript."""
+    import json
+    import tempfile
+
+    state = _load_codex_checkpoint_state(config)
+    state[str(transcript)] = {
+        "last_observed": int(datetime.now(timezone.utc).timestamp()),
+        "message_count": max(message_count, 0),
+        "status": status,
+    }
+
+    path = config.codex_checkpoint_state_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
+        json.dump(state, tmp, indent=2, sort_keys=True)
+        tmp.write("\n")
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
 
 
 # --- Cron installation ---

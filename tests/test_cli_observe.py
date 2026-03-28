@@ -1,8 +1,14 @@
 """Tests for observe CLI reflector catch-up behavior and cron cleanup."""
 
+import json
+from pathlib import Path
+
 from click.testing import CliRunner
 
 from observational_memory.cli import _strip_om_cron_entries, cli
+from observational_memory.config import Config
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _set_base_env(monkeypatch, tmp_path):
@@ -54,6 +60,166 @@ def test_observe_skips_reflector_catchup_in_dry_run(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert calls["count"] == 0
+
+
+def test_observe_transcript_routes_to_explicit_codex_source(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "codex" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("codex-transcript.jsonl").read_text())
+
+    calls = {"transcript": None, "dry_run": None}
+
+    def fake_observe(transcript_path, config, dry_run):
+        calls["transcript"] = transcript_path
+        calls["dry_run"] = dry_run
+        return "## Observations\n\n- test"
+
+    monkeypatch.setattr("observational_memory.observe.observe_codex_transcript", fake_observe)
+
+    result = runner.invoke(cli, ["observe", "--transcript", str(transcript), "--source", "codex", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["transcript"] == transcript
+    assert calls["dry_run"] is True
+    assert "Observations updated" in result.output
+
+
+def test_observe_transcript_auto_detects_codex_session_paths(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "codex" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("codex-transcript.jsonl").read_text())
+
+    calls = {"count": 0}
+
+    def fake_observe(transcript_path, config, dry_run):
+        calls["count"] += 1
+        assert transcript_path == transcript
+        return None
+
+    monkeypatch.setattr("observational_memory.observe.observe_codex_transcript", fake_observe)
+
+    result = runner.invoke(cli, ["observe", "--transcript", str(transcript), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["count"] == 1
+    assert "No new messages to process." in result.output
+
+
+def test_codex_checkpoint_spawns_worker_and_records_state(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "codex" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("codex-transcript.jsonl").read_text())
+
+    popen_calls = []
+
+    class DummyPopen:
+        def __init__(self, args, **kwargs):
+            popen_calls.append((args, kwargs))
+
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    monkeypatch.setattr("subprocess.Popen", DummyPopen)
+
+    result = runner.invoke(
+        cli,
+        ["codex-checkpoint"],
+        input=json.dumps({"transcript_path": str(transcript), "cwd": str(tmp_path)}),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert popen_calls == [
+        (
+            ["/tmp/bin/om", "codex-checkpoint-worker", "--transcript", str(transcript)],
+            {
+                "cwd": str(tmp_path),
+                "stdin": -3,
+                "stdout": -3,
+                "stderr": -3,
+                "start_new_session": True,
+            },
+        )
+    ]
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    state = json.loads(config.codex_checkpoint_state_path.read_text())
+    assert state[str(transcript)]["status"] == "in_progress"
+    assert state[str(transcript)]["message_count"] == 7
+    assert any(config.codex_checkpoint_lock_dir.iterdir())
+
+
+def test_codex_checkpoint_skips_when_message_count_is_already_current(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "codex" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("codex-transcript.jsonl").read_text())
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+    config.codex_checkpoint_state_path.write_text(
+        json.dumps({str(transcript): {"last_observed": 123, "message_count": 7, "status": "success"}})
+    )
+
+    popen_calls = []
+
+    class DummyPopen:
+        def __init__(self, args, **kwargs):
+            popen_calls.append((args, kwargs))
+
+    monkeypatch.setattr("subprocess.Popen", DummyPopen)
+
+    result = runner.invoke(
+        cli,
+        ["codex-checkpoint"],
+        input=json.dumps({"transcript_path": str(transcript), "cwd": str(tmp_path)}),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert popen_calls == []
+    assert config.codex_checkpoint_lock_dir.exists()
+    assert list(config.codex_checkpoint_lock_dir.iterdir()) == []
+
+
+def test_codex_checkpoint_worker_updates_state_and_releases_lock(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "codex" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("codex-transcript.jsonl").read_text())
+
+    calls = {"observe": 0, "catchup": 0}
+
+    def fake_observe(transcript_path, config, dry_run):
+        calls["observe"] += 1
+        assert transcript_path == transcript
+        assert dry_run is False
+        return "## Observations\n\n- test"
+
+    def fake_catchup(config):
+        calls["catchup"] += 1
+
+    monkeypatch.setattr("observational_memory.observe.observe_codex_transcript", fake_observe)
+    monkeypatch.setattr("observational_memory.cli._maybe_run_reflector_catchup", fake_catchup)
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+    lock_path = config.codex_checkpoint_lock_dir / "test-lock"
+    lock_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("observational_memory.cli._codex_checkpoint_lock_path", lambda config, path: lock_path)
+
+    result = runner.invoke(cli, ["codex-checkpoint-worker", "--transcript", str(transcript)])
+
+    assert result.exit_code == 0, result.output
+    assert calls == {"observe": 1, "catchup": 1}
+
+    state = json.loads(config.codex_checkpoint_state_path.read_text())
+    assert state[str(transcript)]["status"] == "success"
+    assert not lock_path.exists()
 
 
 def test_strip_om_cron_entries_removes_blocks_and_legacy_lines():

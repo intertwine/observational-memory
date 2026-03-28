@@ -146,6 +146,14 @@ def test_install_generates_compact_files_and_updates_codex_startup_integration(m
     assert om_groups
     assert om_groups[0]["matcher"] == "startup|resume"
     assert om_groups[0]["hooks"][0]["command"].endswith(" context")
+    stop_groups = hooks_payload["hooks"]["Stop"]
+    om_stop_groups = [
+        group
+        for group in stop_groups
+        if group["hooks"][0].get("statusMessage") == "Checkpointing observational memory..."
+    ]
+    assert om_stop_groups
+    assert om_stop_groups[0]["hooks"][0]["command"].endswith(" codex-checkpoint")
 
     updated_agents = codex_agents.read_text()
     assert "<!-- observational-memory:codex-hooks-fallback-v1 -->" in updated_agents
@@ -187,6 +195,17 @@ def test_install_codex_preserves_existing_config_and_hooks(monkeypatch, tmp_path
                             "hooks": [{"type": "command", "command": "echo pre-tool"}],
                         }
                     ],
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "echo existing-stop",
+                                    "statusMessage": "Existing checkpoint hook",
+                                }
+                            ]
+                        }
+                    ],
                 }
             }
         )
@@ -218,6 +237,11 @@ def test_install_codex_preserves_existing_config_and_hooks(monkeypatch, tmp_path
     session_start = updated_hooks["hooks"]["SessionStart"]
     assert any(group["hooks"][0].get("statusMessage") == "Existing startup hook" for group in session_start)
     assert any(group["hooks"][0].get("statusMessage") == "Loading observational memory..." for group in session_start)
+    stop_groups = updated_hooks["hooks"]["Stop"]
+    assert any(group["hooks"][0].get("statusMessage") == "Existing checkpoint hook" for group in stop_groups)
+    assert any(
+        group["hooks"][0].get("statusMessage") == "Checkpointing observational memory..." for group in stop_groups
+    )
 
 
 def test_install_codex_preserves_dotted_features_syntax(monkeypatch, tmp_path):
@@ -282,6 +306,7 @@ def test_enable_codex_hooks_feature_is_idempotent(monkeypatch, tmp_path, capsys)
 def test_uninstall_codex_removes_only_om_hook_and_agents_block(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     runner = CliRunner()
+    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda: None)
 
     codex_home = tmp_path / "codex"
     hooks_path = codex_home / "hooks.json"
@@ -300,17 +325,27 @@ def test_uninstall_codex_removes_only_om_hook_and_agents_block(monkeypatch, tmp_
                                 }
                             ],
                         },
+                    ],
+                    "Stop": [
                         {
-                            "matcher": "startup|resume",
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "om context",
-                                    "statusMessage": "Loading observational memory...",
+                                    "command": "echo existing-stop",
+                                    "statusMessage": "Existing checkpoint hook",
                                 }
                             ],
                         },
-                    ]
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "om codex-checkpoint",
+                                    "statusMessage": "Checkpointing observational memory...",
+                                }
+                            ],
+                        },
+                    ],
                 }
             }
         )
@@ -331,6 +366,9 @@ def test_uninstall_codex_removes_only_om_hook_and_agents_block(monkeypatch, tmp_
     session_start = updated_hooks["hooks"]["SessionStart"]
     assert len(session_start) == 1
     assert session_start[0]["hooks"][0]["statusMessage"] == "Existing startup hook"
+    stop_groups = updated_hooks["hooks"]["Stop"]
+    assert len(stop_groups) == 1
+    assert stop_groups[0]["hooks"][0]["statusMessage"] == "Existing checkpoint hook"
 
     updated_agents = codex_agents.read_text()
     assert "Team instructions" in updated_agents
