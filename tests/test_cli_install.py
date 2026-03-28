@@ -1,10 +1,13 @@
 """Tests for om install provider onboarding."""
 
 import json
+import tomllib
+from pathlib import Path
 
 from click.testing import CliRunner
 
-from observational_memory.cli import cli
+from observational_memory.cli import _enable_codex_hooks_feature, cli
+from observational_memory.config import Config
 
 
 def _set_base_env(monkeypatch, tmp_path):
@@ -147,8 +150,8 @@ def test_install_generates_compact_files_and_updates_codex_startup_integration(m
     assert om_groups[0]["hooks"][0]["command"].endswith(" context")
 
     updated_agents = codex_agents.read_text()
+    assert "<!-- observational-memory:codex-hooks-fallback-v1 -->" in updated_agents
     assert "Codex startup context is normally injected through hooks." in updated_agents
-    assert "does not already include sections titled `# Startup Profile` and `# Active Context`" in updated_agents
     assert "profile.md" in updated_agents
     assert "active.md" in updated_agents
     assert "om search" in updated_agents
@@ -217,6 +220,65 @@ def test_install_codex_preserves_existing_config_and_hooks(monkeypatch, tmp_path
     session_start = updated_hooks["hooks"]["SessionStart"]
     assert any(group["hooks"][0].get("statusMessage") == "Existing startup hook" for group in session_start)
     assert any(group["hooks"][0].get("statusMessage") == "Loading observational memory..." for group in session_start)
+
+
+def test_install_codex_preserves_dotted_features_syntax(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    runner = CliRunner()
+
+    codex_home = tmp_path / "codex"
+    config_toml = codex_home / "config.toml"
+    config_toml.write_text('model = "gpt-5.4"\nfeatures.shell_snapshot = true\n')
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--codex",
+            "--no-cron",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+    updated_config = config_toml.read_text()
+    assert "[features]" not in updated_config
+    assert "features.shell_snapshot = true" in updated_config
+    assert "features.codex_hooks = true" in updated_config
+
+    parsed = tomllib.loads(updated_config)
+    assert parsed["features"]["shell_snapshot"] is True
+    assert parsed["features"]["codex_hooks"] is True
+
+
+def test_enable_codex_hooks_feature_is_idempotent(monkeypatch, tmp_path, capsys):
+    _set_base_env(monkeypatch, tmp_path)
+    codex_home = tmp_path / "codex"
+    config_toml = codex_home / "config.toml"
+    config_toml.write_text("[features]\ncodex_hooks = true\n")
+    config = Config(codex_home=codex_home)
+
+    original_write_text = Path.write_text
+    write_calls: list[Path] = []
+
+    def spy_write_text(self, data, *args, **kwargs):
+        write_calls.append(self)
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", spy_write_text)
+
+    _enable_codex_hooks_feature(config)
+
+    captured = capsys.readouterr()
+    assert "already enabled" in captured.out
+    assert config_toml.read_text() == "[features]\ncodex_hooks = true\n"
+    assert config_toml not in write_calls
 
 
 def test_uninstall_codex_removes_only_om_hook_and_agents_block(monkeypatch, tmp_path):

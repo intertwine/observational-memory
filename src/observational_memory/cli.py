@@ -1141,11 +1141,14 @@ def _uninstall_claude_hooks(config: Config) -> None:
 # --- Codex integration ---
 
 _CODEX_OM_MARKER = "<!-- observational-memory -->"
+_CODEX_OM_FALLBACK_VERSION_MARKER = "<!-- observational-memory:codex-hooks-fallback-v1 -->"
 _CODEX_SESSION_START_MATCHER = "startup|resume"
 _CODEX_SESSION_START_STATUS = "Loading observational memory..."
 
 _CODEX_OM_BLOCK = f"""{_CODEX_OM_MARKER}
 ## Observational Memory
+
+{_CODEX_OM_FALLBACK_VERSION_MARKER}
 
 Codex startup context is normally injected through hooks.
 
@@ -1312,7 +1315,7 @@ def _codex_agents_fallback_status(config: Config) -> str:
     if _CODEX_OM_MARKER not in content:
         return "missing"
 
-    if "does not already include sections titled `# Startup Profile` and `# Active Context`" in content:
+    if _CODEX_OM_FALLBACK_VERSION_MARKER in content:
         return "fallback"
 
     return "legacy"
@@ -1353,11 +1356,17 @@ def _enable_codex_hooks_feature(config: Config) -> None:
 
     section_re = re.compile(r"^\s*\[([^\]]+)\]\s*$")
     key_re = re.compile(r"^\s*codex_hooks\s*=")
+    dotted_key_re = re.compile(r"^\s*features\.codex_hooks\s*=")
+    dotted_features_re = re.compile(r"^\s*features\.[A-Za-z0-9_-]+\s*=")
     changed = False
     feature_start = None
     feature_end = len(lines)
+    dotted_feature_lines: list[int] = []
 
     for i, line in enumerate(lines):
+        if dotted_features_re.match(line) and not line.lstrip().startswith("#"):
+            dotted_feature_lines.append(i)
+
         match = section_re.match(line)
         if not match:
             continue
@@ -1370,7 +1379,18 @@ def _enable_codex_hooks_feature(config: Config) -> None:
                     break
             break
 
-    if feature_start is None:
+    if feature_start is None and dotted_feature_lines:
+        for i in dotted_feature_lines:
+            if dotted_key_re.match(lines[i]):
+                if lines[i].strip() != "features.codex_hooks = true":
+                    lines[i] = "features.codex_hooks = true"
+                    changed = True
+                break
+        else:
+            insert_at = dotted_feature_lines[-1] + 1
+            lines.insert(insert_at, "features.codex_hooks = true")
+            changed = True
+    elif feature_start is None:
         if lines and lines[-1].strip():
             lines.append("")
         lines.extend(["[features]", "codex_hooks = true"])
@@ -1392,7 +1412,7 @@ def _enable_codex_hooks_feature(config: Config) -> None:
             lines.insert(insert_at, "codex_hooks = true")
             changed = True
 
-    if changed or not path.exists():
+    if changed:
         path.write_text("\n".join(lines).rstrip() + "\n")
 
     if changed:
