@@ -141,9 +141,7 @@ def test_install_generates_compact_files_and_updates_codex_startup_integration(m
     hooks_payload = json.loads((tmp_path / "codex" / "hooks.json").read_text())
     session_start = hooks_payload["hooks"]["SessionStart"]
     om_groups = [
-        group
-        for group in session_start
-        if group["hooks"][0].get("statusMessage") == "Loading observational memory..."
+        group for group in session_start if group["hooks"][0].get("statusMessage") == "Loading observational memory..."
     ]
     assert om_groups
     assert om_groups[0]["matcher"] == "startup|resume"
