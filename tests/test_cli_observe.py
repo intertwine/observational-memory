@@ -1,4 +1,4 @@
-"""Tests for observe CLI reflector catch-up behavior and cron cleanup."""
+"""Tests for observe CLI reflector catch-up behavior and Codex checkpoints."""
 
 import json
 import os
@@ -10,7 +10,6 @@ from click.testing import CliRunner
 from observational_memory.cli import (
     _acquire_codex_checkpoint_lock,
     _release_codex_checkpoint_lock,
-    _strip_om_cron_entries,
     cli,
 )
 from observational_memory.config import Config
@@ -245,38 +244,3 @@ def test_codex_checkpoint_reclaims_stale_lock(monkeypatch, tmp_path):
     assert lock_path.exists()
 
     _release_codex_checkpoint_lock(lock_path)
-
-
-def test_strip_om_cron_entries_removes_blocks_and_legacy_lines():
-    lines = [
-        "MAILTO=user@example.com",
-        "# --- observational-memory ---",
-        "*/15 * * * * /old/om observe --source codex",
-        "# --- end observational-memory ---",
-        "# --- observational-memory ---",
-        "# --- end observational-memory ---",
-        "0 4 * * * /old/om reflect",
-        "5 * * * * /usr/bin/true",
-    ]
-
-    assert _strip_om_cron_entries(lines) == [
-        "MAILTO=user@example.com",
-        "5 * * * * /usr/bin/true",
-    ]
-
-
-def test_strip_om_cron_entries_preserves_unclosed_block_with_warning(capsys):
-    lines = [
-        "MAILTO=user@example.com",
-        "# --- observational-memory ---",
-        "*/15 * * * * /old/om observe --source codex",
-        "15 9 * * * /usr/bin/true",
-    ]
-
-    assert _strip_om_cron_entries(lines) == [
-        "MAILTO=user@example.com",
-        "# --- observational-memory ---",
-        "*/15 * * * * /old/om observe --source codex",
-        "15 9 * * * /usr/bin/true",
-    ]
-    assert "unclosed observational-memory cron block detected" in capsys.readouterr().err

@@ -60,6 +60,10 @@ ENV_FILE_TEMPLATE = """\
 class Config:
     """Runtime configuration — resolved from env vars and defaults."""
 
+    CODEX_OBSERVE_LAUNCHD_LABEL = "com.intertwine.observational-memory.codex-observe"
+    AUTO_MEMORY_LAUNCHD_LABEL = "com.intertwine.observational-memory.auto-memory"
+    REFLECT_LAUNCHD_LABEL = "com.intertwine.observational-memory.reflect"
+
     # Memory storage
     memory_dir: Path = field(default_factory=lambda: _xdg_data_home() / "observational-memory")
 
@@ -145,6 +149,50 @@ class Config:
     @property
     def codex_checkpoint_lock_dir(self) -> Path:
         return self.memory_dir / ".codex-checkpoint-locks"
+
+    @property
+    def launch_agents_dir(self) -> Path:
+        return Path.home() / "Library" / "LaunchAgents"
+
+    @property
+    def scheduler_log_dir(self) -> Path:
+        return self.memory_dir / ".scheduler-logs"
+
+    @property
+    def codex_observe_launchd_plist_path(self) -> Path:
+        return self.launch_agents_dir / f"{self.CODEX_OBSERVE_LAUNCHD_LABEL}.plist"
+
+    @property
+    def auto_memory_launchd_plist_path(self) -> Path:
+        return self.launch_agents_dir / f"{self.AUTO_MEMORY_LAUNCHD_LABEL}.plist"
+
+    @property
+    def reflect_launchd_plist_path(self) -> Path:
+        return self.launch_agents_dir / f"{self.REFLECT_LAUNCHD_LABEL}.plist"
+
+    @property
+    def codex_observe_launchd_stdout_path(self) -> Path:
+        return self.scheduler_log_dir / "codex-observe.out.log"
+
+    @property
+    def codex_observe_launchd_stderr_path(self) -> Path:
+        return self.scheduler_log_dir / "codex-observe.err.log"
+
+    @property
+    def auto_memory_launchd_stdout_path(self) -> Path:
+        return self.scheduler_log_dir / "auto-memory.out.log"
+
+    @property
+    def auto_memory_launchd_stderr_path(self) -> Path:
+        return self.scheduler_log_dir / "auto-memory.err.log"
+
+    @property
+    def reflect_launchd_stdout_path(self) -> Path:
+        return self.scheduler_log_dir / "reflect.out.log"
+
+    @property
+    def reflect_launchd_stderr_path(self) -> Path:
+        return self.scheduler_log_dir / "reflect.err.log"
 
     def ensure_memory_dir(self) -> None:
         self.memory_dir.mkdir(parents=True, exist_ok=True)

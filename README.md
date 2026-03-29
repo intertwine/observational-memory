@@ -93,7 +93,7 @@ All hooks are installed automatically to `~/.claude/settings.json`.
 
 **Cross-project enrichment:** Auto-memory facts from all projects are supplied to the reflector as supplementary context, so knowledge from one project can surface when working in another.
 
-**Hourly cron:** An hourly cron job runs the auto-memory scan (no LLM calls — just hash comparison and reindex). Deletions are detected and the reflector is instructed to clean up stale facts.
+**Hourly background scan:** The installed scheduler runs the auto-memory scan hourly (launchd on macOS by default, cron elsewhere). This path makes no LLM calls; it just hashes, reindexes, and notices deletions so the reflector can clean up stale facts.
 
 ### Codex CLI integration
 
@@ -103,13 +103,13 @@ All hooks are installed automatically to `~/.claude/settings.json`.
 
 **AGENTS fallback:** The installer still maintains `~/.codex/AGENTS.md`, but only as a conditional fallback. If hooks are unavailable or disabled, AGENTS tells Codex to read `profile.md` and `active.md` manually before substantial work. Deeper memory remains available through `om search`, `reflections.md`, and `observations.md`.
 
-**Cron backstop:** A cron job still runs every 15 minutes, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations. This is now the safety net rather than the primary path, which helps when hooks are unavailable or a session exits before `Stop` fires.
+**Scheduler backstop:** A background job still runs every 15 minutes by default, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations. On macOS that backstop uses launchd by default; elsewhere it uses cron. This is now the safety net rather than the primary path, which helps when hooks are unavailable or a session exits before `Stop` fires.
 
-Because Codex hooks are still experimental, keeping the AGENTS fallback and cron backstop is intentional.
+Because Codex hooks are still experimental, keeping the AGENTS fallback and scheduler backstop is intentional.
 
 ### Reflector (both)
 
-A daily cron job (04:00 UTC) runs the reflector, which:
+A daily background job runs the reflector at 04:00 local machine time, which:
 
 1. Reads the `Last reflected` timestamp from the existing reflections
 2. Filters observations to only those from that date onward (incremental; skips already-processed days)
@@ -272,17 +272,20 @@ export XDG_DATA_HOME=~/my-data
 # Memory will be at ~/my-data/observational-memory/
 ```
 
-### Cron schedules
+### Background schedules
 
-The installer sets up:
+The installer sets up these schedules by default:
+
+- macOS: LaunchAgents in `~/Library/LaunchAgents/`
+- Other platforms: cron jobs
 
 - **Observer backstop (Codex):** `*/15 * * * *` by default (controlled by `OM_CODEX_OBSERVER_INTERVAL_MINUTES`, e.g. `*/10 * * * *` for 10 min)
 - **Auto-memory scan:** `0 * * * *` (hourly, no LLM calls — just hash comparison and reindex)
-- **Reflector:** `0 4 * * *` (daily at 04:00 UTC)
+- **Reflector:** `0 4 * * *` (daily at 04:00 local machine time)
 
-Set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` in `~/.config/observational-memory/env` to tune Codex polling (`1` = every minute). Even with hooks enabled, this cron job remains installed as a backstop.
+Set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` in `~/.config/observational-memory/env` to tune Codex polling (`1` = every minute). Even with hooks enabled, this background backstop remains installed.
 
-Edit with `crontab -e` to adjust.
+If you explicitly choose cron, adjust it with `crontab -e`. On macOS default installs, OM manages the LaunchAgent plist files for you.
 
 ### Search backend
 
@@ -411,7 +414,7 @@ Contributor and maintainer instructions have moved to [`docs/MAINTAINERS.md`](do
 | ---------------------- | ----------------------- | ------------------------------------------- |
 | **Agents supported**   | OpenClaw only           | Claude Code + Codex CLI                     |
 | **Scope**              | Per-workspace           | User-level (shared across all projects)     |
-| **Observer trigger**   | OpenClaw cron job       | Claude: SessionEnd/checkpoint hooks; Codex: Stop hook + cron backstop |
+| **Observer trigger**   | OpenClaw cron job       | Claude: SessionEnd/checkpoint hooks; Codex: Stop hook + scheduler backstop |
 | **Context injection**  | AGENTS.md instructions  | Claude: SessionStart hook; Codex: SessionStart hook + AGENTS fallback |
 | **Memory location**    | `workspace/memory/`     | `~/.local/share/observational-memory/`      |
 | **Compression engine** | OpenClaw agent sessions | Direct LLM API calls (Anthropic/OpenAI)     |

@@ -103,6 +103,26 @@ class TestEnvFile:
         assert config.codex_checkpoint_state_path == memory_dir / ".codex-checkpoint-state.json"
         assert config.codex_checkpoint_lock_dir == memory_dir / ".codex-checkpoint-locks"
 
+    def test_launchd_paths_live_under_launch_agents_and_memory_dir(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(home))
+
+        memory_dir = tmp_path / "memory"
+        config = Config(memory_dir=memory_dir)
+
+        assert config.launch_agents_dir == home / "Library" / "LaunchAgents"
+        assert config.scheduler_log_dir == memory_dir / ".scheduler-logs"
+        assert config.codex_observe_launchd_plist_path == (
+            config.launch_agents_dir / f"{config.CODEX_OBSERVE_LAUNCHD_LABEL}.plist"
+        )
+        assert config.auto_memory_launchd_plist_path == (
+            config.launch_agents_dir / f"{config.AUTO_MEMORY_LAUNCHD_LABEL}.plist"
+        )
+        assert config.reflect_launchd_plist_path == (config.launch_agents_dir / f"{config.REFLECT_LAUNCHD_LABEL}.plist")
+        assert config.codex_observe_launchd_stdout_path == config.scheduler_log_dir / "codex-observe.out.log"
+        assert config.reflect_launchd_stderr_path == config.scheduler_log_dir / "reflect.err.log"
+
 
 class TestDetectProvider:
     def test_detects_anthropic(self, tmp_path, monkeypatch):
