@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bump semantic version in pyproject.toml files.
+Bump semantic version in project metadata files.
 
 Usage:
     python scripts/bump_version.py <pyproject_path> <bump_type>
@@ -93,6 +93,21 @@ def update_pyproject_version(pyproject_path: Path, bump_type: str) -> tuple[str,
     return old_version, new_version
 
 
+def update_package_init_version(init_path: Path, old_version: str, new_version: str) -> None:
+    """Update __version__ in src/observational_memory/__init__.py."""
+    if not init_path.exists():
+        raise FileNotFoundError(f"Package init file not found at: {init_path}")
+
+    content = init_path.read_text()
+    old_line = f'__version__ = "{old_version}"'
+    new_line = f'__version__ = "{new_version}"'
+
+    if old_line not in content:
+        raise ValueError(f"Expected version line not found in {init_path}: {old_line}")
+
+    init_path.write_text(content.replace(old_line, new_line, 1))
+
+
 def main():
     if len(sys.argv) != 3:
         print(__doc__, file=sys.stderr)
@@ -110,6 +125,8 @@ def main():
 
     try:
         old_version, new_version = update_pyproject_version(pyproject_path, bump_type)
+        init_path = pyproject_path.parent / "src" / "observational_memory" / "__init__.py"
+        update_package_init_version(init_path, old_version, new_version)
         print(f"{old_version} → {new_version}")
         sys.exit(0)
     except Exception as e:
