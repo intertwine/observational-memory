@@ -8,7 +8,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from observational_memory.cli import _enable_codex_hooks_feature, _resolve_scheduler_mode, cli
+from observational_memory.cli import _enable_codex_hooks_feature, _resolve_scheduler_mode, _uninstall_cron, cli
 from observational_memory.config import Config
 
 
@@ -661,6 +661,42 @@ def test_install_cron_only_uninstalls_targeted_launchd_jobs(monkeypatch, tmp_pat
     assert calls == [("cron", "claude"), ("uninstall-launchd", "claude")]
 
 
+def test_install_none_uninstalls_targeted_backstops(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    runner = CliRunner()
+
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        "observational_memory.cli._uninstall_cron",
+        lambda targets="both": calls.append(("uninstall-cron", targets)),
+    )
+    monkeypatch.setattr(
+        "observational_memory.cli._uninstall_launchd",
+        lambda config, targets="both": calls.append(("uninstall-launchd", targets)),
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--codex",
+            "--scheduler",
+            "none",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("uninstall-launchd", "codex"), ("uninstall-cron", "codex")]
+
+
 def test_install_claude_cron_preserves_existing_codex_cron_job(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -717,3 +753,33 @@ def test_install_claude_cron_preserves_existing_codex_cron_job(monkeypatch, tmp_
     assert "/existing/om observe --source codex" in installed
     assert "observe --source claude-memory" in installed
     assert "om reflect" in installed
+
+
+def test_uninstall_cron_skips_write_and_message_when_no_targeted_jobs(monkeypatch, capsys):
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        if args == ["crontab", "-l"]:
+            return Result(
+                returncode=0,
+                stdout=(
+                    "# --- observational-memory ---\n"
+                    "*/15 * * * * /existing/om observe --source codex 2>/dev/null\n"
+                    "# --- end observational-memory ---\n"
+                ),
+            )
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    _uninstall_cron("claude")
+
+    assert calls == [(["crontab", "-l"], {"capture_output": True, "text": True})]
+    assert "Removed cron jobs" not in capsys.readouterr().out

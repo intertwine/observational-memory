@@ -824,6 +824,10 @@ def install(
         _install_cron(config, targets)
         if sys.platform == "darwin":
             _uninstall_launchd(config, targets)
+    elif scheduler_mode == "none":
+        if sys.platform == "darwin":
+            _uninstall_launchd(config, targets)
+        _uninstall_cron(targets)
 
     click.echo("\nInstallation complete! Run 'om status' to verify.")
 
@@ -1152,7 +1156,12 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     elif stop_hook:
         _check("Codex Stop hook", "PASS", "installed")
     else:
-        _check("Codex Stop hook", "WARN", "not installed; cron backstop still available", fix="Run: om install --codex")
+        _check(
+            "Codex Stop hook",
+            "WARN",
+            "not installed; background backstop still available",
+            fix="Run: om install --codex",
+        )
 
     if agents_status == "fallback":
         _check("Codex AGENTS fallback", "PASS", "installed")
@@ -2346,44 +2355,17 @@ def _uninstall_cron(targets: str = "both") -> None:
 
     preserved, existing_jobs = _extract_crontab_lines(result.stdout.splitlines())
     target_keys = _cron_job_keys_for_targets(targets)
+    if not set(existing_jobs).intersection(target_keys):
+        return
+
     remaining_jobs = {key: line for key, line in existing_jobs.items() if key not in target_keys}
     rendered = _render_crontab_lines(preserved, remaining_jobs)
     new_crontab = "\n".join(rendered) + "\n" if rendered else ""
-    subprocess.run(["crontab", "-"], input=new_crontab, capture_output=True, text=True)
-    click.echo("Removed cron jobs")
-
-
-def _strip_om_cron_entries(lines: list[str]) -> list[str]:
-    """Remove observational-memory cron blocks and legacy loose OM lines."""
-    filtered = []
-    in_om_block = False
-    block_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped == "# --- observational-memory ---":
-            in_om_block = True
-            block_lines = [line]
-            continue
-        if stripped == "# --- end observational-memory ---":
-            in_om_block = False
-            block_lines = []
-            continue
-        if in_om_block:
-            block_lines.append(line)
-            continue
-        if "om observe" in line or "om reflect" in line:
-            continue
-        filtered.append(line)
-
-    if in_om_block and block_lines:
-        click.echo(
-            "Warning: unclosed observational-memory cron block detected; "
-            "preserving trailing lines for manual inspection.",
-            err=True,
-        )
-        filtered.extend(block_lines)
-
-    return filtered
+    proc = subprocess.run(["crontab", "-"], input=new_crontab, capture_output=True, text=True)
+    if proc.returncode == 0:
+        click.echo("Removed cron jobs")
+    else:
+        click.echo(f"Warning: Failed to remove cron jobs: {proc.stderr}")
 
 
 def _find_om_path() -> str | None:
