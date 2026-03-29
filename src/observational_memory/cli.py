@@ -508,6 +508,7 @@ def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
 
 
 _SUPPORTED_PROVIDERS = ("anthropic", "openai", "anthropic-vertex", "anthropic-bedrock")
+_SCHEDULER_MODES = ("auto", "launchd", "cron", "none")
 
 
 def _validate_api_key_format(key: str, provider: str) -> bool:
@@ -731,7 +732,14 @@ def _configure_llm(
 @click.option("--claude", "targets", flag_value="claude", help="Install Claude Code hooks")
 @click.option("--codex", "targets", flag_value="codex", help="Install Codex hooks plus AGENTS fallback")
 @click.option("--both", "targets", flag_value="both", default=True, help="Install both (default)")
-@click.option("--cron/--no-cron", default=True, help="Set up cron jobs")
+@click.option(
+    "--scheduler",
+    type=click.Choice(_SCHEDULER_MODES, case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="Background scheduler backend",
+)
+@click.option("--cron/--no-cron", "cron_compat", default=None, help="Legacy alias for --scheduler cron/none")
 @click.option(
     "--provider",
     type=click.Choice(list(_SUPPORTED_PROVIDERS), case_sensitive=False),
@@ -746,7 +754,8 @@ def _configure_llm(
 def install(
     ctx: click.Context,
     targets: str,
-    cron: bool,
+    scheduler: str,
+    cron_compat: bool | None,
     provider: str | None,
     llm_model: str | None,
     vertex_project_id: str | None,
@@ -757,6 +766,7 @@ def install(
     """Set up observational memory for Claude Code and/or Codex CLI."""
     config = ctx.obj["config"]
     config.ensure_memory_dir()
+    scheduler_mode = _resolve_scheduler_mode(scheduler, cron_compat)
 
     # Create env file for provider/auth config
     if config.ensure_env_file():
@@ -807,8 +817,13 @@ def install(
     if targets in ("codex", "both"):
         _install_codex(config)
 
-    if cron:
+    if scheduler_mode == "launchd":
+        _install_launchd(config, targets)
+        _uninstall_cron()
+    elif scheduler_mode == "cron":
         _install_cron(config, targets)
+        if sys.platform == "darwin":
+            _uninstall_launchd(config)
 
     click.echo("\nInstallation complete! Run 'om status' to verify.")
 
@@ -829,6 +844,7 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
     if targets in ("codex", "both"):
         _uninstall_codex(config)
 
+    _uninstall_launchd(config)
     _uninstall_cron()
 
     if purge:
@@ -2010,6 +2026,182 @@ def _update_codex_checkpoint_state(
         finally:
             if fcntl is not None:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _resolve_scheduler_mode(requested: str, cron_compat: bool | None, platform: str | None = None) -> str:
+    """Resolve the scheduler mode, preserving legacy --cron/--no-cron behavior."""
+    active_platform = platform or sys.platform
+    requested = requested.lower()
+
+    if cron_compat is not None:
+        compat_mode = "cron" if cron_compat else "none"
+        if requested != "auto" and requested != compat_mode:
+            raise click.ClickException("--cron/--no-cron conflicts with --scheduler.")
+        requested = compat_mode
+
+    if requested == "auto":
+        return "launchd" if active_platform == "darwin" else "cron"
+
+    if requested == "launchd" and active_platform != "darwin":
+        raise click.ClickException("--scheduler launchd is only supported on macOS.")
+
+    return requested
+
+
+def _launchd_domain_target() -> str:
+    """Return the per-user GUI domain target for launchctl."""
+    return f"gui/{os.getuid()}"
+
+
+def _launchd_service_target(label: str) -> str:
+    """Return the fully qualified launchctl service target."""
+    return f"{_launchd_domain_target()}/{label}"
+
+
+def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None) -> list[dict[str, object]]:
+    """Return OM-managed launchd job specs for the selected install targets."""
+    resolved_om_path = str(Path(om_path).expanduser().resolve()) if om_path else None
+    specs: list[dict[str, object]] = []
+
+    if targets in ("codex", "both"):
+        specs.append(
+            {
+                "label": config.CODEX_OBSERVE_LAUNCHD_LABEL,
+                "plist_path": config.codex_observe_launchd_plist_path,
+                "argv": [resolved_om_path, "observe", "--source", "codex"] if resolved_om_path else [],
+                "run_at_load": True,
+                "start_interval": _codex_observer_interval_minutes() * 60,
+                "stdout_path": config.codex_observe_launchd_stdout_path,
+                "stderr_path": config.codex_observe_launchd_stderr_path,
+            }
+        )
+
+    specs.extend(
+        [
+            {
+                "label": config.AUTO_MEMORY_LAUNCHD_LABEL,
+                "plist_path": config.auto_memory_launchd_plist_path,
+                "argv": [resolved_om_path, "observe", "--source", "claude-memory"] if resolved_om_path else [],
+                "run_at_load": True,
+                "start_interval": 3600,
+                "stdout_path": config.auto_memory_launchd_stdout_path,
+                "stderr_path": config.auto_memory_launchd_stderr_path,
+            },
+            {
+                "label": config.REFLECT_LAUNCHD_LABEL,
+                "plist_path": config.reflect_launchd_plist_path,
+                "argv": [resolved_om_path, "reflect"] if resolved_om_path else [],
+                "run_at_load": False,
+                "start_calendar_interval": {"Hour": 4, "Minute": 0},
+                "stdout_path": config.reflect_launchd_stdout_path,
+                "stderr_path": config.reflect_launchd_stderr_path,
+            },
+        ]
+    )
+    return specs
+
+
+def _launchd_plist_payload(spec: dict[str, object]) -> dict[str, object]:
+    """Build a launchd plist payload from one OM job spec."""
+    payload: dict[str, object] = {
+        "Label": spec["label"],
+        "ProgramArguments": spec["argv"],
+        "StandardOutPath": str(spec["stdout_path"]),
+        "StandardErrorPath": str(spec["stderr_path"]),
+    }
+
+    if spec.get("run_at_load"):
+        payload["RunAtLoad"] = True
+
+    start_interval = spec.get("start_interval")
+    if isinstance(start_interval, int):
+        payload["StartInterval"] = start_interval
+
+    start_calendar_interval = spec.get("start_calendar_interval")
+    if isinstance(start_calendar_interval, dict):
+        payload["StartCalendarInterval"] = start_calendar_interval
+
+    return payload
+
+
+def _write_launchd_plist(path: Path, payload: dict[str, object]) -> None:
+    """Write a launchd plist payload as XML."""
+    import plistlib
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False))
+
+
+def _launchctl_bootout(label: str) -> None:
+    """Best-effort bootout for an OM launchd job."""
+    import subprocess
+
+    subprocess.run(
+        ["launchctl", "bootout", _launchd_service_target(label)],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _launchctl_bootstrap(plist_path: Path) -> None:
+    """Bootstrap one OM launchd plist into the current user's GUI domain."""
+    import subprocess
+
+    result = subprocess.run(
+        ["launchctl", "bootstrap", _launchd_domain_target(), str(plist_path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise click.ClickException(f"Failed to bootstrap launchd agent {plist_path.name}: {detail}")
+
+
+def _install_launchd(config: Config, targets: str) -> None:
+    """Install OM-managed LaunchAgents on macOS."""
+    if sys.platform != "darwin":
+        raise click.ClickException("launchd installation is only supported on macOS.")
+
+    om_path = _find_om_path()
+    if not om_path:
+        raise click.ClickException("Could not resolve an absolute 'om' path for launchd jobs.")
+
+    config.launch_agents_dir.mkdir(parents=True, exist_ok=True)
+    config.scheduler_log_dir.mkdir(parents=True, exist_ok=True)
+
+    specs = _launchd_job_specs(config, targets, om_path=om_path)
+    for spec in specs:
+        plist_path = spec["plist_path"]
+        label = spec["label"]
+        if not isinstance(plist_path, Path) or not isinstance(label, str):
+            continue
+        _write_launchd_plist(plist_path, _launchd_plist_payload(spec))
+        _launchctl_bootout(label)
+        _launchctl_bootstrap(plist_path)
+
+    click.echo(f"Installed {len(specs)} launchd job(s)")
+
+
+def _uninstall_launchd(config: Config) -> None:
+    """Remove OM-managed LaunchAgents from macOS."""
+    if sys.platform != "darwin":
+        return
+
+    specs = _launchd_job_specs(config, "both")
+    removed = False
+
+    for spec in specs:
+        plist_path = spec["plist_path"]
+        label = spec["label"]
+        if not isinstance(plist_path, Path) or not isinstance(label, str):
+            continue
+        _launchctl_bootout(label)
+        if plist_path.exists():
+            plist_path.unlink()
+            removed = True
+
+    if removed:
+        click.echo("Removed launchd jobs")
 
 
 # --- Cron installation ---

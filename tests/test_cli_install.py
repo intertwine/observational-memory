@@ -1,12 +1,14 @@
 """Tests for om install provider onboarding."""
 
 import json
+import os
+import plistlib
 import tomllib
 from pathlib import Path
 
 from click.testing import CliRunner
 
-from observational_memory.cli import _enable_codex_hooks_feature, cli
+from observational_memory.cli import _enable_codex_hooks_feature, _resolve_scheduler_mode, cli
 from observational_memory.config import Config
 
 
@@ -303,6 +305,174 @@ def test_enable_codex_hooks_feature_is_idempotent(monkeypatch, tmp_path, capsys)
     assert config_toml not in write_calls
 
 
+def test_resolve_scheduler_mode_auto_uses_launchd_on_macos():
+    assert _resolve_scheduler_mode("auto", None, platform="darwin") == "launchd"
+
+
+def test_resolve_scheduler_mode_auto_uses_cron_on_non_macos():
+    assert _resolve_scheduler_mode("auto", None, platform="linux") == "cron"
+
+
+def test_resolve_scheduler_mode_respects_legacy_no_cron():
+    assert _resolve_scheduler_mode("auto", False, platform="darwin") == "none"
+
+
+def test_resolve_scheduler_mode_rejects_conflicting_legacy_flags():
+    try:
+        _resolve_scheduler_mode("launchd", False, platform="darwin")
+        assert False, "Should have raised"
+    except Exception as exc:
+        assert "conflicts" in str(exc)
+
+
+def test_install_auto_scheduler_installs_launchd_on_macos(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    runner = CliRunner()
+
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        "observational_memory.cli._install_launchd",
+        lambda config, targets: calls.append(("launchd", targets)),
+    )
+    monkeypatch.setattr(
+        "observational_memory.cli._install_cron",
+        lambda config, targets: calls.append(("cron", targets)),
+    )
+    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda: calls.append(("uninstall-cron", None)))
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--codex",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("launchd", "codex"), ("uninstall-cron", None)]
+
+
+def test_install_explicit_launchd_writes_plists_and_bootstraps(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda: None)
+    runner = CliRunner()
+
+    subprocess_calls = []
+
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(args, **kwargs):
+        subprocess_calls.append((args, kwargs))
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--codex",
+            "--scheduler",
+            "launchd",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    plist_paths = [
+        config.codex_observe_launchd_plist_path,
+        config.auto_memory_launchd_plist_path,
+        config.reflect_launchd_plist_path,
+    ]
+    for path in plist_paths:
+        assert path.exists()
+
+    codex_plist = plistlib.loads(config.codex_observe_launchd_plist_path.read_bytes())
+    assert codex_plist["Label"] == config.CODEX_OBSERVE_LAUNCHD_LABEL
+    resolved_om_path = str(Path("/tmp/bin/om").resolve())
+    assert codex_plist["ProgramArguments"] == [resolved_om_path, "observe", "--source", "codex"]
+    assert codex_plist["RunAtLoad"] is True
+    assert codex_plist["StartInterval"] == 900
+    assert codex_plist["StandardOutPath"] == str(config.codex_observe_launchd_stdout_path)
+    assert codex_plist["StandardErrorPath"] == str(config.codex_observe_launchd_stderr_path)
+
+    reflect_plist = plistlib.loads(config.reflect_launchd_plist_path.read_bytes())
+    assert reflect_plist["Label"] == config.REFLECT_LAUNCHD_LABEL
+    assert reflect_plist["ProgramArguments"] == [resolved_om_path, "reflect"]
+    assert reflect_plist["StartCalendarInterval"] == {"Hour": 4, "Minute": 0}
+    assert "RunAtLoad" not in reflect_plist
+
+    expected_calls = [
+        ["launchctl", "bootout", f"gui/{os.getuid()}/{config.CODEX_OBSERVE_LAUNCHD_LABEL}"],
+        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(config.codex_observe_launchd_plist_path)],
+        ["launchctl", "bootout", f"gui/{os.getuid()}/{config.AUTO_MEMORY_LAUNCHD_LABEL}"],
+        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(config.auto_memory_launchd_plist_path)],
+        ["launchctl", "bootout", f"gui/{os.getuid()}/{config.REFLECT_LAUNCHD_LABEL}"],
+        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(config.reflect_launchd_plist_path)],
+    ]
+    assert [args for args, _ in subprocess_calls] == expected_calls
+
+
+def test_install_legacy_cron_flag_selects_cron_scheduler(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    runner = CliRunner()
+
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        "observational_memory.cli._install_launchd",
+        lambda config, targets: calls.append(("launchd", targets)),
+    )
+    monkeypatch.setattr(
+        "observational_memory.cli._install_cron",
+        lambda config, targets: calls.append(("cron", targets)),
+    )
+    monkeypatch.setattr(
+        "observational_memory.cli._uninstall_launchd",
+        lambda config: calls.append(("uninstall-launchd", None)),
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--codex",
+            "--cron",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("cron", "codex"), ("uninstall-launchd", None)]
+
+
 def test_uninstall_codex_removes_only_om_hook_and_agents_block(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     runner = CliRunner()
@@ -373,3 +543,45 @@ def test_uninstall_codex_removes_only_om_hook_and_agents_block(monkeypatch, tmp_
     updated_agents = codex_agents.read_text()
     assert "Team instructions" in updated_agents
     assert "<!-- observational-memory -->" not in updated_agents
+
+
+def test_uninstall_on_macos_removes_om_launch_agents(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda: None)
+    runner = CliRunner()
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.launch_agents_dir.mkdir(parents=True, exist_ok=True)
+    config.codex_observe_launchd_plist_path.write_text("codex")
+    config.auto_memory_launchd_plist_path.write_text("auto")
+    config.reflect_launchd_plist_path.write_text("reflect")
+    unrelated = config.launch_agents_dir / "com.example.other.plist"
+    unrelated.write_text("keep")
+
+    subprocess_calls = []
+
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(args, **kwargs):
+        subprocess_calls.append((args, kwargs))
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = runner.invoke(cli, ["uninstall", "--codex"])
+
+    assert result.exit_code == 0, result.output
+    assert not config.codex_observe_launchd_plist_path.exists()
+    assert not config.auto_memory_launchd_plist_path.exists()
+    assert not config.reflect_launchd_plist_path.exists()
+    assert unrelated.exists()
+    assert [args for args, _ in subprocess_calls] == [
+        ["launchctl", "bootout", f"gui/{os.getuid()}/{config.CODEX_OBSERVE_LAUNCHD_LABEL}"],
+        ["launchctl", "bootout", f"gui/{os.getuid()}/{config.AUTO_MEMORY_LAUNCHD_LABEL}"],
+        ["launchctl", "bootout", f"gui/{os.getuid()}/{config.REFLECT_LAUNCHD_LABEL}"],
+    ]
