@@ -46,7 +46,10 @@ Runtime expectations:
 
 - `SessionStart` runs `om context` to inject `profile.md` + `active.md`.
 - `Stop` queues transcript-specific Codex checkpointing through the hidden `om codex-checkpoint` path.
-- cron remains installed as a backstop for Codex transcript observation.
+- a background scheduler remains installed as a backstop for Codex transcript observation:
+  - `launchd` on macOS by default
+  - cron on other Unix-like platforms by default
+- `om status` and `om doctor` should report launchd vs cron truthfully, including duplicate macOS backstops.
 
 Important maintainer rules:
 
@@ -69,7 +72,7 @@ The Homebrew release workflow also checks Homebrew/core to catch formula-name co
 ### Per-release flow
 
 1. Publish new version to PyPI.
-2. Tag the same version in git (for example `v0.1.2`) and push the tag.
+2. Tag the same version in git (for example `v0.3.1`) and push the tag.
 3. GitHub Actions workflow `.github/workflows/homebrew-release.yml` regenerates `packaging/homebrew/observational-memory.rb` from PyPI, updates `Formula/observational-memory.rb` in the tap repo, then commits and pushes the tap update.
 
 ### Local maintainership commands
