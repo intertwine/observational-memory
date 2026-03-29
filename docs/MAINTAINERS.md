@@ -29,6 +29,32 @@ uv run pytest tests/test_transcripts.py
 uv run pytest -v
 ```
 
+## Codex Integration Model
+
+Codex is now hooks-first, not AGENTS-first.
+
+Installer-managed user-level files:
+
+- `~/.codex/config.toml`
+  `om install --codex` ensures `[features].codex_hooks = true`.
+- `~/.codex/hooks.json`
+  OM installs and removes only its own global `SessionStart` and `Stop` hook groups.
+- `~/.codex/AGENTS.md`
+  OM keeps a conditional fallback block here for hook-disabled or older Codex setups.
+
+Runtime expectations:
+
+- `SessionStart` runs `om context` to inject `profile.md` + `active.md`.
+- `Stop` queues transcript-specific Codex checkpointing through the hidden `om codex-checkpoint` path.
+- cron remains installed as a backstop for Codex transcript observation.
+
+Important maintainer rules:
+
+- Preserve unrelated user or third-party hook groups in `hooks.json`.
+- Do not default to repo-local `.codex/hooks.json`; OM is intentionally user-level shared memory.
+- `om uninstall --codex` should remove OM-managed hooks and the OM AGENTS fallback block, but should not disable `codex_hooks = true`.
+- AGENTS should stay conditional fallback only; avoid reintroducing unconditional startup reads when hooks are present.
+
 ## Homebrew Release
 
 `observational-memory` is published to Homebrew via a tap formula (to avoid name collisions with short/common formula names). The executable remains `om`.
@@ -70,6 +96,7 @@ observational-memory/
 │   ├── llm.py                        # LLM API abstraction (direct + enterprise providers)
 │   ├── observe.py                    # Observer logic
 │   ├── reflect.py                    # Reflector logic
+│   ├── startup_memory.py             # Compact startup profile/active file generation
 │   ├── transcripts/
 │   │   ├── claude.py                 # Claude Code JSONL parser
 │   │   ├── codex.py                  # Codex CLI session parser

@@ -36,7 +36,7 @@ uv tool install "observational-memory[enterprise]"
 brew tap intertwine/tap
 brew install intertwine/tap/observational-memory
 
-# Set up hooks, LLM provider config, and cron
+# Set up hooks, fallback instructions, LLM provider config, and cron
 om install
 ```
 
@@ -97,9 +97,15 @@ All hooks are installed automatically to `~/.claude/settings.json`.
 
 ### Codex CLI integration
 
-**AGENTS.md:** The installer adds instructions to `~/.codex/AGENTS.md` so Codex reads compact startup memory files at session start, with deeper memory available on demand via `om search` or the raw memory files.
+**Hooks-first startup:** `om install --codex` enables Codex's experimental hooks feature in `~/.codex/config.toml` (`[features].codex_hooks = true`) and installs a global `SessionStart` hook in `~/.codex/hooks.json`. That hook runs `om context`, which injects compact derived startup files (`profile.md` + `active.md`) directly into the Codex session.
 
-**Cron observer:** A cron job runs every 15 minutes, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations. At the end of each observer run, `om` also checks whether reflections have fallen behind and runs a reflector catch-up when needed.
+**Hooks-first checkpointing:** The installer also adds a global `Stop` hook in `~/.codex/hooks.json`. At turn end, that hook queues a transcript-specific checkpoint for the active Codex transcript, so `om` can observe only the current session instead of rescanning all recent sessions.
+
+**AGENTS fallback:** The installer still maintains `~/.codex/AGENTS.md`, but only as a conditional fallback. If hooks are unavailable or disabled, AGENTS tells Codex to read `profile.md` and `active.md` manually before substantial work. Deeper memory remains available through `om search`, `reflections.md`, and `observations.md`.
+
+**Cron backstop:** A cron job still runs every 15 minutes, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations. This is now the safety net rather than the primary path, which helps when hooks are unavailable or a session exits before `Stop` fires.
+
+Because Codex hooks are still experimental, keeping the AGENTS fallback and cron backstop is intentional.
 
 ### Reflector (both)
 
@@ -189,6 +195,7 @@ om observe
 
 # Run observer on a specific transcript
 om observe --transcript ~/.claude/projects/.../abc123.jsonl
+om observe --transcript ~/.codex/sessions/.../session.jsonl --source codex
 
 # Run observer for one source only
 om observe --source claude
@@ -269,11 +276,11 @@ export XDG_DATA_HOME=~/my-data
 
 The installer sets up:
 
-- **Observer (Codex):** `*/15 * * * *` by default (controlled by `OM_CODEX_OBSERVER_INTERVAL_MINUTES`, e.g. `*/10 * * * *` for 10 min)
+- **Observer backstop (Codex):** `*/15 * * * *` by default (controlled by `OM_CODEX_OBSERVER_INTERVAL_MINUTES`, e.g. `*/10 * * * *` for 10 min)
 - **Auto-memory scan:** `0 * * * *` (hourly, no LLM calls — just hash comparison and reindex)
 - **Reflector:** `0 4 * * *` (daily at 04:00 UTC)
 
-Set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` in `~/.config/observational-memory/env` to tune Codex polling (`1` = every minute).
+Set `OM_CODEX_OBSERVER_INTERVAL_MINUTES` in `~/.config/observational-memory/env` to tune Codex polling (`1` = every minute). Even with hooks enabled, this cron job remains installed as a backstop.
 
 Edit with `crontab -e` to adjust.
 
@@ -404,8 +411,8 @@ Contributor and maintainer instructions have moved to [`docs/MAINTAINERS.md`](do
 | ---------------------- | ----------------------- | ------------------------------------------- |
 | **Agents supported**   | OpenClaw only           | Claude Code + Codex CLI                     |
 | **Scope**              | Per-workspace           | User-level (shared across all projects)     |
-| **Observer trigger**   | OpenClaw cron job       | Claude: SessionEnd hook; Codex: system cron |
-| **Context injection**  | AGENTS.md instructions  | Claude: SessionStart hook; Codex: AGENTS.md |
+| **Observer trigger**   | OpenClaw cron job       | Claude: SessionEnd/checkpoint hooks; Codex: Stop hook + cron backstop |
+| **Context injection**  | AGENTS.md instructions  | Claude: SessionStart hook; Codex: SessionStart hook + AGENTS fallback |
 | **Memory location**    | `workspace/memory/`     | `~/.local/share/observational-memory/`      |
 | **Compression engine** | OpenClaw agent sessions | Direct LLM API calls (Anthropic/OpenAI)     |
 | **Cross-agent memory** | No                      | Yes                                         |
