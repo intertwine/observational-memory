@@ -819,11 +819,11 @@ def install(
 
     if scheduler_mode == "launchd":
         _install_launchd(config, targets)
-        _uninstall_cron()
+        _uninstall_cron(targets)
     elif scheduler_mode == "cron":
         _install_cron(config, targets)
         if sys.platform == "darwin":
-            _uninstall_launchd(config)
+            _uninstall_launchd(config, targets)
 
     click.echo("\nInstallation complete! Run 'om status' to verify.")
 
@@ -844,8 +844,8 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
     if targets in ("codex", "both"):
         _uninstall_codex(config)
 
-    _uninstall_launchd(config)
-    _uninstall_cron()
+    _uninstall_launchd(config, targets)
+    _uninstall_cron(targets)
 
     if purge:
         import shutil
@@ -2060,7 +2060,7 @@ def _launchd_service_target(label: str) -> str:
 
 def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None) -> list[dict[str, object]]:
     """Return OM-managed launchd job specs for the selected install targets."""
-    resolved_om_path = str(Path(om_path).expanduser().resolve()) if om_path else None
+    resolved_om_path = str(Path(om_path).expanduser()) if om_path else None
     specs: list[dict[str, object]] = []
 
     if targets in ("codex", "both"):
@@ -2182,12 +2182,12 @@ def _install_launchd(config: Config, targets: str) -> None:
     click.echo(f"Installed {len(specs)} launchd job(s)")
 
 
-def _uninstall_launchd(config: Config) -> None:
+def _uninstall_launchd(config: Config, targets: str = "both") -> None:
     """Remove OM-managed LaunchAgents from macOS."""
     if sys.platform != "darwin":
         return
 
-    specs = _launchd_job_specs(config, "both")
+    specs = _launchd_job_specs(config, targets)
     removed = False
 
     for spec in specs:
@@ -2233,35 +2233,84 @@ def _cron_every_minutes(minutes: int) -> str:
     return f"*/{minutes}"
 
 
-def _install_cron(config: Config, targets: str) -> None:
-    """Add cron jobs for observer and reflector."""
-    import subprocess
+def _cron_job_key(line: str) -> str | None:
+    """Return the OM cron job key for a crontab line, if any."""
+    if "om observe --source codex" in line:
+        return "codex"
+    if "om observe --source claude-memory" in line:
+        return "claude-memory"
+    if "om reflect" in line:
+        return "reflect"
+    return None
 
+
+def _cron_job_keys_for_targets(targets: str) -> set[str]:
+    """Return the OM cron job keys scoped to one install target selection."""
+    keys = {"claude-memory", "reflect"}
+    if targets in ("codex", "both"):
+        keys.add("codex")
+    return keys
+
+
+def _extract_crontab_lines(lines: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Split crontab lines into non-OM lines and OM-managed job lines."""
+    preserved: list[str] = []
+    om_jobs: dict[str, str] = {}
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped in {"# --- observational-memory ---", "# --- end observational-memory ---"}:
+            continue
+
+        job_key = _cron_job_key(line)
+        if job_key is not None:
+            om_jobs[job_key] = line
+            continue
+
+        preserved.append(line)
+
+    return preserved, om_jobs
+
+
+def _render_crontab_lines(preserved: list[str], om_jobs: dict[str, str]) -> list[str]:
+    """Render preserved and OM job lines back into a crontab."""
+    lines = list(preserved)
+    ordered_jobs = [om_jobs[key] for key in ("codex", "claude-memory", "reflect") if key in om_jobs]
+    if ordered_jobs:
+        lines.append("# --- observational-memory ---")
+        lines.extend(ordered_jobs)
+        lines.append("# --- end observational-memory ---")
+    return lines
+
+
+def _desired_cron_jobs(config: Config, targets: str) -> dict[str, str]:
+    """Return the desired OM cron job lines keyed by logical job name."""
     om_path = _find_om_path()
     if not om_path:
         click.echo("Warning: 'om' not found in PATH. Cron jobs will use 'om' — make sure it's installed.")
         om_path = "om"
 
-    # Source the env file before each cron command so API keys are available
     env_file = config.env_file
     if env_file.exists():
         prefix = f". {env_file} && "
     else:
         prefix = ""
 
-    jobs = []
-
-    codex_interval = _cron_every_minutes(_codex_observer_interval_minutes())
+    jobs = {
+        "claude-memory": f"0 * * * * {prefix}{om_path} observe --source claude-memory 2>/dev/null",
+        "reflect": f"0 4 * * * {prefix}{om_path} reflect 2>/dev/null",
+    }
 
     if targets in ("codex", "both"):
-        # Observer cron for Codex (Claude uses hooks instead)
-        jobs.append(f"{codex_interval} * * * * {prefix}{om_path} observe --source codex 2>/dev/null")
+        codex_interval = _cron_every_minutes(_codex_observer_interval_minutes())
+        jobs["codex"] = f"{codex_interval} * * * * {prefix}{om_path} observe --source codex 2>/dev/null"
 
-    # Hourly auto-memory scan (no LLM calls — just hash comparison + reindex)
-    jobs.append(f"0 * * * * {prefix}{om_path} observe --source claude-memory 2>/dev/null")
+    return jobs
 
-    # Daily reflector for all
-    jobs.append(f"0 4 * * * {prefix}{om_path} reflect 2>/dev/null")
+
+def _install_cron(config: Config, targets: str) -> None:
+    """Add cron jobs for observer and reflector."""
+    import subprocess
 
     try:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
@@ -2269,23 +2318,22 @@ def _install_cron(config: Config, targets: str) -> None:
     except FileNotFoundError:
         existing = ""
 
-    # Remove old OM cron blocks and legacy loose lines from earlier installs.
-    lines = _strip_om_cron_entries(existing.splitlines())
+    preserved, existing_jobs = _extract_crontab_lines(existing.splitlines())
+    target_keys = _cron_job_keys_for_targets(targets)
+    desired_jobs = _desired_cron_jobs(config, targets)
+    merged_jobs = {key: line for key, line in existing_jobs.items() if key not in target_keys}
+    merged_jobs.update(desired_jobs)
 
-    lines.append("# --- observational-memory ---")
-    lines.extend(jobs)
-    lines.append("# --- end observational-memory ---")
-
-    new_crontab = "\n".join(lines) + "\n"
+    new_crontab = "\n".join(_render_crontab_lines(preserved, merged_jobs)) + "\n"
 
     proc = subprocess.run(["crontab", "-"], input=new_crontab, capture_output=True, text=True)
     if proc.returncode == 0:
-        click.echo(f"Installed {len(jobs)} cron job(s)")
+        click.echo(f"Installed {len(desired_jobs)} cron job(s)")
     else:
         click.echo(f"Warning: Failed to install cron jobs: {proc.stderr}")
 
 
-def _uninstall_cron() -> None:
+def _uninstall_cron(targets: str = "both") -> None:
     """Remove observational memory cron jobs."""
     import subprocess
 
@@ -2296,9 +2344,11 @@ def _uninstall_cron() -> None:
     except FileNotFoundError:
         return
 
-    filtered = _strip_om_cron_entries(result.stdout.splitlines())
-
-    new_crontab = "\n".join(filtered) + "\n" if filtered else ""
+    preserved, existing_jobs = _extract_crontab_lines(result.stdout.splitlines())
+    target_keys = _cron_job_keys_for_targets(targets)
+    remaining_jobs = {key: line for key, line in existing_jobs.items() if key not in target_keys}
+    rendered = _render_crontab_lines(preserved, remaining_jobs)
+    new_crontab = "\n".join(rendered) + "\n" if rendered else ""
     subprocess.run(["crontab", "-"], input=new_crontab, capture_output=True, text=True)
     click.echo("Removed cron jobs")
 

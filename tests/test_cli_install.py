@@ -341,7 +341,10 @@ def test_install_auto_scheduler_installs_launchd_on_macos(monkeypatch, tmp_path)
         "observational_memory.cli._install_cron",
         lambda config, targets: calls.append(("cron", targets)),
     )
-    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda: calls.append(("uninstall-cron", None)))
+    monkeypatch.setattr(
+        "observational_memory.cli._uninstall_cron",
+        lambda targets="both": calls.append(("uninstall-cron", targets)),
+    )
 
     result = runner.invoke(
         cli,
@@ -357,7 +360,7 @@ def test_install_auto_scheduler_installs_launchd_on_macos(monkeypatch, tmp_path)
     )
 
     assert result.exit_code == 0, result.output
-    assert calls == [("launchd", "codex"), ("uninstall-cron", None)]
+    assert calls == [("launchd", "codex"), ("uninstall-cron", "codex")]
 
 
 def test_install_explicit_launchd_writes_plists_and_bootstraps(monkeypatch, tmp_path):
@@ -365,7 +368,7 @@ def test_install_explicit_launchd_writes_plists_and_bootstraps(monkeypatch, tmp_
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
     monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
-    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda: None)
+    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda targets="both": None)
     runner = CliRunner()
 
     subprocess_calls = []
@@ -410,8 +413,7 @@ def test_install_explicit_launchd_writes_plists_and_bootstraps(monkeypatch, tmp_
 
     codex_plist = plistlib.loads(config.codex_observe_launchd_plist_path.read_bytes())
     assert codex_plist["Label"] == config.CODEX_OBSERVE_LAUNCHD_LABEL
-    resolved_om_path = str(Path("/tmp/bin/om").resolve())
-    assert codex_plist["ProgramArguments"] == [resolved_om_path, "observe", "--source", "codex"]
+    assert codex_plist["ProgramArguments"] == ["/tmp/bin/om", "observe", "--source", "codex"]
     assert codex_plist["RunAtLoad"] is True
     assert codex_plist["StartInterval"] == 900
     assert codex_plist["StandardOutPath"] == str(config.codex_observe_launchd_stdout_path)
@@ -419,7 +421,7 @@ def test_install_explicit_launchd_writes_plists_and_bootstraps(monkeypatch, tmp_
 
     reflect_plist = plistlib.loads(config.reflect_launchd_plist_path.read_bytes())
     assert reflect_plist["Label"] == config.REFLECT_LAUNCHD_LABEL
-    assert reflect_plist["ProgramArguments"] == [resolved_om_path, "reflect"]
+    assert reflect_plist["ProgramArguments"] == ["/tmp/bin/om", "reflect"]
     assert reflect_plist["StartCalendarInterval"] == {"Hour": 4, "Minute": 0}
     assert "RunAtLoad" not in reflect_plist
 
@@ -452,7 +454,7 @@ def test_install_legacy_cron_flag_selects_cron_scheduler(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         "observational_memory.cli._uninstall_launchd",
-        lambda config: calls.append(("uninstall-launchd", None)),
+        lambda config, targets="both": calls.append(("uninstall-launchd", targets)),
     )
 
     result = runner.invoke(
@@ -470,13 +472,13 @@ def test_install_legacy_cron_flag_selects_cron_scheduler(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
-    assert calls == [("cron", "codex"), ("uninstall-launchd", None)]
+    assert calls == [("cron", "codex"), ("uninstall-launchd", "codex")]
 
 
 def test_uninstall_codex_removes_only_om_hook_and_agents_block(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     runner = CliRunner()
-    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda: None)
+    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda targets="both": None)
 
     codex_home = tmp_path / "codex"
     hooks_path = codex_home / "hooks.json"
@@ -548,7 +550,7 @@ def test_uninstall_codex_removes_only_om_hook_and_agents_block(monkeypatch, tmp_
 def test_uninstall_on_macos_removes_om_launch_agents(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
-    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda: None)
+    monkeypatch.setattr("observational_memory.cli._uninstall_cron", lambda targets="both": None)
     runner = CliRunner()
 
     config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
@@ -585,3 +587,133 @@ def test_uninstall_on_macos_removes_om_launch_agents(monkeypatch, tmp_path):
         ["launchctl", "bootout", f"gui/{os.getuid()}/{config.AUTO_MEMORY_LAUNCHD_LABEL}"],
         ["launchctl", "bootout", f"gui/{os.getuid()}/{config.REFLECT_LAUNCHD_LABEL}"],
     ]
+
+
+def test_install_launchd_only_uninstalls_targeted_cron_jobs(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    runner = CliRunner()
+
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        "observational_memory.cli._install_launchd",
+        lambda config, targets: calls.append(("launchd", targets)),
+    )
+    monkeypatch.setattr(
+        "observational_memory.cli._uninstall_cron",
+        lambda targets="both": calls.append(("uninstall-cron", targets)),
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--claude",
+            "--scheduler",
+            "launchd",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("launchd", "claude"), ("uninstall-cron", "claude")]
+
+
+def test_install_cron_only_uninstalls_targeted_launchd_jobs(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    runner = CliRunner()
+
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        "observational_memory.cli._install_cron",
+        lambda config, targets: calls.append(("cron", targets)),
+    )
+    monkeypatch.setattr(
+        "observational_memory.cli._uninstall_launchd",
+        lambda config, targets="both": calls.append(("uninstall-launchd", targets)),
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--claude",
+            "--scheduler",
+            "cron",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("cron", "claude"), ("uninstall-launchd", "claude")]
+
+
+def test_install_claude_cron_preserves_existing_codex_cron_job(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    runner = CliRunner()
+
+    crontab_state = {
+        "text": (
+            "# --- observational-memory ---\n"
+            "*/15 * * * * /existing/om observe --source codex 2>/dev/null\n"
+            "# --- end observational-memory ---\n"
+        )
+    }
+
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    writes: list[str] = []
+
+    def fake_run(args, **kwargs):
+        if args == ["crontab", "-l"]:
+            return Result(returncode=0, stdout=crontab_state["text"])
+        if args == ["crontab", "-"]:
+            payload = kwargs.get("input", "")
+            writes.append(payload)
+            crontab_state["text"] = payload
+            return Result(returncode=0)
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("observational_memory.cli._install_launchd", lambda config, targets: None)
+    monkeypatch.setattr("observational_memory.cli._uninstall_launchd", lambda config, targets="both": None)
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--claude",
+            "--scheduler",
+            "cron",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert writes
+    installed = writes[-1]
+    assert "/existing/om observe --source codex" in installed
+    assert "observe --source claude-memory" in installed
+    assert "om reflect" in installed
