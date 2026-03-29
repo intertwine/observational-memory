@@ -3,9 +3,11 @@
 import json
 import os
 import plistlib
+import subprocess
 import tomllib
 from pathlib import Path
 
+import click
 from click.testing import CliRunner
 
 from observational_memory.cli import _enable_codex_hooks_feature, _resolve_scheduler_mode, _uninstall_cron, cli
@@ -781,5 +783,93 @@ def test_uninstall_cron_skips_write_and_message_when_no_targeted_jobs(monkeypatc
 
     _uninstall_cron("claude")
 
-    assert calls == [(["crontab", "-l"], {"capture_output": True, "text": True})]
+    assert calls == [(["crontab", "-l"], {"capture_output": True, "text": True, "timeout": 5})]
     assert "Removed cron jobs" not in capsys.readouterr().out
+
+
+def test_install_launchd_warns_without_failing_when_scheduler_setup_errors(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "observational_memory.cli._install_launchd",
+        lambda config, targets: (_ for _ in ()).throw(click.ClickException("launchctl bootstrap failed")),
+    )
+    uninstall_calls = []
+    monkeypatch.setattr(
+        "observational_memory.cli._uninstall_cron",
+        lambda targets="both": uninstall_calls.append(targets),
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--codex",
+            "--scheduler",
+            "launchd",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning: launchd scheduler setup failed: launchctl bootstrap failed" in result.output
+    assert uninstall_calls == []
+
+
+def test_install_cron_warns_when_crontab_write_times_out(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "linux")
+    runner = CliRunner()
+
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(args, **kwargs):
+        if args == ["crontab", "-l"]:
+            return Result(returncode=1, stderr="no crontab for bryan")
+        if args == ["crontab", "-"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=5)
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--codex",
+            "--scheduler",
+            "cron",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning: Failed to install cron jobs: timed out after 5s" in result.output
+
+
+def test_uninstall_cron_warns_when_crontab_read_times_out(monkeypatch, capsys):
+    def fake_run(args, **kwargs):
+        if args == ["crontab", "-l"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=5)
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    _uninstall_cron("codex")
+
+    assert "Warning: Failed to read crontab: timed out after 5s" in capsys.readouterr().out

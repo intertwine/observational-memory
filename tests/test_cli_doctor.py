@@ -2,10 +2,12 @@
 
 import json
 import os
+import subprocess
 
 from click.testing import CliRunner
 
 from observational_memory.cli import cli
+from observational_memory.config import Config
 
 
 def _set_base_env(monkeypatch, tmp_path):
@@ -206,3 +208,118 @@ def test_doctor_codex_startup_passes_with_hooks_enabled(monkeypatch, tmp_path):
     command_check = _get_check(data, "Codex hook commands valid")
     assert command_check is not None
     assert command_check["status"] == "PASS"
+
+
+def test_doctor_reports_launchd_and_legacy_cron_on_macos(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    runner = CliRunner()
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.launch_agents_dir.mkdir(parents=True, exist_ok=True)
+    config.codex_observe_launchd_plist_path.write_text("codex")
+    config.auto_memory_launchd_plist_path.write_text("auto")
+    config.reflect_launchd_plist_path.write_text("reflect")
+
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["launchctl", "print"]:
+            return Result(returncode=0, stdout="service = loaded")
+        if args == ["crontab", "-l"]:
+            return Result(
+                returncode=0,
+                stdout=(
+                    "# --- observational-memory ---\n"
+                    "*/15 * * * * /tmp/bin/om observe --source codex 2>/dev/null\n"
+                    "# --- end observational-memory ---\n"
+                ),
+            )
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(result.output)
+    assert _get_check(data, "Scheduler default")["detail"] == "launchd"
+    assert _get_check(data, "LaunchAgents")["status"] == "PASS"
+    assert _get_check(data, "LaunchAgents loaded")["status"] == "PASS"
+    assert _get_check(data, "Legacy cron jobs")["status"] == "WARN"
+
+
+def test_doctor_warns_when_crontab_times_out(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "linux")
+    runner = CliRunner()
+
+    def fake_run(args, **kwargs):
+        if args == ["crontab", "-l"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=5)
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(result.output)
+    cron_check = _get_check(data, "Cron jobs")
+    assert cron_check is not None
+    assert cron_check["status"] == "WARN"
+    assert "timed out after 5s" in cron_check["detail"]
+
+
+def test_status_reports_duplicate_backstops_on_macos(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    runner = CliRunner()
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+    config.codex_observe_launchd_plist_path.parent.mkdir(parents=True, exist_ok=True)
+    config.codex_observe_launchd_plist_path.write_text("codex")
+    config.auto_memory_launchd_plist_path.write_text("auto")
+    config.reflect_launchd_plist_path.write_text("reflect")
+
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["launchctl", "print"]:
+            return Result(returncode=0, stdout="service = loaded")
+        if args == ["crontab", "-l"]:
+            return Result(
+                returncode=0,
+                stdout=(
+                    "# --- observational-memory ---\n"
+                    "0 * * * * /tmp/bin/om observe --source claude-memory 2>/dev/null\n"
+                    "# --- end observational-memory ---\n"
+                ),
+            )
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = runner.invoke(cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "Background scheduler:" in result.output
+    assert "Default backend: launchd" in result.output
+    assert "LaunchAgents: 3/3 installed" in result.output
+    assert "Loaded: 3/3 loaded" in result.output
+    assert "Cron jobs: 1 found (claude-memory)" in result.output
+    assert "Duplicate backstops: launchd and cron are both present" in result.output

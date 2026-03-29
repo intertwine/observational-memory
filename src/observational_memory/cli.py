@@ -509,6 +509,7 @@ def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
 
 _SUPPORTED_PROVIDERS = ("anthropic", "openai", "anthropic-vertex", "anthropic-bedrock")
 _SCHEDULER_MODES = ("auto", "launchd", "cron", "none")
+_SCHEDULER_COMMAND_TIMEOUT_SECONDS = 5
 
 
 def _validate_api_key_format(key: str, provider: str) -> bool:
@@ -818,8 +819,12 @@ def install(
         _install_codex(config)
 
     if scheduler_mode == "launchd":
-        _install_launchd(config, targets)
-        _uninstall_cron(targets)
+        try:
+            _install_launchd(config, targets)
+        except click.ClickException as exc:
+            click.echo(f"Warning: launchd scheduler setup failed: {exc}", err=True)
+        else:
+            _uninstall_cron(targets)
     elif scheduler_mode == "cron":
         _install_cron(config, targets)
         if sys.platform == "darwin":
@@ -999,6 +1004,37 @@ def status(ctx: click.Context) -> None:
     else:
         click.echo(f"  AGENTS fallback: AGENTS.md not found at {config.codex_agents_md}")
 
+    click.echo("\nBackground scheduler:")
+    click.echo(f"  Default backend: {_resolve_scheduler_mode('auto', None)}")
+
+    launchd_jobs = _launchd_job_statuses(config) if sys.platform == "darwin" else []
+    if sys.platform == "darwin":
+        installed_jobs = [job for job in launchd_jobs if job["installed"]]
+        loaded_jobs = [job for job in launchd_jobs if job["loaded"]]
+        missing_jobs = [str(job["key"]) for job in launchd_jobs if not job["installed"]]
+        load_errors = [f"{job['key']}: {job['error']}" for job in launchd_jobs if job["error"]]
+
+        click.echo(f"  LaunchAgents: {len(installed_jobs)}/{len(launchd_jobs)} installed")
+        if installed_jobs:
+            click.echo(f"  Loaded: {len(loaded_jobs)}/{len(installed_jobs)} loaded")
+        else:
+            click.echo("  Loaded: none")
+
+        if missing_jobs:
+            click.echo(f"  Missing: {', '.join(missing_jobs)}")
+        if load_errors:
+            click.echo(f"  launchctl: {', '.join(load_errors)}")
+
+    cron_jobs, cron_error = _om_cron_jobs()
+    if cron_error:
+        click.echo(f"  Cron jobs: error ({cron_error})")
+    elif cron_jobs:
+        click.echo(f"  Cron jobs: {len(cron_jobs)} found ({', '.join(sorted(cron_jobs))})")
+        if sys.platform == "darwin" and any(job["installed"] for job in launchd_jobs):
+            click.echo("  Duplicate backstops: launchd and cron are both present")
+    else:
+        click.echo("  Cron jobs: none")
+
     # Auto-memory (Claude Code per-project memory)
     from .transcripts.auto_memory import find_memory_directories
 
@@ -1021,7 +1057,6 @@ def status(ctx: click.Context) -> None:
 def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     """Run diagnostic checks on your observational memory installation."""
     import json as json_mod
-    import subprocess
 
     config = ctx.obj["config"]
     results: list[dict] = []
@@ -1214,18 +1249,61 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         except Exception:
             pass  # Already reported above
 
-    # 12. Cron jobs
-    try:
-        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and "om" in result.stdout:
-            om_lines = [
-                line for line in result.stdout.splitlines() if "om " in line and not line.strip().startswith("#")
-            ]
-            _check("Cron jobs", "PASS", f"{len(om_lines)} job(s) found")
+    # 12. Background scheduler
+    _check("Scheduler default", "PASS", _resolve_scheduler_mode("auto", None))
+
+    launchd_jobs = _launchd_job_statuses(config) if sys.platform == "darwin" else []
+    installed_launchd_jobs = [job for job in launchd_jobs if job["installed"]]
+    missing_launchd_jobs = [str(job["key"]) for job in launchd_jobs if not job["installed"]]
+    unloaded_launchd_jobs = [str(job["key"]) for job in installed_launchd_jobs if not job["loaded"]]
+    launchd_errors = [f"{job['key']}: {job['error']}" for job in launchd_jobs if job["error"]]
+
+    if sys.platform == "darwin":
+        if installed_launchd_jobs:
+            if missing_launchd_jobs:
+                _check(
+                    "LaunchAgents",
+                    "WARN",
+                    (
+                        f"{len(installed_launchd_jobs)}/{len(launchd_jobs)} installed; "
+                        f"missing: {', '.join(missing_launchd_jobs)}"
+                    ),
+                    fix="Run: om install",
+                )
+            else:
+                _check("LaunchAgents", "PASS", f"{len(installed_launchd_jobs)}/{len(launchd_jobs)} installed")
+
+            if launchd_errors:
+                _check("LaunchAgents loaded", "WARN", ", ".join(launchd_errors), fix="Run: om install")
+            elif unloaded_launchd_jobs:
+                _check(
+                    "LaunchAgents loaded",
+                    "WARN",
+                    f"not loaded: {', '.join(unloaded_launchd_jobs)}",
+                    fix="Run: om install",
+                )
+            else:
+                _check("LaunchAgents loaded", "PASS", "all installed LaunchAgents are loaded")
         else:
-            _check("Cron jobs", "WARN", "no observational-memory cron jobs found", fix="Run: om install")
-    except Exception:
-        _check("Cron jobs", "WARN", "could not read crontab")
+            _check("LaunchAgents", "WARN", "no OM LaunchAgents found", fix="Run: om install")
+
+    cron_jobs, cron_error = _om_cron_jobs()
+    if cron_error:
+        _check("Cron jobs", "WARN", f"could not read crontab: {cron_error}")
+    elif cron_jobs:
+        if sys.platform == "darwin" and installed_launchd_jobs:
+            _check(
+                "Legacy cron jobs",
+                "WARN",
+                f"{len(cron_jobs)} OM job(s) still present alongside launchd",
+                fix="Run: om install",
+            )
+        else:
+            _check("Cron jobs", "PASS", f"{len(cron_jobs)} job(s) found")
+    elif sys.platform == "darwin" and installed_launchd_jobs:
+        _check("Legacy cron jobs", "PASS", "none found")
+    else:
+        _check("Cron jobs", "WARN", "no observational-memory background jobs found", fix="Run: om install")
 
     # 13. Platform
     if sys.platform == "win32":
@@ -2075,6 +2153,7 @@ def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None)
     if targets in ("codex", "both"):
         specs.append(
             {
+                "key": "codex",
                 "label": config.CODEX_OBSERVE_LAUNCHD_LABEL,
                 "plist_path": config.codex_observe_launchd_plist_path,
                 "argv": [resolved_om_path, "observe", "--source", "codex"] if resolved_om_path else [],
@@ -2088,6 +2167,7 @@ def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None)
     specs.extend(
         [
             {
+                "key": "claude-memory",
                 "label": config.AUTO_MEMORY_LAUNCHD_LABEL,
                 "plist_path": config.auto_memory_launchd_plist_path,
                 "argv": [resolved_om_path, "observe", "--source", "claude-memory"] if resolved_om_path else [],
@@ -2097,6 +2177,7 @@ def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None)
                 "stderr_path": config.auto_memory_launchd_stderr_path,
             },
             {
+                "key": "reflect",
                 "label": config.REFLECT_LAUNCHD_LABEL,
                 "plist_path": config.reflect_launchd_plist_path,
                 "argv": [resolved_om_path, "reflect"] if resolved_om_path else [],
@@ -2164,6 +2245,57 @@ def _launchctl_bootstrap(plist_path: Path) -> None:
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
         raise click.ClickException(f"Failed to bootstrap launchd agent {plist_path.name}: {detail}")
+
+
+def _launchctl_service_loaded(label: str, timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS) -> tuple[bool, str | None]:
+    """Return whether one OM launchd job is currently loaded."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", _launchd_service_target(label)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return False, "launchctl not available"
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {timeout}s"
+
+    if result.returncode == 0:
+        return True, None
+
+    detail = (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}").lower()
+    if "could not find service" in detail or "service could not be found" in detail:
+        return False, None
+    return False, detail
+
+
+def _launchd_job_statuses(config: Config, targets: str = "both") -> list[dict[str, object]]:
+    """Return installed/loaded state for OM-managed launchd jobs."""
+    if sys.platform != "darwin":
+        return []
+
+    jobs: list[dict[str, object]] = []
+    for spec in _launchd_job_specs(config, targets):
+        label = spec.get("label")
+        plist_path = spec.get("plist_path")
+        key = spec.get("key")
+        if not isinstance(label, str) or not isinstance(plist_path, Path):
+            continue
+        loaded, error = _launchctl_service_loaded(label)
+        jobs.append(
+            {
+                "key": key or label,
+                "label": label,
+                "plist_path": plist_path,
+                "installed": plist_path.exists(),
+                "loaded": loaded,
+                "error": error,
+            }
+        )
+    return jobs
 
 
 def _install_launchd(config: Config, targets: str) -> None:
@@ -2292,6 +2424,65 @@ def _render_crontab_lines(preserved: list[str], om_jobs: dict[str, str]) -> list
     return lines
 
 
+def _subprocess_detail(result: object) -> str:
+    """Return the most useful stderr/stdout snippet from a subprocess result."""
+    stderr = getattr(result, "stderr", "") or ""
+    stdout = getattr(result, "stdout", "") or ""
+    return stderr.strip() or stdout.strip() or f"exit {getattr(result, 'returncode', 'unknown')}"
+
+
+def _read_crontab(timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS) -> tuple[str | None, str | None]:
+    """Return the current crontab contents, treating 'no crontab' as empty."""
+    import subprocess
+
+    try:
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return None, "crontab not available"
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after {timeout}s"
+
+    if result.returncode == 0:
+        return result.stdout, None
+
+    detail = _subprocess_detail(result)
+    if "no crontab for" in detail.lower():
+        return "", None
+    return None, detail
+
+
+def _write_crontab(contents: str, timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS) -> str | None:
+    """Write a new crontab payload and return an error string on failure."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["crontab", "-"],
+            input=contents,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return "crontab not available"
+    except subprocess.TimeoutExpired:
+        return f"timed out after {timeout}s"
+
+    if result.returncode == 0:
+        return None
+    return _subprocess_detail(result)
+
+
+def _om_cron_jobs(timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS) -> tuple[dict[str, str] | None, str | None]:
+    """Return OM-managed cron jobs keyed by logical job name."""
+    contents, error = _read_crontab(timeout=timeout)
+    if error is not None or contents is None:
+        return None, error
+
+    _, om_jobs = _extract_crontab_lines(contents.splitlines())
+    return om_jobs, None
+
+
 def _desired_cron_jobs(config: Config, targets: str) -> dict[str, str]:
     """Return the desired OM cron job lines keyed by logical job name."""
     om_path = _find_om_path()
@@ -2319,13 +2510,10 @@ def _desired_cron_jobs(config: Config, targets: str) -> dict[str, str]:
 
 def _install_cron(config: Config, targets: str) -> None:
     """Add cron jobs for observer and reflector."""
-    import subprocess
-
-    try:
-        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        existing = result.stdout if result.returncode == 0 else ""
-    except FileNotFoundError:
-        existing = ""
+    existing, read_error = _read_crontab()
+    if read_error is not None or existing is None:
+        click.echo(f"Warning: Failed to read crontab: {read_error}")
+        return
 
     preserved, existing_jobs = _extract_crontab_lines(existing.splitlines())
     target_keys = _cron_job_keys_for_targets(targets)
@@ -2335,25 +2523,21 @@ def _install_cron(config: Config, targets: str) -> None:
 
     new_crontab = "\n".join(_render_crontab_lines(preserved, merged_jobs)) + "\n"
 
-    proc = subprocess.run(["crontab", "-"], input=new_crontab, capture_output=True, text=True)
-    if proc.returncode == 0:
+    write_error = _write_crontab(new_crontab)
+    if write_error is None:
         click.echo(f"Installed {len(desired_jobs)} cron job(s)")
     else:
-        click.echo(f"Warning: Failed to install cron jobs: {proc.stderr}")
+        click.echo(f"Warning: Failed to install cron jobs: {write_error}")
 
 
 def _uninstall_cron(targets: str = "both") -> None:
     """Remove observational memory cron jobs."""
-    import subprocess
-
-    try:
-        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        if result.returncode != 0:
-            return
-    except FileNotFoundError:
+    existing, read_error = _read_crontab()
+    if read_error is not None or existing is None:
+        click.echo(f"Warning: Failed to read crontab: {read_error}")
         return
 
-    preserved, existing_jobs = _extract_crontab_lines(result.stdout.splitlines())
+    preserved, existing_jobs = _extract_crontab_lines(existing.splitlines())
     target_keys = _cron_job_keys_for_targets(targets)
     if not set(existing_jobs).intersection(target_keys):
         return
@@ -2361,11 +2545,11 @@ def _uninstall_cron(targets: str = "both") -> None:
     remaining_jobs = {key: line for key, line in existing_jobs.items() if key not in target_keys}
     rendered = _render_crontab_lines(preserved, remaining_jobs)
     new_crontab = "\n".join(rendered) + "\n" if rendered else ""
-    proc = subprocess.run(["crontab", "-"], input=new_crontab, capture_output=True, text=True)
-    if proc.returncode == 0:
+    write_error = _write_crontab(new_crontab)
+    if write_error is None:
         click.echo("Removed cron jobs")
     else:
-        click.echo(f"Warning: Failed to remove cron jobs: {proc.stderr}")
+        click.echo(f"Warning: Failed to remove cron jobs: {write_error}")
 
 
 def _find_om_path() -> str | None:
