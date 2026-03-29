@@ -117,6 +117,10 @@ def test_doctor_codex_startup_warns_when_only_agents_fallback_present(monkeypatc
     assert hook_check is not None
     assert hook_check["status"] == "WARN"
 
+    stop_check = _get_check(data, "Codex Stop hook")
+    assert stop_check is not None
+    assert stop_check["status"] == "WARN"
+
     agents_check = _get_check(data, "Codex AGENTS fallback")
     assert agents_check is not None
     assert agents_check["status"] == "PASS"
@@ -155,7 +159,18 @@ def test_doctor_codex_startup_passes_with_hooks_enabled(monkeypatch, tmp_path):
                                 }
                             ],
                         }
-                    ]
+                    ],
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": f"{om_bin} codex-checkpoint",
+                                    "statusMessage": "Checkpointing observational memory...",
+                                }
+                            ]
+                        }
+                    ],
                 }
             }
         )
@@ -179,6 +194,10 @@ def test_doctor_codex_startup_passes_with_hooks_enabled(monkeypatch, tmp_path):
     hook_check = _get_check(data, "Codex SessionStart hook")
     assert hook_check is not None
     assert hook_check["status"] == "PASS"
+
+    stop_check = _get_check(data, "Codex Stop hook")
+    assert stop_check is not None
+    assert stop_check["status"] == "PASS"
 
     agents_check = _get_check(data, "Codex AGENTS fallback")
     assert agents_check is not None

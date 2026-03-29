@@ -162,56 +162,71 @@ def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> 
     return changed_paths, deleted
 
 
-def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> list[str]:
-    """Scan all recent Codex sessions and run observer on each."""
-    from .transcripts.codex import (
-        find_recent_sessions,
-        line_offset_to_message_count,
-        parse_transcript,
-    )
-
+def observe_codex_transcript(
+    transcript_path: Path,
+    config: Config | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Run observer on a specific Codex transcript."""
     if config is None:
         config = Config()
 
     cursor = config.load_cursor()
+    messages, total_messages = _codex_messages_since_cursor(transcript_path, cursor)
+    if not messages:
+        return None
+
+    result = run_observer(messages, config, dry_run)
+    if result and not dry_run:
+        cursor[str(transcript_path)] = total_messages
+        config.save_cursor(cursor)
+
+    return result
+
+
+def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> list[str]:
+    """Scan all recent Codex sessions and run observer on each."""
+    from .transcripts.codex import find_recent_sessions
+
+    if config is None:
+        config = Config()
+
     results = []
 
     for path in find_recent_sessions(config.codex_home):
-        cursor_key = str(path)
-        after_index = cursor.get(cursor_key)
-        if not isinstance(after_index, int):
-            after_index = 0
-
-        all_messages = parse_transcript(path)
-        if not all_messages:
-            continue
-
-        if after_index and after_index > len(all_messages):
-            # Backward compatibility: older cursors tracked raw JSONL line offsets
-            # rather than parsed message counts. Convert by counting how many of the
-            # first N file lines are actual messages. If the converted index is still
-            # out of range (common when non-message records inflate line counts),
-            # fall back to 0 so we safely reprocess rather than skip messages.
-            migrated_index = line_offset_to_message_count(path, after_index)
-            if 0 <= migrated_index < len(all_messages):
-                after_index = migrated_index
-            else:
-                after_index = 0
-
-        messages = all_messages[after_index:]
-        if not messages:
-            continue
-
-        result = run_observer(messages, config, dry_run)
-        if result and not dry_run:
-            # Track processed message count for incremental parsing.
-            cursor[cursor_key] = len(all_messages)
-            config.save_cursor(cursor)
-
+        result = observe_codex_transcript(path, config, dry_run)
         if result:
             results.append(result)
 
     return results
+
+
+def _codex_messages_since_cursor(transcript_path: Path, cursor: dict) -> tuple[list[Message], int]:
+    """Return new Codex messages for a transcript plus the total parsed count."""
+    from .transcripts.codex import line_offset_to_message_count, parse_transcript
+
+    cursor_key = str(transcript_path)
+    after_index = cursor.get(cursor_key)
+    if not isinstance(after_index, int):
+        after_index = 0
+
+    all_messages = parse_transcript(transcript_path)
+    if not all_messages:
+        return [], 0
+
+    if after_index and after_index > len(all_messages):
+        # Backward compatibility: older cursors tracked raw JSONL line offsets
+        # rather than parsed message counts. Convert by counting how many of the
+        # first N file lines are actual messages. If the converted index is still
+        # out of range (common when non-message records inflate line counts),
+        # fall back to 0 so we safely reprocess rather than skip messages.
+        migrated_index = line_offset_to_message_count(transcript_path, after_index)
+        if 0 <= migrated_index < len(all_messages):
+            after_index = migrated_index
+        else:
+            after_index = 0
+
+    return all_messages[after_index:], len(all_messages)
 
 
 def _chunk_messages(messages: list[Message], chunk_size: int = 200) -> list[list[Message]]:
