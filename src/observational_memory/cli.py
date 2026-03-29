@@ -1789,6 +1789,55 @@ def _uninstall_codex_stop_hook(config: Config) -> None:
             click.echo(f"Removed {path}")
 
 
+def _uninstall_codex_hooks(config: Config) -> None:
+    """Remove OM-managed Codex hooks from hooks.json in a single read-write pass."""
+    import json
+
+    path = config.codex_hooks_path
+    if not path.exists():
+        return
+
+    payload = _load_codex_hooks_payload(path)
+    hooks = payload.get("hooks", {})
+    hook_specs = (
+        ("SessionStart", _is_om_codex_session_start_group, "SessionStart"),
+        ("Stop", _is_om_codex_stop_group, "Stop"),
+    )
+    removed: list[str] = []
+
+    for event_name, predicate, label in hook_specs:
+        groups = hooks.get(event_name, [])
+        if not isinstance(groups, list):
+            raise click.ClickException(f"{path} has invalid 'hooks.{event_name}'; expected a list.")
+
+        filtered = [group for group in groups if not predicate(group)]
+        if len(filtered) != len(groups):
+            removed.append(label)
+
+        if filtered:
+            hooks[event_name] = filtered
+        else:
+            hooks.pop(event_name, None)
+
+    if not removed:
+        return
+
+    if hooks:
+        path.write_text(json.dumps(payload, indent=2) + "\n")
+    else:
+        remaining_top_level = {key: value for key, value in payload.items() if key != "hooks"}
+        if remaining_top_level:
+            payload["hooks"] = {}
+            path.write_text(json.dumps(payload, indent=2) + "\n")
+        else:
+            path.unlink()
+            click.echo(f"Removed {path}")
+            return
+
+    for label in removed:
+        click.echo(f"Removed OM Codex {label} hook from {path}")
+
+
 def _install_codex(config: Config) -> None:
     """Install Codex startup integration with hooks-first behavior."""
     import re
@@ -1818,8 +1867,7 @@ def _install_codex(config: Config) -> None:
 
 def _uninstall_codex(config: Config) -> None:
     """Remove OM Codex startup integration while preserving user hook settings."""
-    _uninstall_codex_session_start_hook(config)
-    _uninstall_codex_stop_hook(config)
+    _uninstall_codex_hooks(config)
 
     agents_md = config.codex_agents_md
     if not agents_md.exists():
@@ -1931,23 +1979,37 @@ def _update_codex_checkpoint_state(
     status: str,
 ) -> None:
     """Persist the latest Codex checkpoint hook state for one transcript."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX fallback
+        fcntl = None
+
     import json
     import tempfile
 
-    state = _load_codex_checkpoint_state(config)
-    state[str(transcript)] = {
-        "last_observed": int(datetime.now(timezone.utc).timestamp()),
-        "message_count": max(message_count, 0),
-        "status": status,
-    }
-
     path = config.codex_checkpoint_state_path
+    lock_path = path.with_suffix(".lock")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
-        json.dump(state, tmp, indent=2, sort_keys=True)
-        tmp.write("\n")
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(path)
+    with lock_path.open("a+") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            state = _load_codex_checkpoint_state(config)
+            state[str(transcript)] = {
+                "last_observed": int(datetime.now(timezone.utc).timestamp()),
+                "message_count": max(message_count, 0),
+                "status": status,
+            }
+
+            with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
+                json.dump(state, tmp, indent=2, sort_keys=True)
+                tmp.write("\n")
+                tmp_path = Path(tmp.name)
+            tmp_path.replace(path)
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 # --- Cron installation ---

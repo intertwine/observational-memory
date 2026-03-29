@@ -1,11 +1,18 @@
 """Tests for observe CLI reflector catch-up behavior and cron cleanup."""
 
 import json
+import os
+import time
 from pathlib import Path
 
 from click.testing import CliRunner
 
-from observational_memory.cli import _strip_om_cron_entries, cli
+from observational_memory.cli import (
+    _acquire_codex_checkpoint_lock,
+    _release_codex_checkpoint_lock,
+    _strip_om_cron_entries,
+    cli,
+)
 from observational_memory.config import Config
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -220,6 +227,24 @@ def test_codex_checkpoint_worker_updates_state_and_releases_lock(monkeypatch, tm
     state = json.loads(config.codex_checkpoint_state_path.read_text())
     assert state[str(transcript)]["status"] == "success"
     assert not lock_path.exists()
+
+
+def test_codex_checkpoint_reclaims_stale_lock(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+
+    lock_path = config.codex_checkpoint_lock_dir / "stale-lock"
+    lock_path.mkdir(parents=True, exist_ok=True)
+    stale_time = time.time() - 120
+    os.utime(lock_path, (stale_time, stale_time))
+
+    monkeypatch.setenv("OM_SESSION_OBSERVER_LOCK_STALE_MINUTES", "1")
+
+    assert _acquire_codex_checkpoint_lock(config, lock_path) is True
+    assert lock_path.exists()
+
+    _release_codex_checkpoint_lock(lock_path)
 
 
 def test_strip_om_cron_entries_removes_blocks_and_legacy_lines():
