@@ -12,8 +12,6 @@ Observational Memory captures what your agents learn, distills it into local mar
 - Plain markdown memory you can inspect, back up, and search
 - Fast install with `uv tool install observational-memory` and `om install`
 
-> Adapted from [Mastra's Observational Memory](https://mastra.ai/docs/memory/observational-memory) pattern. See the [OpenClaw version](https://github.com/intertwine/openclaw-observational-memory) for the original.
-
 ---
 
 ## Get Started
@@ -51,13 +49,13 @@ om install
 om doctor
 ```
 
-That's it. Your agents now share persistent memory across sessions, with local files you can search and inspect.
+That's it. Your agents now share persistent memory across sessions — plain markdown you can search and inspect.
 
 ---
 
 ## Why People Install It
 
-If you switch between Claude Code and Codex, context drift shows up fast. Yesterday's architecture decisions, today's preferences, and the task you were halfway through all disappear into old transcripts, so every new session starts colder than it should.
+If you switch between Claude Code and Codex, context gets lost fast. Yesterday's architecture decisions, today's preferences, and the task you were halfway through all disappear into old transcripts, so every new session starts colder than it should.
 
 Observational Memory gives your agents one shared memory in `~/.local/share/observational-memory/`. It keeps fresh work flowing into observations and reflections, regenerates compact startup context, and leaves everything in plain markdown so you can inspect it instead of trusting a black box:
 
@@ -74,6 +72,8 @@ Observational Memory gives your agents one shared memory in `~/.local/share/obse
 | **Observations**        | Per session + periodic checkpoints (~15 min default) | 7 days       | ~2K tokens/day      | Timestamped, prioritized notes             |
 | **Reflections**         | Daily                                                | Indefinite   | 200–600 lines total | Durable long-term memory                   |
 | **Startup profile/act** | Derived on install + observe/reflect                 | Derived      | small startup slice | Compact default context for session start  |
+
+> Adapted from [Mastra's Observational Memory](https://mastra.ai/docs/memory/observational-memory) pattern. See the [OpenClaw version](https://github.com/intertwine/openclaw-observational-memory) for the original.
 
 ---
 
