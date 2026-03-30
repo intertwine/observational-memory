@@ -1,7 +1,9 @@
 # Observational Memory
 
 [![PyPI version](https://img.shields.io/pypi/v/observational-memory.svg)](https://pypi.org/project/observational-memory/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![CI](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/intertwine/observational-memory?style=social)](https://github.com/intertwine/observational-memory/stargazers)
 
 **Give Claude Code and Codex a shared memory that survives every session.**
 
@@ -76,41 +78,9 @@ If you switch between Claude Code and Codex, context gets lost fast. Yesterday's
 
 Observational Memory gives your agents one shared memory in `~/.local/share/observational-memory/`. It keeps fresh work flowing into observations and reflections, regenerates compact startup context, and leaves everything in plain markdown so you can inspect it instead of trusting a black box:
 
-```mermaid
-flowchart TB
-  subgraph Claude["Claude Code"]
-    CStart["SessionStart hook<br/>inject startup context"]
-    CCheckpoint["UserPromptSubmit / PreCompact<br/>periodic checkpoints"]
-    CEnd["SessionEnd hook<br/>observe transcript"]
-  end
-
-  subgraph Codex["Codex CLI"]
-    XStart["SessionStart hook<br/>inject startup context"]
-    XStop["Stop hook<br/>queue transcript checkpoint"]
-    XFallback["AGENTS.md fallback<br/>only if hooks are unavailable"]
-    XScheduler["Scheduler backstop<br/>launchd on macOS, cron elsewhere"]
-  end
-
-  Observe["observe<br/>compress recent activity into observations.md"]
-  Reflect["reflect<br/>consolidate durable memory into reflections.md"]
-  Memory["~/.local/share/observational-memory/<br/>observations.md<br/>reflections.md<br/>profile.md<br/>active.md"]
-  Startup["profile.md + active.md<br/>compact startup context"]
-  Search["om search<br/>retrieve relevant memory on demand"]
-
-  CCheckpoint --> Observe
-  CEnd --> Observe
-  XStop --> Observe
-  XScheduler --> Observe
-
-  Observe --> Memory
-  Memory --> Reflect
-  Reflect --> Memory
-  Memory --> Startup
-  Memory --> Search
-  Startup --> CStart
-  Startup --> XStart
-  XFallback -.-> Startup
-```
+<p align="center">
+  <img src="assets/system-diagram.jpeg" alt="Observational Memory system diagram showing Claude Code and Codex hooks feeding shared local markdown memory, search, and reflection." width="980" />
+</p>
 
 Claude and Codex both feed the same local memory, both start from compact context, and both can search the same accumulated knowledge on demand.
 
