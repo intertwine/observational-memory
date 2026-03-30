@@ -12,9 +12,25 @@ Observational Memory captures what your agents learn, distills it into local mar
 - Plain markdown memory you can inspect, back up, and search
 - Fast install with `uv tool install observational-memory` and `om install`
 
+**Great fit if you:**
+- switch between Claude Code and Codex on the same project
+- hate re-explaining your architecture, workflow, and preferences
+- want memory that stays local and inspectable
+- want something useful in minutes, not another infra project
+
 ---
 
 ## Get Started
+
+### Fast path
+
+```bash
+uv tool install observational-memory
+om install
+om doctor
+```
+
+That gives you hooks for Claude Code, hooks-first startup and checkpointing for Codex, local markdown memory in `~/.local/share/observational-memory/`, and built-in search with `om search`.
 
 ### Prerequisites
 
@@ -26,7 +42,7 @@ Observational Memory captures what your agents learn, distills it into local mar
   - AWS credentials/profile/role for Anthropic on Bedrock
 - Claude Code and/or Codex CLI installed
 
-### Install
+### Install options
 
 ```bash
 # Option A: Install from PyPI
@@ -50,6 +66,7 @@ om doctor
 ```
 
 That's it. Your agents now share persistent memory across sessions — plain markdown you can search and inspect.
+If it saves you repeated onboarding time, a GitHub star helps more people discover it.
 
 ---
 
@@ -59,9 +76,43 @@ If you switch between Claude Code and Codex, context gets lost fast. Yesterday's
 
 Observational Memory gives your agents one shared memory in `~/.local/share/observational-memory/`. It keeps fresh work flowing into observations and reflections, regenerates compact startup context, and leaves everything in plain markdown so you can inspect it instead of trusting a black box:
 
-<p align="center">
-  <img src="assets/system-diagram.webp" alt="Observational Memory system diagram" width="640" />
-</p>
+```mermaid
+flowchart TB
+  subgraph Claude["Claude Code"]
+    CStart["SessionStart hook<br/>inject startup context"]
+    CCheckpoint["UserPromptSubmit / PreCompact<br/>periodic checkpoints"]
+    CEnd["SessionEnd hook<br/>observe transcript"]
+  end
+
+  subgraph Codex["Codex CLI"]
+    XStart["SessionStart hook<br/>inject startup context"]
+    XStop["Stop hook<br/>queue transcript checkpoint"]
+    XFallback["AGENTS.md fallback<br/>only if hooks are unavailable"]
+    XScheduler["Scheduler backstop<br/>launchd on macOS, cron elsewhere"]
+  end
+
+  Observe["observe<br/>compress recent activity into observations.md"]
+  Reflect["reflect<br/>consolidate durable memory into reflections.md"]
+  Memory["~/.local/share/observational-memory/<br/>observations.md<br/>reflections.md<br/>profile.md<br/>active.md"]
+  Startup["profile.md + active.md<br/>compact startup context"]
+  Search["om search<br/>retrieve relevant memory on demand"]
+
+  CCheckpoint --> Observe
+  CEnd --> Observe
+  XStop --> Observe
+  XScheduler --> Observe
+
+  Observe --> Memory
+  Memory --> Reflect
+  Reflect --> Memory
+  Memory --> Startup
+  Memory --> Search
+  Startup --> CStart
+  Startup --> XStart
+  XFallback -.-> Startup
+```
+
+Claude and Codex both feed the same local memory, both start from compact context, and both can search the same accumulated knowledge on demand.
 
 ### Five tiers of memory
 
