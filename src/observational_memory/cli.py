@@ -844,7 +844,7 @@ def install(
 @click.option("--purge", is_flag=True, help="Also remove memory files")
 @click.pass_context
 def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
-    """Remove observational memory hooks and cron jobs."""
+    """Remove observational memory hooks and background scheduler jobs."""
     config = ctx.obj["config"]
 
     if targets in ("claude", "both"):

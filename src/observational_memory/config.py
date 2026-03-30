@@ -18,7 +18,7 @@ def _xdg_config_home() -> Path:
 
 ENV_FILE_TEMPLATE = """\
 # Observational Memory — API Keys
-# This file is sourced by om, its hooks, and its cron jobs.
+# This file is sourced by om, its hooks, and its background scheduler jobs.
 # It is NOT committed to any repo. Keep it private.
 #
 # LLM provider selection:
