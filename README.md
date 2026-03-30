@@ -36,7 +36,7 @@ uv tool install "observational-memory[enterprise]"
 brew tap intertwine/tap
 brew install intertwine/tap/observational-memory
 
-# Set up hooks, fallback instructions, LLM provider config, and cron
+# Set up hooks, fallback instructions, LLM provider config, and the background scheduler
 om install
 ```
 
@@ -152,7 +152,7 @@ Supported provider profiles:
 | Anthropic on Bedrock | `anthropic-bedrock` | AWS credential chain | `OM_BEDROCK_REGION` (or `AWS_REGION`) |
 | Legacy auto-detect | `auto` | API key | prefers `ANTHROPIC_API_KEY`, then `OPENAI_API_KEY` |
 
-The CLI, hooks, and cron jobs source this file automatically.
+The `om` CLI loads this file automatically, including when `om` is invoked by hooks or background scheduler jobs.
 You do not need to export keys in your shell profile.
 
 Model selection precedence:
@@ -220,10 +220,13 @@ om observe --dry-run
 om reflect --dry-run
 
 # Install/uninstall
-om install [--claude|--codex|--both] [--no-cron]
+om install [--claude|--codex|--both] [--scheduler auto|launchd|cron|none]
 om install --provider anthropic-vertex --vertex-project-id my-proj --vertex-region us-east5 --llm-model claude-sonnet-4-5-20250929 --non-interactive
 om install --provider anthropic-bedrock --bedrock-region us-east-1 --llm-model anthropic.claude-sonnet-4-5-20250929-v1:0 --non-interactive
 om uninstall [--claude|--codex|--both] [--purge]
+
+# Legacy compatibility alias
+# --cron/--no-cron maps to --scheduler cron|none
 
 # Check status
 om status
@@ -252,7 +255,7 @@ OM_LLM_MODEL=claude-sonnet-4-5-20250929
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-This file is sourced by the `om` CLI, the Claude Code hooks, and the cron jobs. Environment variables already present in your shell take precedence.
+This file is loaded by the `om` CLI at startup, including when `om` is invoked by Claude Code hooks or background scheduler jobs. Environment variables already present in your shell take precedence.
 
 ### Memory location
 
