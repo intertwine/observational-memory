@@ -104,7 +104,7 @@ def reflector_catchup_needed(config: Config | None = None, now_utc: datetime | N
     """Return True when reflections lag behind the newest observation date.
 
     This lets normal observer runs repair missed daily reflection windows,
-    such as when a laptop is asleep during the scheduled cron time.
+    such as when a laptop is asleep during the scheduled background run.
     """
     if config is None:
         config = Config()
@@ -134,7 +134,7 @@ def reflector_catchup_needed(config: Config | None = None, now_utc: datetime | N
 
     # Catch up only after the daily reflection window is actually overdue.
     # This avoids duplicate LLM calls on normal days when observations roll
-    # into the next UTC date before the local 04:00 cron has fired.
+    # into the next UTC date before the local 04:00 background run has fired.
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
     elif now_utc.tzinfo is None:
