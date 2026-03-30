@@ -8,7 +8,7 @@
 Observational Memory captures what your agents learn, distills it into local markdown memory, and restores the right context when a new session starts. Instead of re-explaining your architecture, preferences, and in-flight work, your agents can pick up where they left off.
 
 - Shared memory across Claude Code and Codex
-- Hooks-first startup and checkpointing, with background capture as a backstop
+- Automatic context capture during sessions and in the background
 - Plain markdown memory you can inspect, back up, and search
 - Fast install with `uv tool install observational-memory` and `om install`
 
@@ -16,7 +16,7 @@ Observational Memory captures what your agents learn, distills it into local mar
 
 ---
 
-## Install in 2 Minutes
+## Get Started
 
 ### Prerequisites
 
@@ -51,7 +51,7 @@ om install
 om doctor
 ```
 
-That's it. New Claude Code and Codex sessions now start with compact shared context backed by searchable local memory.
+That's it. Your agents now share persistent memory across sessions, with local files you can search and inspect.
 
 ---
 
