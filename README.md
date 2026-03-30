@@ -3,15 +3,18 @@
 [![PyPI version](https://img.shields.io/pypi/v/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![CI](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml)
 
-**Cross-agent shared memory for Claude Code and Codex CLI, with built-in search and no database setup.**
+**Give Claude Code and Codex a shared memory that survives every session.**
 
-Observational Memory runs two background jobs (Observer and Reflector) that condense transcript history into shared markdown memory. On session start, it retrieves relevant context with a pluggable search layer: built-in BM25 by default, plus optional QMD and qmd-hybrid backends for stronger semantic recall.
+Observational Memory captures what your agents learn, distills it into local markdown memory, and restores the right context when a new session starts. Instead of re-explaining your architecture, preferences, and in-flight work, your agents can pick up where they left off.
 
-> Adapted from [Mastra's Observational Memory](https://mastra.ai/docs/memory/observational-memory) pattern. See the [OpenClaw version](https://github.com/intertwine/openclaw-observational-memory) for the original.
+- Shared memory across Claude Code and Codex
+- Automatic context capture during sessions and in the background
+- Plain markdown memory you can inspect, back up, and search
+- Fast install with `uv tool install observational-memory` and `om install`
 
 ---
 
-## Quick start
+## Get Started
 
 ### Prerequisites
 
@@ -46,15 +49,15 @@ om install
 om doctor
 ```
 
-That's it. Your agents now share persistent, compressed memory.
+That's it. Your agents now share persistent memory across sessions — plain markdown you can search and inspect.
 
 ---
 
-## Why
+## Why People Install It
 
-If you use Claude Code in one terminal and Codex CLI in another, context gets lost fast. Each session starts cold.
+If you switch between Claude Code and Codex, context gets lost fast. Yesterday's architecture decisions, today's preferences, and the task you were halfway through all disappear into old transcripts, so every new session starts colder than it should.
 
-Observational Memory fixes this. A single set of compressed memory files lives at `~/.local/share/observational-memory/` and is shared across all your agents:
+Observational Memory gives your agents one shared memory in `~/.local/share/observational-memory/`. It keeps fresh work flowing into observations and reflections, regenerates compact startup context, and leaves everything in plain markdown so you can inspect it instead of trusting a black box:
 
 <p align="center">
   <img src="assets/system-diagram.webp" alt="Observational Memory system diagram" width="640" />
@@ -69,6 +72,8 @@ Observational Memory fixes this. A single set of compressed memory files lives a
 | **Observations**        | Per session + periodic checkpoints (~15 min default) | 7 days       | ~2K tokens/day      | Timestamped, prioritized notes             |
 | **Reflections**         | Daily                                                | Indefinite   | 200–600 lines total | Durable long-term memory                   |
 | **Startup profile/act** | Derived on install + observe/reflect                 | Derived      | small startup slice | Compact default context for session start  |
+
+> Adapted from [Mastra's Observational Memory](https://mastra.ai/docs/memory/observational-memory) pattern. See the [OpenClaw version](https://github.com/intertwine/openclaw-observational-memory) for the original.
 
 ---
 
