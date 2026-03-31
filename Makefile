@@ -23,6 +23,7 @@ ECHO = printf "%b\n"
 # Version bump type (patch, minor, major)
 BUMP ?= patch
 HOMEBREW_TAP_DIR ?= ../homebrew-tap
+HOMEBREW_TAP_NAME ?= intertwine/tap
 HOMEBREW_INSTALL_TARGET ?= intertwine/tap/observational-memory
 
 help:
@@ -47,7 +48,7 @@ help:
 	@$(ECHO) "  make publish-test   - Publish to TestPyPI"
 	@$(ECHO) "  make publish        - Publish to PyPI (production)"
 	@$(ECHO) "  make brew-formula   - Generate Homebrew formula at packaging/homebrew/observational-memory.rb"
-	@$(ECHO) "  make brew-check     - Run Homebrew formula audit locally (if brew is installed)"
+	@$(ECHO) "  make brew-check     - Sync into active tap checkout and audit $(HOMEBREW_INSTALL_TARGET)"
 	@$(ECHO) "  make release-homebrew - Copy formula into local tap checkout (HOMEBREW_TAP_DIR)"
 	@$(ECHO) "  make brew-install   - Install from Homebrew tap target ($(HOMEBREW_INSTALL_TARGET))"
 	@$(ECHO) ""
@@ -145,11 +146,17 @@ brew-check: brew-formula
 		exit 1; \
 	fi
 	@brew style packaging/homebrew/observational-memory.rb
-	@if brew info --formula $(HOMEBREW_INSTALL_TARGET) >/dev/null 2>&1; then \
-		brew audit --strict --formula $(HOMEBREW_INSTALL_TARGET); \
-	else \
-		$(ECHO) "$(YELLOW)Skipped brew audit by formula name; add tap first: brew tap intertwine/tap$(NC)"; \
-	fi
+	@ACTIVE_TAP_DIR="$$(brew --repository $(HOMEBREW_TAP_NAME) 2>/dev/null || true)"; \
+	if [ -z "$$ACTIVE_TAP_DIR" ] || [ ! -d "$$ACTIVE_TAP_DIR/.git" ]; then \
+		$(ECHO) "$(RED)Error: active tap $(HOMEBREW_TAP_NAME) is not installed locally$(NC)"; \
+		$(ECHO) "Run: brew tap $(HOMEBREW_TAP_NAME)"; \
+		$(ECHO) "Then re-run make brew-check, or use make release-homebrew HOMEBREW_TAP_DIR=/path/to/homebrew-tap to sync manually."; \
+		exit 1; \
+	fi; \
+	mkdir -p "$$ACTIVE_TAP_DIR/Formula"; \
+	cp packaging/homebrew/observational-memory.rb "$$ACTIVE_TAP_DIR/Formula/observational-memory.rb"; \
+	$(ECHO) "$(YELLOW)Synced formula into active tap checkout: $$ACTIVE_TAP_DIR$(NC)"; \
+	brew audit --strict --formula $(HOMEBREW_INSTALL_TARGET)
 	@$(ECHO) "$(GREEN)✓ Homebrew formula audit passed$(NC)"
 
 # Sync formula into a local tap checkout for publishing

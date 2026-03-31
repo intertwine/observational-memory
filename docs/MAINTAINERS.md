@@ -20,7 +20,7 @@ make test           # tests only
 make lint           # linter only
 make format         # auto-format
 make brew-formula   # generate Homebrew formula from current PyPI release
-make brew-check     # audit Homebrew formula (requires brew)
+make brew-check     # sync into active tapped checkout and audit the Homebrew formula
 
 # Or directly with uv
 uv sync
@@ -80,10 +80,20 @@ The Homebrew release workflow also checks Homebrew/core to catch formula-name co
 ```bash
 # Regenerate formula locally
 make brew-formula
+# Audit against the active tapped checkout (requires `brew tap intertwine/tap`)
+make brew-check
 
 # Copy into a local tap checkout
 make release-homebrew HOMEBREW_TAP_DIR=../homebrew-tap
 ```
+
+`make brew-check` does two things:
+
+1. Regenerates `packaging/homebrew/observational-memory.rb`
+2. Copies that generated file into the active tapped checkout returned by `brew --repository intertwine/tap`, then runs `brew audit --strict --formula intertwine/tap/observational-memory`
+
+This means `make brew-check` validates the same formula path that Homebrew actually audits, instead of only checking the generated file in this repo.
+If `intertwine/tap` is not tapped locally, `make brew-check` exits with instructions instead of reporting a misleading success.
 
 ## File Structure
 
