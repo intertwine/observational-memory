@@ -12,9 +12,6 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import urlopen
 
 
 @dataclass(frozen=True)
@@ -160,30 +157,6 @@ def extract_artifacts(install_items: list[dict], package_name: str) -> tuple[Art
         raise RuntimeError(f"Could not find root package artifact for {package_name}")
 
     return root, resources
-
-
-def fetch_sdist_artifact(package_name: str, package_version: str) -> Artifact:
-    """Fetch source distribution artifact metadata from PyPI."""
-    encoded_name = quote(package_name)
-    encoded_version = quote(package_version)
-    endpoint = f"https://pypi.org/pypi/{encoded_name}/{encoded_version}/json"
-    try:
-        with urlopen(endpoint) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError) as e:
-        raise RuntimeError(f"Failed to fetch {endpoint}: {e}") from e
-
-    candidates = payload.get("urls", [])
-    sdist = next((entry for entry in candidates if entry.get("packagetype") == "sdist"), None)
-    if sdist is None:
-        raise RuntimeError(f"No sdist found for {package_name}=={package_version}")
-
-    url = sdist.get("url")
-    sha256 = (sdist.get("digests") or {}).get("sha256")
-    if not url or not sha256:
-        raise RuntimeError(f"Missing sdist url/sha256 for {package_name}=={package_version}")
-
-    return Artifact(name=package_name, version=package_version, url=url, sha256=sha256)
 
 
 def partition_resources(
