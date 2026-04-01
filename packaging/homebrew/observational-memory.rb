@@ -7,8 +7,8 @@ class ObservationalMemory < Formula
 
   desc "Cross-agent observational memory for Claude Code and Codex CLI"
   homepage "https://github.com/intertwine/observational-memory"
-  url "https://files.pythonhosted.org/packages/8a/33/db7efdc828f8b3ab1f6326b3e8dd47629b372bb18695ddbddf1bf392334a/observational_memory-0.1.1.tar.gz"
-  sha256 "2529fc28ffd7867f54724bbe492ff14abcbed017988e1637b4b5f1cd890425b6"
+  url "https://files.pythonhosted.org/packages/48/b6/f7893f377ebc99f52bf0431d87757f4b83aa1ff5a6a1da96fcd9a3d5ebe3/observational_memory-0.3.1-py3-none-any.whl"
+  sha256 "2b1cc83e886117daf43398991822644b8644bb5ee66f29545025fc41b60de73a"
   license "MIT"
 
   depends_on "jq"
@@ -21,8 +21,8 @@ class ObservationalMemory < Formula
     end
 
     resource "numpy" do
-      url "https://files.pythonhosted.org/packages/09/f0/817d03a03f93ba9c6c8993de509277d84e69f9453601915e4a69554102a1/numpy-2.4.2-cp313-cp313-macosx_11_0_arm64.whl"
-      sha256 "bd3a7a9f5847d2fb8c2c6d1c862fa109c31a9abeca1a3c2bd5a64572955b2979"
+      url "https://files.pythonhosted.org/packages/c1/62/2b7a48fbb745d344742c0277f01286dead15f3f68e4f359fbfcf7b48f70f/numpy-2.4.4-cp313-cp313-macosx_11_0_arm64.whl"
+      sha256 "e823b8b6edc81e747526f70f71a9c0a07ac4e7ad13020aa736bb7c9d67196115"
     end
 
     resource "pydantic-core" do
@@ -38,8 +38,8 @@ class ObservationalMemory < Formula
     end
 
     resource "numpy" do
-      url "https://files.pythonhosted.org/packages/a1/22/815b9fe25d1d7ae7d492152adbc7226d3eff731dffc38fe970589fcaaa38/numpy-2.4.2-cp313-cp313-macosx_10_13_x86_64.whl"
-      sha256 "25f2059807faea4b077a2b6837391b5d830864b3543627f381821c646f31a63c"
+      url "https://files.pythonhosted.org/packages/14/1d/d0a583ce4fefcc3308806a749a536c201ed6b5ad6e1322e227ee4848979d/numpy-2.4.4-cp313-cp313-macosx_10_13_x86_64.whl"
+      sha256 "08f2e31ed5e6f04b118e49821397f12767934cfdd12a1ce86a058f91e004ee50"
     end
 
     resource "pydantic-core" do
@@ -56,18 +56,18 @@ class ObservationalMemory < Formula
   end
 
   resource "anthropic" do
-    url "https://files.pythonhosted.org/packages/5f/75/b9d58e4e2a4b1fc3e75ffbab978f999baf8b7c4ba9f96e60edb918ba386b/anthropic-0.83.0-py3-none-any.whl"
-    sha256 "f069ef508c73b8f9152e8850830d92bd5ef185645dbacf234bb213344a274810"
+    url "https://files.pythonhosted.org/packages/0d/02/99bf351933bdea0545a2b6e2d812ed878899e9a95f618351dfa3d0de0e69/anthropic-0.87.0-py3-none-any.whl"
+    sha256 "e2669b86d42c739d3df163f873c51719552e263a3d85179297180fb4fa00a236"
   end
 
   resource "anyio" do
-    url "https://files.pythonhosted.org/packages/38/0e/27be9fdef66e72d64c0cdc3cc2823101b80585f8119b5c112c2e8f5f7dab/anyio-4.12.1-py3-none-any.whl"
-    sha256 "d405828884fc140aa80a3c667b8beed277f1dfedec42ba031bd6ac3db606ab6c"
+    url "https://files.pythonhosted.org/packages/da/42/e921fccf5015463e32a3cf6ee7f980a6ed0f395ceeaa45060b61d86486c2/anyio-4.13.0-py3-none-any.whl"
+    sha256 "08b310f9e24a9594186fd75b4f73f4a4152069e3853f1ed8bfbf58369f4ad708"
   end
 
   resource "certifi" do
-    url "https://files.pythonhosted.org/packages/e6/ad/3cc14f097111b4de0040c83a525973216457bbeeb63739ef1ed275c1c021/certifi-2026.1.4-py3-none-any.whl"
-    sha256 "9943707519e4add1115f44c2bc244f782c0249876bf51b6599fee1ffbedd685c"
+    url "https://files.pythonhosted.org/packages/9a/3c/c17fb3ca2d9c3acff52e30b309f538586f9f5b9c9cf454f3845fc9af4881/certifi-2026.2.25-py3-none-any.whl"
+    sha256 "027692e4402ad994f1c42e52a4997a9763c646b73e4096e4d5d6db8af1d6f0fa"
   end
 
   resource "click" do
@@ -106,8 +106,8 @@ class ObservationalMemory < Formula
   end
 
   resource "openai" do
-    url "https://files.pythonhosted.org/packages/cc/56/0a89092a453bb2c676d66abee44f863e742b2110d4dbb1dbcca3f7e5fc33/openai-2.21.0-py3-none-any.whl"
-    sha256 "0bc1c775e5b1536c294eded39ee08f8407656537ccc71b1004104fe1602e267c"
+    url "https://files.pythonhosted.org/packages/2a/9e/5bfa2270f902d5b92ab7d41ce0475b8630572e71e349b2a4996d14bdda93/openai-2.30.0-py3-none-any.whl"
+    sha256 "9a5ae616888eb2748ec5e0c5b955a51592e0b201a11f4262db920f2a78c5231d"
   end
 
   resource "pydantic" do
@@ -140,25 +140,18 @@ class ObservationalMemory < Formula
     sha256 "4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7"
   end
 
-  resource "observational-memory-wheel" do
-    url "https://files.pythonhosted.org/packages/47/eb/6028838b6eaa63444dd4897b4e1d86c2e3ba1768262e8f4d992266b2dee0/observational_memory-0.1.1-py3-none-any.whl"
-    sha256 "8d9ae2db4c80a22999bd6411c71ca94585e6e265394e5d0cccb4418468976bbd"
-  end
-
   def install
     virtualenv_create(libexec, "python3.13")
     python = Formula["python@3.13"].opt_bin/"python3.13"
 
     resources.each do |resource|
-      next if resource.name == "observational-memory-wheel"
-
       wheel = buildpath/File.basename(resource.url)
       cp resource.cached_download, wheel
       system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", wheel
     end
 
-    root_wheel = buildpath/"observational-memory-wheel.whl"
-    cp resource("observational-memory-wheel").cached_download, root_wheel
+    root_wheel = buildpath/File.basename(cached_download)
+    cp cached_download, root_wheel
     system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", root_wheel
     bin.install_symlink libexec/"bin/om"
   end

@@ -12,9 +12,6 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import urlopen
 
 
 @dataclass(frozen=True)
@@ -162,30 +159,6 @@ def extract_artifacts(install_items: list[dict], package_name: str) -> tuple[Art
     return root, resources
 
 
-def fetch_sdist_artifact(package_name: str, package_version: str) -> Artifact:
-    """Fetch source distribution artifact metadata from PyPI."""
-    encoded_name = quote(package_name)
-    encoded_version = quote(package_version)
-    endpoint = f"https://pypi.org/pypi/{encoded_name}/{encoded_version}/json"
-    try:
-        with urlopen(endpoint) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError) as e:
-        raise RuntimeError(f"Failed to fetch {endpoint}: {e}") from e
-
-    candidates = payload.get("urls", [])
-    sdist = next((entry for entry in candidates if entry.get("packagetype") == "sdist"), None)
-    if sdist is None:
-        raise RuntimeError(f"No sdist found for {package_name}=={package_version}")
-
-    url = sdist.get("url")
-    sha256 = (sdist.get("digests") or {}).get("sha256")
-    if not url or not sha256:
-        raise RuntimeError(f"Missing sdist url/sha256 for {package_name}=={package_version}")
-
-    return Artifact(name=package_name, version=package_version, url=url, sha256=sha256)
-
-
 def partition_resources(
     arm_resources: dict[str, Artifact],
     intel_resources: dict[str, Artifact],
@@ -239,7 +212,6 @@ def render_formula(
     desc: str,
     homepage: str,
     root: Artifact,
-    root_wheel: Artifact,
     license_name: str,
     python_dep: str,
     common_resources: list[Artifact],
@@ -289,19 +261,6 @@ def render_formula(
         sections.append(render_resource_section(common_resources))
         sections.append("")
 
-    root_wheel_resource_name = f"{normalize_name(root.name)}-wheel"
-    sections.append(
-        render_resource(
-            Artifact(
-                name=root_wheel_resource_name,
-                version=root_wheel.version,
-                url=root_wheel.url,
-                sha256=root_wheel.sha256,
-            )
-        )
-    )
-    sections.append("")
-
     sections.extend(
         [
             "  def install",
@@ -309,15 +268,13 @@ def render_formula(
             f'    python = Formula["{python_dep}"].opt_bin/"{python_bin}"',
             "",
             "    resources.each do |resource|",
-            f'      next if resource.name == "{root_wheel_resource_name}"',
-            "",
             "      wheel = buildpath/File.basename(resource.url)",
             "      cp resource.cached_download, wheel",
             '      system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", wheel',
             "    end",
             "",
-            f'    root_wheel = buildpath/"{root_wheel_resource_name}.whl"',
-            f'    cp resource("{root_wheel_resource_name}").cached_download, root_wheel',
+            "    root_wheel = buildpath/File.basename(cached_download)",
+            "    cp cached_download, root_wheel",
             '    system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", root_wheel',
             '    bin.install_symlink libexec/"bin/om"',
             "  end",
@@ -421,14 +378,12 @@ def main() -> int:
         )
 
     common_resources, arm_specific, intel_specific = partition_resources(arm_resources, intel_resources)
-    root_sdist = fetch_sdist_artifact(package_name, package_version)
 
     formula_text = render_formula(
         class_name=ruby_class_name(args.formula_name),
         desc=metadata["description"],
         homepage=metadata["homepage"],
-        root=root_sdist,
-        root_wheel=arm_root,
+        root=arm_root,
         license_name=metadata["license"],
         python_dep=args.python_dep,
         common_resources=common_resources,
@@ -440,7 +395,7 @@ def main() -> int:
     args.output.write_text(formula_text, encoding="utf-8")
 
     print(f"Generated {args.output} for {package_name}=={package_version}")
-    print(f"Root artifact: {root_sdist.url}")
+    print(f"Root artifact: {arm_root.url}")
     print(f"Resources: {len(common_resources)} common, {len(arm_specific)} arm-only, {len(intel_specific)} intel-only")
 
     warning = check_formula_name_conflict(args.formula_name)
