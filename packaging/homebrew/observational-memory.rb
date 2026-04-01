@@ -7,8 +7,8 @@ class ObservationalMemory < Formula
 
   desc "Cross-agent observational memory for Claude Code and Codex CLI"
   homepage "https://github.com/intertwine/observational-memory"
-  url "https://files.pythonhosted.org/packages/48/b6/f7893f377ebc99f52bf0431d87757f4b83aa1ff5a6a1da96fcd9a3d5ebe3/observational_memory-0.3.1-py3-none-any.whl"
-  sha256 "2b1cc83e886117daf43398991822644b8644bb5ee66f29545025fc41b60de73a"
+  url "https://files.pythonhosted.org/packages/91/58/a72a53703435ca65b9643916462191dcee72965bb769c46ab80db6e49efa/observational_memory-0.3.1.tar.gz"
+  sha256 "f2cacc87798c2faa332017343bd7478f8a050ccd0c5ab3b6cd7cb158ceee6780"
   license "MIT"
 
   depends_on "jq"
@@ -141,7 +141,7 @@ class ObservationalMemory < Formula
   end
 
   def install
-    virtualenv_create(libexec, "python3.13")
+    venv = virtualenv_create(libexec, "python3.13")
     python = Formula["python@3.13"].opt_bin/"python3.13"
 
     resources.each do |resource|
@@ -150,10 +150,7 @@ class ObservationalMemory < Formula
       system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", wheel
     end
 
-    root_wheel = buildpath/File.basename(cached_download)
-    cp cached_download, root_wheel
-    system python, "-m", "pip", "--python=#{libexec/"bin/python"}", "install", "--no-deps", root_wheel
-    bin.install_symlink libexec/"bin/om"
+    venv.pip_install_and_link(buildpath)
   end
 
   test do

@@ -3,7 +3,10 @@
 from scripts.generate_homebrew_formula import Artifact, render_formula
 
 
-def test_render_formula_preserves_real_root_wheel_filename():
+def test_render_formula_uses_virtualenv_install_with_resources_for_sdist_root():
+    expected_root_url = (
+        "https://files.pythonhosted.org/packages/source/o/observational_memory/observational_memory-0.3.1.tar.gz"
+    )
     formula = render_formula(
         class_name="ObservationalMemory",
         desc="Cross-agent observational memory",
@@ -11,8 +14,8 @@ def test_render_formula_preserves_real_root_wheel_filename():
         root=Artifact(
             name="observational-memory",
             version="0.3.1",
-            url="https://files.pythonhosted.org/packages/wheel/o/observational_memory-0.3.1-py3-none-any.whl",
-            sha256="wheelsha",
+            url=expected_root_url,
+            sha256="sdistsha",
         ),
         license_name="MIT",
         python_dep="python@3.13",
@@ -22,6 +25,10 @@ def test_render_formula_preserves_real_root_wheel_filename():
     )
 
     assert 'resource "observational-memory"' not in formula
-    assert "root_wheel = buildpath/File.basename(cached_download)" in formula
-    assert "cp cached_download, root_wheel" in formula
-    assert 'root_wheel = buildpath/"observational-memory-wheel.whl"' not in formula
+    assert f'url "{expected_root_url}"' in formula
+    assert 'venv = virtualenv_create(libexec, "python3.13")' in formula
+    assert "wheel = buildpath/File.basename(resource.url)" in formula
+    assert "cp resource.cached_download, wheel" in formula
+    assert "venv.pip_install_and_link(buildpath)" in formula
+    assert "root_wheel = buildpath/File.basename(cached_download)" not in formula
+    assert "cp cached_download, root_wheel" not in formula
