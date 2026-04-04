@@ -139,7 +139,9 @@ def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
         transcript.relative_to(config.hermes_sessions_dir)
         return "hermes"
     except ValueError:
-        return None
+        pass
+
+    return None
 
 
 @cli.command()
