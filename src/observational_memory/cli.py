@@ -10,13 +10,17 @@ from pathlib import Path
 
 import click
 
+from . import __version__
 from .config import Config
+
+_OBSERVE_SOURCES = ["claude", "codex", "hermes", "claude-memory", "all"]
 
 
 @click.group()
+@click.version_option(__version__, prog_name="om")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Observational Memory — cross-agent shared memory for Claude Code & Codex CLI."""
+    """Observational Memory — shared memory for Claude Code, Codex CLI, and Hermes Agent."""
     ctx.ensure_object(dict)
     Config().load_env_file()  # Seed os.environ before constructing final config
     config = Config()
@@ -27,9 +31,9 @@ def cli(ctx: click.Context) -> None:
 @click.option("--transcript", type=click.Path(exists=True, path_type=Path), help="Specific transcript file to process")
 @click.option(
     "--source",
-    type=click.Choice(["claude", "codex", "claude-memory", "all"]),
+    type=click.Choice(_OBSERVE_SOURCES),
     default="all",
-    help="Which agent transcripts to process",
+    help="Which input source to process",
 )
 @click.option("--dry-run", is_flag=True, help="Print observations without writing")
 @click.pass_context
@@ -38,9 +42,11 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
     from .observe import (
         observe_all_claude,
         observe_all_codex,
+        observe_all_hermes,
         observe_auto_memory,
         observe_claude_transcript,
         observe_codex_transcript,
+        observe_hermes_transcript,
     )
 
     config = ctx.obj["config"]
@@ -55,10 +61,14 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
             result = observe_claude_transcript(transcript, config, dry_run)
         elif transcript_source == "codex":
             result = observe_codex_transcript(transcript, config, dry_run)
+        elif transcript_source == "hermes":
+            result = observe_hermes_transcript(transcript, config, dry_run)
         elif transcript_source == "claude-memory":
             raise click.ClickException("--transcript does not support --source claude-memory.")
         else:
-            raise click.ClickException("Could not detect transcript source. Pass --source claude or --source codex.")
+            raise click.ClickException(
+                "Could not detect transcript source. Pass --source claude, --source codex, or --source hermes."
+            )
         if result:
             click.echo(f"Observations updated ({len(result)} chars)")
             if dry_run:
@@ -77,6 +87,10 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
     if source in ("codex", "all"):
         click.echo("Scanning Codex sessions...")
         results.extend(observe_all_codex(config, dry_run))
+
+    if source in ("hermes", "all"):
+        click.echo("Scanning Hermes sessions...")
+        results.extend(observe_all_hermes(config=config, dry_run=dry_run))
 
     if source in ("claude-memory", "all"):
         click.echo("Scanning Claude Code auto-memory files...")
@@ -118,6 +132,12 @@ def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
     try:
         transcript.relative_to(config.codex_home / "sessions")
         return "codex"
+    except ValueError:
+        pass
+
+    try:
+        transcript.relative_to(config.hermes_sessions_dir)
+        return "hermes"
     except ValueError:
         return None
 
