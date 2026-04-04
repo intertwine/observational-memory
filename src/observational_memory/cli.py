@@ -33,7 +33,7 @@ def cli(ctx: click.Context) -> None:
     "--source",
     type=click.Choice(_OBSERVE_SOURCES),
     default="all",
-    help="Which input source to process",
+    help="Which agent or memory source to process",
 )
 @click.option("--dry-run", is_flag=True, help="Print observations without writing")
 @click.pass_context
