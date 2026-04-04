@@ -81,7 +81,7 @@ v0.4.1
 
 Suggested release notes:
 
-```markdown
+````markdown
 ## Highlights
 
 - Added a root `om --version` flag for faster install and upgrade verification.
@@ -102,7 +102,7 @@ PyPI / uv tool:
 ```bash
 uv tool upgrade --reinstall observational-memory==0.4.1
 ```
-```
+````
 
 ## Post-Release Checks
 
