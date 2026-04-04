@@ -1,7 +1,7 @@
 """Tests for the observer module."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from observational_memory.config import Config
 from observational_memory.observe import (
@@ -9,6 +9,7 @@ from observational_memory.observe import (
     _chunk_messages,
     _codex_messages_since_cursor,
     _format_messages,
+    observe_all_hermes,
     observe_codex_transcript,
     run_observer,
     run_observer_backfill,
@@ -233,3 +234,21 @@ class TestCodexObserver:
         assert total == 7
         assert len(messages) == 4
         assert messages[0].content.startswith("I'm using us-west-2")
+
+
+class TestHermesObserver:
+    @patch("observational_memory.observe.observe_hermes_transcript")
+    def test_observe_all_hermes_uses_config_sessions_dir(self, mock_observe, tmp_path):
+        sessions_dir = tmp_path / "custom-hermes"
+        sessions_dir.mkdir(parents=True)
+        transcript = sessions_dir / "session.jsonl"
+        transcript.write_text(FIXTURES.joinpath("hermes-session.jsonl").read_text())
+        config = Config(memory_dir=tmp_path / "memory")
+
+        with patch.object(Config, "hermes_sessions_dir", new_callable=PropertyMock, return_value=sessions_dir):
+            mock_observe.return_value = "## 2026-04-04\n\n- hermes"
+
+            results = observe_all_hermes(config=config, dry_run=True)
+
+        assert results == ["## 2026-04-04\n\n- hermes"]
+        mock_observe.assert_called_once_with(transcript, config, True)

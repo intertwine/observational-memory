@@ -89,7 +89,7 @@ The Homebrew release workflow also checks Homebrew/core to catch formula-name co
 ### Per-release flow
 
 1. Publish new version to PyPI.
-2. Tag the same version in git (for example `v0.4.1`) and push the tag.
+2. Tag the same version in git (for example `vX.Y.Z`) and push the tag.
 3. GitHub Actions workflow `.github/workflows/homebrew-release.yml` regenerates `packaging/homebrew/observational-memory.rb` from PyPI, updates `Formula/observational-memory.rb` in the tap repo, then commits and pushes the tap update.
 
 ### Local maintainership commands
