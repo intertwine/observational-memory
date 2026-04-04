@@ -143,6 +143,10 @@ class Config:
         return self.codex_home / "hooks.json"
 
     @property
+    def hermes_sessions_dir(self) -> Path:
+        return Path.home() / ".hermes" / "sessions"
+
+    @property
     def codex_checkpoint_state_path(self) -> Path:
         return self.memory_dir / ".codex-checkpoint-state.json"
 

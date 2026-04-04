@@ -115,6 +115,53 @@ def test_observe_transcript_auto_detects_codex_session_paths(monkeypatch, tmp_pa
     assert "No new messages to process." in result.output
 
 
+def test_observe_transcript_routes_to_explicit_hermes_source(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "home" / ".hermes" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("hermes-session.jsonl").read_text())
+
+    calls = {"transcript": None, "dry_run": None}
+
+    def fake_observe(transcript_path, config, dry_run):
+        calls["transcript"] = transcript_path
+        calls["dry_run"] = dry_run
+        return "## Observations\n\n- hermes"
+
+    monkeypatch.setattr("observational_memory.observe.observe_hermes_transcript", fake_observe)
+
+    result = runner.invoke(cli, ["observe", "--transcript", str(transcript), "--source", "hermes", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["transcript"] == transcript
+    assert calls["dry_run"] is True
+    assert "Observations updated" in result.output
+
+
+def test_observe_transcript_auto_detects_hermes_session_paths(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "home" / ".hermes" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("hermes-session.jsonl").read_text())
+
+    calls = {"count": 0}
+
+    def fake_observe(transcript_path, config, dry_run):
+        calls["count"] += 1
+        assert transcript_path == transcript
+        return None
+
+    monkeypatch.setattr("observational_memory.observe.observe_hermes_transcript", fake_observe)
+
+    result = runner.invoke(cli, ["observe", "--transcript", str(transcript), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert calls["count"] == 1
+    assert "No new messages to process." in result.output
+
+
 def test_codex_checkpoint_spawns_worker_and_records_state(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     runner = CliRunner()

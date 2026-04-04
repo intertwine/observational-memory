@@ -1,7 +1,7 @@
 """Tests for the observer module."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from observational_memory.config import Config
 from observational_memory.observe import (
@@ -9,7 +9,9 @@ from observational_memory.observe import (
     _chunk_messages,
     _codex_messages_since_cursor,
     _format_messages,
+    observe_all_hermes,
     observe_codex_transcript,
+    observe_hermes_transcript,
     run_observer,
     run_observer_backfill,
 )
@@ -233,3 +235,48 @@ class TestCodexObserver:
         assert total == 7
         assert len(messages) == 4
         assert messages[0].content.startswith("I'm using us-west-2")
+
+
+class TestHermesObserver:
+    @patch("observational_memory.observe.run_observer")
+    def test_observe_hermes_transcript_passes_after_index_to_parser(self, mock_run_observer, monkeypatch, tmp_path):
+        mock_run_observer.return_value = "## 2026-04-04\n\n- checkpoint"
+
+        transcript = tmp_path / "hermes-session.jsonl"
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.save_cursor({str(transcript): 1})
+
+        seen = {}
+
+        def fake_parse(path, after_index=None):
+            seen["path"] = path
+            seen["after_index"] = after_index
+            return [
+                Message(role="assistant", content="two", timestamp="2026-04-04T00:00:01Z", source="hermes"),
+                Message(role="user", content="three", timestamp="2026-04-04T00:00:02Z", source="hermes"),
+            ]
+
+        monkeypatch.setattr("observational_memory.transcripts.hermes.parse_transcript", fake_parse)
+
+        result = observe_hermes_transcript(transcript, config, dry_run=False)
+
+        assert result == "## 2026-04-04\n\n- checkpoint"
+        assert seen == {"path": transcript, "after_index": 1}
+        assert config.load_cursor()[str(transcript)] == 3
+
+    @patch("observational_memory.observe.observe_hermes_transcript")
+    def test_observe_all_hermes_uses_config_sessions_dir(self, mock_observe, tmp_path):
+        sessions_dir = tmp_path / "custom-hermes"
+        sessions_dir.mkdir(parents=True)
+        transcript = sessions_dir / "session.jsonl"
+        transcript.write_text(FIXTURES.joinpath("hermes-session.jsonl").read_text())
+        config = Config(memory_dir=tmp_path / "memory")
+
+        with patch.object(Config, "hermes_sessions_dir", new_callable=PropertyMock, return_value=sessions_dir):
+            mock_observe.return_value = "## 2026-04-04\n\n- hermes"
+
+            results = observe_all_hermes(config=config, dry_run=True)
+
+        assert results == ["## 2026-04-04\n\n- hermes"]
+        mock_observe.assert_called_once_with(transcript, config, True)

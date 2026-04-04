@@ -58,6 +58,23 @@ Important maintainer rules:
 - `om uninstall --codex` should remove OM-managed hooks and the OM AGENTS fallback block, but should not disable `codex_hooks = true`.
 - AGENTS should stay conditional fallback only; avoid reintroducing unconditional startup reads when hooks are present.
 
+## Hermes Integration Model
+
+Hermes support is currently transcript ingestion support, not a hook installer.
+
+Runtime expectations:
+
+- `om observe --source hermes` scans recent Hermes session logs in `~/.hermes/sessions/`.
+- `om observe --transcript /path/to/session.jsonl --source hermes` processes one Hermes session explicitly.
+- The Hermes parser keeps user messages, assistant prose, and summarized tool calls.
+- It intentionally drops `session_meta`, raw tool output, and other machine-oriented records before the observer LLM sees them.
+- `om install` does not currently manage Hermes hooks or a Hermes-specific scheduler backstop; keep docs and status output truthful about that scope.
+
+Tests that should protect Hermes behavior:
+
+- `tests/test_transcripts.py`
+- `tests/test_cli_observe.py`
+
 ## Homebrew Release
 
 `observational-memory` is published to Homebrew via a tap formula (to avoid name collisions with short/common formula names). The executable remains `om`.
@@ -72,7 +89,7 @@ The Homebrew release workflow also checks Homebrew/core to catch formula-name co
 ### Per-release flow
 
 1. Publish new version to PyPI.
-2. Tag the same version in git (for example `v0.3.1`) and push the tag.
+2. Tag the same version in git (for example `vX.Y.Z`) and push the tag.
 3. GitHub Actions workflow `.github/workflows/homebrew-release.yml` regenerates `packaging/homebrew/observational-memory.rb` from PyPI, updates `Formula/observational-memory.rb` in the tap repo, then commits and pushes the tap update.
 
 ### Local maintainership commands
@@ -113,6 +130,7 @@ observational-memory/
 │   ├── transcripts/
 │   │   ├── claude.py                 # Claude Code JSONL parser
 │   │   ├── codex.py                  # Codex CLI session parser
+│   │   ├── hermes.py                 # Hermes Agent session parser
 │   │   └── auto_memory.py            # Claude Code auto-memory scanner
 │   ├── search/                       # Pluggable search over memory files
 │   │   ├── __init__.py               # Document model, factory, reindex orchestrator
@@ -128,6 +146,9 @@ observational-memory/
 │       ├── session-start.sh          # Inject memory on session start (search-backed)
 │       └── session-end.sh            # Trigger observer on session end
 └── tests/
+    ├── test_cli_context.py           # Context injection tests
+    ├── test_cli_observe.py           # Observe CLI routing tests
+    ├── test_cli_version.py           # Root CLI flag tests
     ├── test_transcripts.py           # Transcript parser tests
     ├── test_observe.py               # Observer tests
     ├── test_reflect.py               # Reflector tests

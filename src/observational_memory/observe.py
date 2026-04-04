@@ -184,17 +184,13 @@ def observe_hermes_transcript(
     if not isinstance(after_index, int):
         after_index = 0
 
-    all_messages = parse_transcript(transcript_path)
-    if not all_messages:
-        return None
-
-    messages = all_messages[after_index:]
+    messages = parse_transcript(transcript_path, after_index=after_index)
     if not messages:
         return None
 
     result = run_observer(messages, config, dry_run)
     if result and not dry_run:
-        cursor[cursor_key] = len(all_messages)
+        cursor[cursor_key] = after_index + len(messages)
         config.save_cursor(cursor)
 
     return result
@@ -224,7 +220,7 @@ def observe_all_hermes(
         config = Config()
 
     if sessions_dir is None:
-        sessions_dir = Path.home() / ".hermes" / "sessions"
+        sessions_dir = config.hermes_sessions_dir
 
     results = []
     for path in find_recent_sessions(sessions_dir, max_age_hours=max_age_hours):

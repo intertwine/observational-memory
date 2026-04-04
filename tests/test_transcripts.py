@@ -12,6 +12,7 @@ from observational_memory.transcripts.claude import (
 )
 from observational_memory.transcripts.codex import line_offset_to_message_count
 from observational_memory.transcripts.codex import parse_transcript as parse_codex
+from observational_memory.transcripts.hermes import parse_transcript as parse_hermes
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -216,3 +217,36 @@ class TestCodexParser:
         )
 
         assert line_offset_to_message_count(transcript, 4) == 2
+
+
+class TestHermesParser:
+    def test_parse_full_transcript(self):
+        messages = parse_hermes(FIXTURES / "hermes-session.jsonl")
+
+        assert len(messages) == 3
+        assert all(m.source == "hermes" for m in messages)
+        assert [m.role for m in messages] == ["user", "assistant", "assistant"]
+
+    def test_tool_calls_are_summarized_and_machine_records_filtered(self):
+        messages = parse_hermes(FIXTURES / "hermes-session.jsonl")
+
+        contents = [m.content for m in messages]
+
+        assert any("[terminal: gh run view 123 --log]" in content for content in contents)
+        assert any("[web_search: observational-memory pypi]" in content for content in contents)
+        assert all("raw tool output" not in content for content in contents)
+        assert all("[read: README.md]" not in content for content in contents)
+
+    def test_incremental_parsing_skips_already_counted_messages(self, tmp_path):
+        transcript = tmp_path / "hermes-session.jsonl"
+        transcript.write_text(
+            (
+                '{"role":"user","content":"one","timestamp":"2026-04-04T00:00:00Z"}\n'
+                '{"role":"assistant","content":"two","timestamp":"2026-04-04T00:00:01Z"}\n'
+                '{"role":"user","content":"three","timestamp":"2026-04-04T00:00:02Z"}\n'
+            )
+        )
+
+        messages = parse_hermes(transcript, after_index=1)
+
+        assert [m.content for m in messages] == ["two", "three"]
