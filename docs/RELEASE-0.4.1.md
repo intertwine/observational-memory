@@ -92,16 +92,13 @@ Suggested release notes:
 
 Homebrew:
 
-```bash
-brew update
-brew upgrade observational-memory
-```
+`brew update`
+
+`brew upgrade observational-memory`
 
 PyPI / uv tool:
 
-```bash
-uv tool upgrade --reinstall observational-memory==0.4.1
-```
+`uv tool upgrade --reinstall observational-memory==0.4.1`
 ````
 
 ## Post-Release Checks
