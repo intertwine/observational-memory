@@ -162,6 +162,78 @@ def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> 
     return changed_paths, deleted
 
 
+def observe_hermes_transcript(
+    transcript_path: Path,
+    config: Config | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Run observer on a specific Hermes session JSONL file.
+
+    Parses the Hermes session log into normalized messages (filtering out
+    tool outputs, session_meta, and machine-oriented records), then runs
+    the observer LLM to extract observations.
+    """
+    from .transcripts.hermes import parse_transcript
+
+    if config is None:
+        config = Config()
+
+    cursor = config.load_cursor()
+    cursor_key = str(transcript_path)
+    after_index = cursor.get(cursor_key)
+    if not isinstance(after_index, int):
+        after_index = 0
+
+    all_messages = parse_transcript(transcript_path)
+    if not all_messages:
+        return None
+
+    messages = all_messages[after_index:]
+    if not messages:
+        return None
+
+    result = run_observer(messages, config, dry_run)
+    if result and not dry_run:
+        cursor[cursor_key] = len(all_messages)
+        config.save_cursor(cursor)
+
+    return result
+
+
+def observe_all_hermes(
+    sessions_dir: Path | None = None,
+    config: Config | None = None,
+    dry_run: bool = False,
+    max_age_hours: int = 24,
+) -> list[str]:
+    """Scan recent Hermes session logs and run observer on each.
+
+    Args:
+        sessions_dir: Path to Hermes sessions directory
+            (default: ~/.hermes/sessions).
+        config: Runtime config. Uses defaults if None.
+        dry_run: If True, return observations without writing.
+        max_age_hours: Only process sessions modified within this window.
+
+    Returns:
+        List of observation texts produced.
+    """
+    from .transcripts.hermes import find_recent_sessions
+
+    if config is None:
+        config = Config()
+
+    if sessions_dir is None:
+        sessions_dir = Path.home() / ".hermes" / "sessions"
+
+    results = []
+    for path in find_recent_sessions(sessions_dir, max_age_hours=max_age_hours):
+        result = observe_hermes_transcript(path, config, dry_run)
+        if result:
+            results.append(result)
+    return results
+
+
 def observe_codex_transcript(
     transcript_path: Path,
     config: Config | None = None,
