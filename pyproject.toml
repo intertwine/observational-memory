@@ -1,7 +1,7 @@
 [project]
 name = "observational-memory"
 version = "0.4.1"
-description = "Cross-agent observational memory for Claude Code, Codex CLI, and Hermes Agent"
+description = "Cross-agent observational memory and local search for Claude Code, Codex CLI, and Hermes Agent"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -10,7 +10,7 @@ authors = [
 ]
 keywords = [
     "claude-code", "codex", "ai-memory", "observational-memory",
-    "llm", "agent-memory", "developer-tools",
+    "llm", "agent-memory", "developer-tools", "local-search", "qmd", "rag",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -22,6 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
     "Environment :: Console",
+    "Topic :: Utilities",
 ]
 dependencies = [
     "anthropic>=0.40.0",
@@ -34,6 +35,7 @@ dependencies = [
 Homepage = "https://github.com/intertwine/observational-memory"
 Repository = "https://github.com/intertwine/observational-memory"
 Issues = "https://github.com/intertwine/observational-memory/issues"
+Documentation = "https://github.com/intertwine/observational-memory#readme"
 
 [project.scripts]
 om = "observational_memory.cli:cli"

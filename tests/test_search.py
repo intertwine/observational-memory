@@ -1,5 +1,6 @@
 """Tests for the pluggable search module."""
 
+import base64
 import json
 
 import pytest
@@ -14,7 +15,7 @@ from observational_memory.search import (
 from observational_memory.search.bm25 import BM25Backend, _tokenize
 from observational_memory.search.none import NoneBackend
 from observational_memory.search.parser import parse_observations, parse_reflections
-from observational_memory.search.qmd import QMDBackend, QMDIndexInfo, inspect_qmd_index
+from observational_memory.search.qmd import QMDBackend, QMDIndexInfo, inspect_qmd_index, qmd_collection_exists
 
 # --- Fixtures ---
 
@@ -232,6 +233,46 @@ class TestBM25Backend:
         assert results[0].document.doc_id == "obs:2026-02-10"
         assert results[0].rank == 1
 
+    def test_search_falls_back_for_zero_idf_common_terms(self, tmp_path):
+        index_path = tmp_path / "bm25.pkl"
+        backend = BM25Backend(index_path)
+        backend.index(
+            [
+                Document(
+                    doc_id="obs:2026-04-06",
+                    source=DocumentSource.OBSERVATIONS,
+                    heading="## 2026-04-06",
+                    content="launchd remains the preferred scheduler on macOS",
+                ),
+                Document(
+                    doc_id="obs:2026-04-05",
+                    source=DocumentSource.OBSERVATIONS,
+                    heading="## 2026-04-05",
+                    content="green means green before merge",
+                ),
+                Document(
+                    doc_id="ref:projects",
+                    source=DocumentSource.REFLECTIONS,
+                    heading="## Projects",
+                    content="shipping qmd integration slices",
+                ),
+                Document(
+                    doc_id="ref:preferences",
+                    source=DocumentSource.REFLECTIONS,
+                    heading="## Preferences",
+                    content="prefer launchd over cron on macOS",
+                ),
+            ]
+        )
+
+        results = backend.search("launchd")
+
+        assert [r.document.doc_id for r in results] == [
+            "obs:2026-04-06",
+            "ref:preferences",
+        ]
+        assert all(r.score > 0 for r in results)
+
     def test_empty_query(self, tmp_path):
         index_path = tmp_path / "bm25.pkl"
         backend = BM25Backend(index_path)
@@ -326,7 +367,7 @@ class TestQMDBackend:
                 "--index",
                 "om-review",
                 "query",
-                "launchd",
+                "lex: launchd\nvec: launchd",
                 "-c",
                 "observational-memory",
                 "-n",
@@ -359,8 +400,9 @@ class TestQMDBackend:
         assert results[0].document.metadata["qmd_docid"] == "#abc123"
         assert results[0].document.metadata["line"] == 12
         assert results[0].document.metadata["qmd_line"] == 12
-        assert any(call[0][-1] == "--no-rerank" for call in calls if "query" in call[0])
         query_call = next(call for call in calls if "query" in call[0])
+        assert query_call[0][4] == "lex: launchd\nvec: launchd"
+        assert any(call[0][-1] == "--no-rerank" for call in calls if "query" in call[0])
         assert query_call[1]["env"]["QMD_EMBED_MODEL"] == "embed-model"
 
     def test_search_uses_manifest_metadata(self, tmp_path, monkeypatch):
@@ -430,6 +472,74 @@ class TestQMDBackend:
         assert results[0].document.metadata["line"] == 7
         assert results[0].document.metadata["qmd_line"] == 7
         assert "source_line" not in results[0].document.metadata
+
+    def test_search_uses_manifest_metadata_when_qmd_lowercases_legacy_filename(self, tmp_path, monkeypatch):
+        backend = QMDBackend(tmp_path)
+        docs_dir = tmp_path / ".qmd-docs"
+        docs_dir.mkdir(parents=True)
+        legacy_filename = "b2JzOjIwMjYtMDQtMDY.md"
+        lowered_filename = legacy_filename.lower()
+        (docs_dir / legacy_filename).write_text("stored content")
+        (docs_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    legacy_filename: {
+                        "doc_id": "obs:2026-04-06",
+                        "source": "observations",
+                        "heading": "## 2026-04-06",
+                        "date": "2026-04-06",
+                        "metadata": {
+                            "file_path": "/tmp/observations.md",
+                            "source_start_line": 5,
+                        },
+                    }
+                }
+            )
+        )
+
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(args, **kwargs):
+            if args == [
+                "qmd",
+                "--index",
+                "observational-memory",
+                "search",
+                "launchd",
+                "-c",
+                "observational-memory",
+                "-n",
+                "10",
+                "--json",
+            ]:
+                return Result(
+                    stdout=json.dumps(
+                        [
+                            {
+                                "docid": "#obs001",
+                                "file": f"qmd://observational-memory/{lowered_filename}",
+                                "title": "2026-04-06",
+                                "snippet": "launchd migration",
+                                "line": 2,
+                            }
+                        ]
+                    )
+                )
+            raise AssertionError(f"Unexpected subprocess call: {args}")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        results = backend.search("launchd")
+
+        assert len(results) == 1
+        assert results[0].document.doc_id == "obs:2026-04-06"
+        assert results[0].document.heading == "## 2026-04-06"
+        assert results[0].document.metadata["file_path"] == "/tmp/observations.md"
+        assert results[0].document.metadata["source_line"] == 6
 
     def test_search_maps_qmd_line_to_source_line(self, tmp_path, monkeypatch):
         backend = QMDBackend(tmp_path)
@@ -525,7 +635,7 @@ class TestQMDBackend:
                 "--index",
                 "om-review",
                 "query",
-                "launchd",
+                "lex: launchd\nvec: launchd",
                 "-c",
                 "observational-memory",
                 "-n",
@@ -543,6 +653,7 @@ class TestQMDBackend:
         assert stdout == "native qmd output\n"
         assert stderr == ""
         assert returncode == 0
+        assert any(call[4] == "lex: launchd\nvec: launchd" for call in calls if "query" in call)
         assert any(call[-1] == "--no-rerank" for call in calls if "query" in call)
 
     def test_legacy_fallback_doc_id_best_effort(self, tmp_path):
@@ -550,8 +661,50 @@ class TestQMDBackend:
         assert backend._fallback_doc_id("obs_2026-02-10.md") == "obs:2026-02-10"
         assert backend._fallback_doc_id(backend._filename_for_doc_id("amem:project/MEMORY")) == "amem:project/MEMORY"
 
+    def test_legacy_fallback_doc_id_ignores_non_utf8_hex_stems(self, tmp_path):
+        backend = QMDBackend(tmp_path)
+        assert backend._fallback_doc_id("80.md") == "80"
+
+    def test_legacy_fallback_doc_id_prefers_legacy_decoder_when_hex_text_is_not_docid(self, tmp_path, monkeypatch):
+        backend = QMDBackend(tmp_path)
+
+        def fake_b64decode(value):
+            assert value == b"666f"
+            return b"obs:legacy"
+
+        monkeypatch.setattr(base64, "urlsafe_b64decode", fake_b64decode)
+
+        assert backend._fallback_doc_id("666f.md") == "obs:legacy"
+
 
 class TestQMDInspection:
+    def test_qmd_collection_exists_parses_modern_list_output(self, monkeypatch):
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(args, **kwargs):
+            if args == ["qmd", "--index", "om-review", "collection", "list"]:
+                return Result(
+                    stdout=(
+                        "Collections (1):\n\n"
+                        "observational-memory (qmd://observational-memory/)\n"
+                        "  Pattern:  **/*.md\n"
+                        "  Files:    4\n"
+                    )
+                )
+            raise AssertionError(f"Unexpected subprocess call: {args}")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        exists, raw_output, error = qmd_collection_exists("om-review", "observational-memory")
+
+        assert exists is True
+        assert error is None
+        assert "observational-memory (qmd://observational-memory/)" in raw_output
+
     def test_inspect_qmd_index_parses_status_output(self, monkeypatch):
         class Result:
             def __init__(self, returncode=0, stdout="", stderr=""):
