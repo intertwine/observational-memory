@@ -333,6 +333,7 @@ class TestQMDBackend:
                 )
             raise AssertionError(f"Unexpected subprocess call: {args}")
 
+        monkeypatch.setattr("shutil.which", lambda name: "/tmp/bin/qmd" if name == "qmd" else None)
         monkeypatch.setattr("subprocess.run", fake_run)
 
         results = backend.search("launchd")
