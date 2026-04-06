@@ -346,8 +346,9 @@ class QMDBackend:
         return result.stdout, result.stderr, result.returncode
 
     def _search_command(self, query: str, *, limit: int, json_output: bool) -> list[str]:
+        use_no_rerank = self._mode == "query" and self._no_rerank and self._can_use_no_rerank()
         query_arg = query
-        if self._mode == "query" and self._no_rerank and self._can_use_no_rerank():
+        if use_no_rerank:
             query_arg = self._structured_no_rerank_query(query)
 
         command = self._with_index(
@@ -362,7 +363,7 @@ class QMDBackend:
         )
         if json_output:
             command.append("--json")
-        if self._mode == "query" and self._no_rerank and self._can_use_no_rerank():
+        if use_no_rerank:
             command.append("--no-rerank")
         return command
 
@@ -423,6 +424,7 @@ class QMDBackend:
             if not isinstance(key, str) or not isinstance(value, dict):
                 continue
             manifest[key] = value
+            # Legacy base64 stems could be mixed-case while qmd:// result URLs are lowercase.
             manifest.setdefault(key.lower(), value)
         return manifest
 
@@ -434,7 +436,7 @@ class QMDBackend:
         if len(stem) % 2 == 0 and re.fullmatch(r"[0-9a-f]+", stem):
             try:
                 return bytes.fromhex(stem).decode()
-            except ValueError:
+            except (ValueError, UnicodeDecodeError):
                 pass
 
         padding = "=" * (-len(stem) % 4)

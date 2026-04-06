@@ -660,6 +660,10 @@ class TestQMDBackend:
         assert backend._fallback_doc_id("obs_2026-02-10.md") == "obs:2026-02-10"
         assert backend._fallback_doc_id(backend._filename_for_doc_id("amem:project/MEMORY")) == "amem:project/MEMORY"
 
+    def test_legacy_fallback_doc_id_ignores_non_utf8_hex_stems(self, tmp_path):
+        backend = QMDBackend(tmp_path)
+        assert backend._fallback_doc_id("80.md") == "80"
+
 
 class TestQMDInspection:
     def test_qmd_collection_exists_parses_modern_list_output(self, monkeypatch):
