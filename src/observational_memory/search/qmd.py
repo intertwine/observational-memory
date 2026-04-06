@@ -314,7 +314,13 @@ class QMDBackend:
             if hit.get("docid"):
                 metadata["qmd_docid"] = hit["docid"]
             if hit.get("line") is not None:
-                metadata["line"] = hit["line"]
+                qmd_line = int(hit["line"])
+                metadata["line"] = qmd_line
+                metadata["qmd_line"] = qmd_line
+                source_start_line = metadata.get("source_start_line")
+                if isinstance(source_start_line, int):
+                    # QMD reports hit lines as 1-based within the stored section doc.
+                    metadata["source_line"] = source_start_line + qmd_line - 1
 
             results.append(
                 SearchResult(

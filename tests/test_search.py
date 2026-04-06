@@ -89,6 +89,14 @@ class TestParseObservations:
         assert "PostgreSQL" in docs[0].content
         assert "infrastructure" in docs[1].content
 
+    def test_documents_include_source_metadata(self, tmp_path):
+        obs_file = tmp_path / "observations.md"
+        obs_file.write_text(SAMPLE_OBSERVATIONS)
+        docs = parse_observations(obs_file)
+
+        assert docs[0].metadata["file_path"] == str(obs_file)
+        assert docs[0].metadata["source_start_line"] == 5
+
     def test_empty_file(self, tmp_path):
         obs_file = tmp_path / "observations.md"
         obs_file.write_text("")
@@ -114,6 +122,14 @@ class TestParseReflections:
         docs = parse_reflections(ref_file)
         for doc in docs:
             assert doc.source == DocumentSource.REFLECTIONS
+
+    def test_documents_include_source_metadata(self, tmp_path):
+        ref_file = tmp_path / "reflections.md"
+        ref_file.write_text(SAMPLE_REFLECTIONS)
+        docs = parse_reflections(ref_file)
+
+        assert docs[0].metadata["file_path"] == str(ref_file)
+        assert docs[0].metadata["source_start_line"] == 5
 
     def test_empty_file(self, tmp_path):
         ref_file = tmp_path / "reflections.md"
@@ -342,6 +358,7 @@ class TestQMDBackend:
         assert results[0].document.doc_id == "obs:2026-02-10"
         assert results[0].document.metadata["qmd_docid"] == "#abc123"
         assert results[0].document.metadata["line"] == 12
+        assert results[0].document.metadata["qmd_line"] == 12
         assert any(call[0][-1] == "--no-rerank" for call in calls if "query" in call[0])
         query_call = next(call for call in calls if "query" in call[0])
         assert query_call[1]["env"]["QMD_EMBED_MODEL"] == "embed-model"
@@ -411,6 +428,74 @@ class TestQMDBackend:
         assert results[0].document.content == "stored content"
         assert results[0].document.metadata["file_path"] == "/tmp/project/MEMORY.md"
         assert results[0].document.metadata["line"] == 7
+        assert results[0].document.metadata["qmd_line"] == 7
+        assert "source_line" not in results[0].document.metadata
+
+    def test_search_maps_qmd_line_to_source_line(self, tmp_path, monkeypatch):
+        backend = QMDBackend(tmp_path)
+        docs_dir = tmp_path / ".qmd-docs"
+        docs_dir.mkdir(parents=True)
+        encoded_filename = backend._filename_for_doc_id("obs:2026-02-10")
+        (docs_dir / encoded_filename).write_text("stored content")
+        (docs_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    encoded_filename: {
+                        "doc_id": "obs:2026-02-10",
+                        "source": "observations",
+                        "heading": "## 2026-02-10",
+                        "date": "2026-02-10",
+                        "metadata": {
+                            "file_path": "/tmp/observations.md",
+                            "source_start_line": 20,
+                        },
+                    }
+                }
+            )
+        )
+
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(args, **kwargs):
+            if args == [
+                "qmd",
+                "--index",
+                "observational-memory",
+                "search",
+                "launchd",
+                "-c",
+                "observational-memory",
+                "-n",
+                "10",
+                "--json",
+            ]:
+                return Result(
+                    stdout=json.dumps(
+                        [
+                            {
+                                "docid": "#obs001",
+                                "file": f"qmd://observational-memory/{encoded_filename}",
+                                "title": "## 2026-02-10",
+                                "snippet": "launchd migration",
+                                "line": 12,
+                            }
+                        ]
+                    )
+                )
+            raise AssertionError(f"Unexpected subprocess call: {args}")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        results = backend.search("launchd")
+
+        assert len(results) == 1
+        assert results[0].document.metadata["file_path"] == "/tmp/observations.md"
+        assert results[0].document.metadata["qmd_line"] == 12
+        assert results[0].document.metadata["source_line"] == 31
 
     def test_search_returns_empty_when_qmd_missing(self, tmp_path, monkeypatch):
         def fake_run(args, **kwargs):
