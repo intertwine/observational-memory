@@ -255,6 +255,7 @@ om reflect
 om search "PostgreSQL setup"
 om search "current projects" --limit 5
 om search "backfill" --json
+om search "launchd" --raw-qmd       # native qmd output / links (QMD backends only)
 om search "preferences" --reindex   # rebuild index before searching
 
 # Backfill all historical transcripts

@@ -267,19 +267,7 @@ class QMDBackend:
         _run_qmd(self._with_index(["update"]), env_overrides=self._model_env, check=True)
 
     def search(self, query: str, limit: int = 10) -> list[SearchResult]:
-        command = self._with_index(
-            [
-                self._mode,
-                query,
-                "-c",
-                self.COLLECTION_NAME,
-                "-n",
-                str(limit),
-                "--json",
-            ]
-        )
-        if self._mode == "query" and self._no_rerank and self._can_use_no_rerank():
-            command.append("--no-rerank")
+        command = self._search_command(query, limit=limit, json_output=True)
 
         try:
             result = _run_qmd(command, env_overrides=self._model_env)
@@ -337,6 +325,34 @@ class QMDBackend:
                 )
             )
         return results
+
+    def raw_search_output(self, query: str, limit: int = 10) -> tuple[str, str, int]:
+        """Return raw QMD CLI output for advanced passthrough use."""
+        command = self._search_command(query, limit=limit, json_output=False)
+
+        try:
+            result = _run_qmd(command, env_overrides=self._model_env)
+        except FileNotFoundError:
+            return "", "qmd not found on PATH", 127
+
+        return result.stdout, result.stderr, result.returncode
+
+    def _search_command(self, query: str, *, limit: int, json_output: bool) -> list[str]:
+        command = self._with_index(
+            [
+                self._mode,
+                query,
+                "-c",
+                self.COLLECTION_NAME,
+                "-n",
+                str(limit),
+            ]
+        )
+        if json_output:
+            command.append("--json")
+        if self._mode == "query" and self._no_rerank and self._can_use_no_rerank():
+            command.append("--no-rerank")
+        return command
 
     def is_ready(self) -> bool:
         if self._collection_ready is not None:

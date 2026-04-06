@@ -316,17 +316,21 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
 @click.option("--limit", "-n", type=int, default=10, help="Max results to return")
 @click.option("--reindex", is_flag=True, help="Rebuild the search index before searching")
 @click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
+@click.option("--raw-qmd", is_flag=True, help="Pass through native qmd output (QMD backends only)")
 @click.pass_context
-def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: bool) -> None:
+def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: bool, raw_qmd: bool) -> None:
     """Search observations and reflections for relevant memories."""
     from .search import get_backend
     from .search import reindex as do_reindex
 
     config = ctx.obj["config"]
 
+    if raw_qmd and as_json:
+        raise click.ClickException("--raw-qmd cannot be combined with --json.")
+
     if reindex:
         n = do_reindex(config)
-        if not as_json:
+        if not as_json and not raw_qmd:
             click.echo(f"Indexed {n} document(s)")
 
     backend = get_backend(config.search_backend, config)
@@ -334,8 +338,19 @@ def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: b
     if not backend.is_ready():
         # Auto-index on first search
         n = do_reindex(config)
-        if not as_json:
+        if not as_json and not raw_qmd:
             click.echo(f"Built index ({n} document(s))")
+
+    if raw_qmd:
+        if not hasattr(backend, "raw_search_output"):
+            raise click.ClickException("--raw-qmd is only available with qmd and qmd-hybrid backends.")
+        stdout, stderr, returncode = backend.raw_search_output(query, limit=limit)
+        if returncode != 0:
+            detail = stderr.strip() or stdout.strip() or "qmd search failed"
+            raise click.ClickException(detail)
+        if stdout:
+            click.echo(stdout, nl=not stdout.endswith("\n"))
+        return
 
     results = backend.search(query, limit=limit)
 

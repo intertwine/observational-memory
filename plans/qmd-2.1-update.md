@@ -58,7 +58,7 @@ Completed in the merged first slice:
 
 Current next slice:
 
-- Phase 5 search-result UX using truthful `source_path` / `source_line` mapping plus raw QMD metadata
+- Phase 5 raw QMD passthrough for advanced users who want native QMD CLI output and links
 
 ## What Is Actually Useful for `om`
 

@@ -506,6 +506,45 @@ class TestQMDBackend:
         backend = QMDBackend(tmp_path)
         assert backend.search("memory") == []
 
+    def test_raw_search_output_uses_native_qmd_mode(self, tmp_path, monkeypatch):
+        calls = []
+        backend = QMDBackend(tmp_path, mode="query", index_name="om-review", no_rerank=True)
+
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args == ["qmd", "--help"]:
+                return Result(stdout="--index\n--no-rerank\nqmd bench")
+            if args == [
+                "qmd",
+                "--index",
+                "om-review",
+                "query",
+                "launchd",
+                "-c",
+                "observational-memory",
+                "-n",
+                "5",
+                "--no-rerank",
+            ]:
+                return Result(stdout="native qmd output\n")
+            raise AssertionError(f"Unexpected subprocess call: {args}")
+
+        monkeypatch.setattr("shutil.which", lambda name: "/tmp/bin/qmd" if name == "qmd" else None)
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        stdout, stderr, returncode = backend.raw_search_output("launchd", limit=5)
+
+        assert stdout == "native qmd output\n"
+        assert stderr == ""
+        assert returncode == 0
+        assert any(call[-1] == "--no-rerank" for call in calls if "query" in call)
+
     def test_legacy_fallback_doc_id_best_effort(self, tmp_path):
         backend = QMDBackend(tmp_path)
         assert backend._fallback_doc_id("obs_2026-02-10.md") == "obs:2026-02-10"
