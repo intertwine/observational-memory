@@ -1,5 +1,7 @@
 """Tests for the pluggable search module."""
 
+import json
+
 import pytest
 
 from observational_memory.config import Config
@@ -12,6 +14,7 @@ from observational_memory.search import (
 from observational_memory.search.bm25 import BM25Backend, _tokenize
 from observational_memory.search.none import NoneBackend
 from observational_memory.search.parser import parse_observations, parse_reflections
+from observational_memory.search.qmd import QMDBackend, QMDIndexInfo, inspect_qmd_index
 
 # --- Fixtures ---
 
@@ -265,20 +268,199 @@ class TestGetBackend:
             get_backend("invalid", config)
 
     def test_qmd(self, tmp_path):
-        from observational_memory.search.qmd import QMDBackend
-
-        config = Config(memory_dir=tmp_path)
+        config = Config(memory_dir=tmp_path, qmd_index_name="om-review")
         backend = get_backend("qmd", config)
         assert isinstance(backend, QMDBackend)
         assert backend._mode == "search"
+        assert backend._index_name == "om-review"
 
     def test_qmd_hybrid(self, tmp_path):
-        from observational_memory.search.qmd import QMDBackend
-
-        config = Config(memory_dir=tmp_path)
+        config = Config(memory_dir=tmp_path, qmd_index_name="om-review", qmd_no_rerank=True)
         backend = get_backend("qmd-hybrid", config)
         assert isinstance(backend, QMDBackend)
         assert backend._mode == "query"
+        assert backend._index_name == "om-review"
+        assert backend._no_rerank is True
+
+
+class TestQMDBackend:
+    def test_query_uses_index_and_no_rerank(self, tmp_path, monkeypatch):
+        calls = []
+
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            if args == ["qmd", "--help"]:
+                return Result(stdout="--index\n--no-rerank\nqmd bench")
+            if args == [
+                "qmd",
+                "--index",
+                "om-review",
+                "query",
+                "launchd",
+                "-c",
+                "observational-memory",
+                "-n",
+                "10",
+                "--json",
+                "--no-rerank",
+            ]:
+                return Result(
+                    stdout=json.dumps(
+                        [
+                            {
+                                "docid": "#abc123",
+                                "file": "qmd://observational-memory/obs_2026-02-10.md",
+                                "title": "## 2026-02-10",
+                                "snippet": "launchd migration",
+                                "line": 12,
+                            }
+                        ]
+                    )
+                )
+            raise AssertionError(f"Unexpected subprocess call: {args}")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        backend = QMDBackend(
+            tmp_path,
+            mode="query",
+            index_name="om-review",
+            no_rerank=True,
+            model_env={"QMD_EMBED_MODEL": "embed-model"},
+        )
+        results = backend.search("launchd")
+
+        assert len(results) == 1
+        assert results[0].document.doc_id == "obs:2026-02-10"
+        assert results[0].document.metadata["qmd_docid"] == "#abc123"
+        assert results[0].document.metadata["line"] == 12
+        assert any(call[0][-1] == "--no-rerank" for call in calls if "query" in call[0])
+        query_call = next(call for call in calls if "query" in call[0])
+        assert query_call[1]["env"]["QMD_EMBED_MODEL"] == "embed-model"
+
+    def test_search_uses_manifest_metadata(self, tmp_path, monkeypatch):
+        docs_dir = tmp_path / ".qmd-docs"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "amem_project_MEMORY.md").write_text("stored content")
+        (docs_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "amem_project_MEMORY.md": {
+                        "doc_id": "amem:project/MEMORY",
+                        "source": "auto_memory",
+                        "heading": "### project: Memory",
+                        "date": None,
+                        "metadata": {"file_path": "/tmp/project/MEMORY.md"},
+                    }
+                }
+            )
+        )
+
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(args, **kwargs):
+            if args == [
+                "qmd",
+                "--index",
+                "observational-memory",
+                "search",
+                "memory",
+                "-c",
+                "observational-memory",
+                "-n",
+                "10",
+                "--json",
+            ]:
+                return Result(
+                    stdout=json.dumps(
+                        [
+                            {
+                                "docid": "#mem001",
+                                "file": "qmd://observational-memory/amem_project_MEMORY.md",
+                                "title": "Memory",
+                                "snippet": "snippet",
+                                "line": 7,
+                            }
+                        ]
+                    )
+                )
+            raise AssertionError(f"Unexpected subprocess call: {args}")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        backend = QMDBackend(tmp_path)
+        results = backend.search("memory")
+
+        assert len(results) == 1
+        assert results[0].document.doc_id == "amem:project/MEMORY"
+        assert results[0].document.source == DocumentSource.AUTO_MEMORY
+        assert results[0].document.heading == "### project: Memory"
+        assert results[0].document.content == "stored content"
+        assert results[0].document.metadata["file_path"] == "/tmp/project/MEMORY.md"
+        assert results[0].document.metadata["line"] == 7
+
+
+class TestQMDInspection:
+    def test_inspect_qmd_index_parses_status_output(self, monkeypatch):
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(args, **kwargs):
+            if args == ["qmd", "--index", "om-review", "collection", "list"]:
+                return Result(stdout="observational-memory\tqmd://observational-memory/\n")
+            if args == ["qmd", "--index", "om-review", "status"]:
+                return Result(
+                    stdout=(
+                        "QMD Status\n\n"
+                        "Index: /tmp/om-review.sqlite\n"
+                        "Size:  3.5 MB\n\n"
+                        "Documents\n"
+                        "  Total:    21 files indexed\n"
+                        "  Vectors:  10 embedded\n"
+                        "  Pending:  11 need embedding (run 'qmd embed')\n"
+                        "  Updated:  3m ago\n"
+                    )
+                )
+            raise AssertionError(f"Unexpected subprocess call: {args}")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        info = inspect_qmd_index("om-review", "observational-memory")
+
+        assert info == QMDIndexInfo(
+            index_name="om-review",
+            collection_name="observational-memory",
+            collection_exists=True,
+            index_path="/tmp/om-review.sqlite",
+            total_files=21,
+            vectors_embedded=10,
+            pending_vectors=11,
+            updated="3m ago",
+            raw_output=(
+                "QMD Status\n\n"
+                "Index: /tmp/om-review.sqlite\n"
+                "Size:  3.5 MB\n\n"
+                "Documents\n"
+                "  Total:    21 files indexed\n"
+                "  Vectors:  10 embedded\n"
+                "  Pending:  11 need embedding (run 'qmd embed')\n"
+                "  Updated:  3m ago"
+            ),
+            error=None,
+        )
 
 
 # --- Reindex Tests ---

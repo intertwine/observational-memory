@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from observational_memory.cli import cli
 from observational_memory.config import Config
+from observational_memory.search.qmd import QMDIndexInfo, QMDInstallInfo
 
 
 def _set_base_env(monkeypatch, tmp_path):
@@ -24,6 +25,9 @@ def _set_base_env(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     for key in [
+        "OM_SEARCH_BACKEND",
+        "OM_QMD_INDEX_NAME",
+        "OM_QMD_NO_RERANK",
         "OM_LLM_PROVIDER",
         "OM_VERTEX_PROJECT_ID",
         "OM_VERTEX_REGION",
@@ -323,3 +327,131 @@ def test_status_reports_duplicate_backstops_on_macos(monkeypatch, tmp_path):
     assert "Loaded: 3/3 loaded" in result.output
     assert "Cron jobs: 1 found (claude-memory)" in result.output
     assert "Duplicate backstops: launchd and cron are both present" in result.output
+
+
+def test_doctor_reports_qmd_hybrid_health(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_SEARCH_BACKEND", "qmd-hybrid")
+    monkeypatch.setenv("OM_QMD_INDEX_NAME", "om-review")
+    monkeypatch.setenv("OM_QMD_NO_RERANK", "1")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    monkeypatch.setattr(
+        "observational_memory.search.qmd.inspect_qmd_install",
+        lambda env_overrides=None: QMDInstallInfo(
+            available=True,
+            binary_path="/tmp/bin/qmd",
+            supports_index=True,
+            supports_no_rerank=True,
+            supports_bench=True,
+            help_output="--index\n--no-rerank\nqmd bench",
+        ),
+    )
+    monkeypatch.setattr(
+        "observational_memory.search.qmd.inspect_qmd_index",
+        lambda index_name, collection_name, env_overrides=None: QMDIndexInfo(
+            index_name=index_name,
+            collection_name=collection_name,
+            collection_exists=True,
+            index_path="/tmp/om-review.sqlite",
+            total_files=21,
+            vectors_embedded=21,
+            pending_vectors=0,
+            updated="1m ago",
+        ),
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+
+    assert _get_check(data, "QMD binary")["status"] == "PASS"
+    assert _get_check(data, "QMD 2.1 features")["status"] == "PASS"
+    assert _get_check(data, "QMD collection")["status"] == "PASS"
+    assert _get_check(data, "QMD rerank mode")["status"] == "PASS"
+    assert _get_check(data, "QMD embeddings")["status"] == "PASS"
+
+
+def test_doctor_warns_when_qmd_hybrid_has_no_embeddings(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_SEARCH_BACKEND", "qmd-hybrid")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    monkeypatch.setattr(
+        "observational_memory.search.qmd.inspect_qmd_install",
+        lambda env_overrides=None: QMDInstallInfo(
+            available=True,
+            binary_path="/tmp/bin/qmd",
+            supports_index=True,
+            supports_no_rerank=False,
+            supports_bench=False,
+            help_output="--index",
+        ),
+    )
+    monkeypatch.setattr(
+        "observational_memory.search.qmd.inspect_qmd_index",
+        lambda index_name, collection_name, env_overrides=None: QMDIndexInfo(
+            index_name=index_name,
+            collection_name=collection_name,
+            collection_exists=True,
+            total_files=21,
+            vectors_embedded=0,
+            pending_vectors=21,
+            updated="1m ago",
+        ),
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+
+    assert _get_check(data, "QMD 2.1 features")["status"] == "WARN"
+    assert _get_check(data, "QMD embeddings")["status"] == "WARN"
+    assert "0 embedded vectors" in _get_check(data, "QMD embeddings")["detail"]
+
+
+def test_status_reports_qmd_backend_details(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_SEARCH_BACKEND", "qmd-hybrid")
+    monkeypatch.setenv("OM_QMD_INDEX_NAME", "om-review")
+    monkeypatch.setenv("OM_QMD_NO_RERANK", "1")
+    monkeypatch.setattr(
+        "observational_memory.search.qmd.inspect_qmd_install",
+        lambda env_overrides=None: QMDInstallInfo(
+            available=True,
+            binary_path="/tmp/bin/qmd",
+            supports_index=True,
+            supports_no_rerank=True,
+            supports_bench=True,
+            help_output="--index\n--no-rerank\nqmd bench",
+        ),
+    )
+    monkeypatch.setattr(
+        "observational_memory.search.qmd.inspect_qmd_index",
+        lambda index_name, collection_name, env_overrides=None: QMDIndexInfo(
+            index_name=index_name,
+            collection_name=collection_name,
+            collection_exists=True,
+            index_path="/tmp/om-review.sqlite",
+            total_files=21,
+            vectors_embedded=10,
+            pending_vectors=11,
+            updated="3m ago",
+        ),
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "Search:" in result.output
+    assert "Backend: qmd-hybrid" in result.output
+    assert "QMD binary: /tmp/bin/qmd" in result.output
+    assert "QMD index: om-review" in result.output
+    assert "Hybrid rerank: disabled via OM_QMD_NO_RERANK=1" in result.output
+    assert "Collection: observational-memory" in result.output
+    assert "Embedded vectors: 10" in result.output
+    assert "Pending vectors: 11" in result.output
