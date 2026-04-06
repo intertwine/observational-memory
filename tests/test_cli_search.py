@@ -53,6 +53,11 @@ class _FakeBackend:
         assert limit == 10
         return _fake_results()
 
+    def raw_search_output(self, query: str, limit: int = 10) -> tuple[str, str, int]:
+        assert query == "launchd"
+        assert limit == 10
+        return "\x1b]8;;qmd://observational-memory/hit\x1b\\\\launchd hit\x1b]8;;\x1b\\\\\n", "", 0
+
 
 def test_search_json_includes_source_and_qmd_metadata(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
@@ -83,3 +88,58 @@ def test_search_text_output_shows_source_and_qmd_hit(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert "Source: /tmp/observations.md:31" in result.output
     assert "QMD hit: qmd://observational-memory/obs_2026-02-10.md:12" in result.output
+
+
+def test_search_raw_qmd_passthrough(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    monkeypatch.setattr("observational_memory.search.get_backend", lambda backend_name, config: _FakeBackend())
+
+    result = runner.invoke(cli, ["search", "launchd", "--raw-qmd"])
+
+    assert result.exit_code == 0, result.output
+    assert "launchd hit" in result.output
+
+
+def test_search_raw_qmd_rejects_json(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["search", "launchd", "--raw-qmd", "--json"])
+
+    assert result.exit_code != 0
+    assert "--raw-qmd cannot be combined with --json" in result.output
+
+
+def test_search_raw_qmd_requires_qmd_backend(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    class _NoRawBackend:
+        def is_ready(self) -> bool:
+            return True
+
+        def search(self, query: str, limit: int = 10) -> list[SearchResult]:
+            return []
+
+    monkeypatch.setattr("observational_memory.search.get_backend", lambda backend_name, config: _NoRawBackend())
+
+    result = runner.invoke(cli, ["search", "launchd", "--raw-qmd"])
+
+    assert result.exit_code != 0
+    assert "--raw-qmd is only available with qmd and qmd-hybrid backends" in result.output
+
+
+def test_search_raw_qmd_suppresses_reindex_banner(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    monkeypatch.setattr("observational_memory.search.get_backend", lambda backend_name, config: _FakeBackend())
+    monkeypatch.setattr("observational_memory.search.reindex", lambda config: 7)
+
+    result = runner.invoke(cli, ["search", "launchd", "--raw-qmd", "--reindex"])
+
+    assert result.exit_code == 0, result.output
+    assert "launchd hit" in result.output
+    assert "Indexed 7 document(s)" not in result.output
