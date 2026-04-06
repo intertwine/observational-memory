@@ -403,6 +403,7 @@ Notes:
 - `qmd-hybrid` uses BM25 + vector search and works best after `qmd --index observational-memory embed`.
 - `OM_QMD_NO_RERANK=1` keeps hybrid recall while skipping the slowest reranking step on QMD `>= 2.1.0`.
 - `om status` and `om doctor` will show whether QMD is installed, indexed, and embedded.
+- Maintainers can benchmark the repo-local QMD fixture with `make qmd-bench` as documented in [`docs/MAINTAINERS.md`](docs/MAINTAINERS.md).
 
 ### Tuning
 

@@ -1,0 +1,67 @@
+{
+  "description": "Repo-local QMD benchmark fixture for observational-memory search evaluation.",
+  "version": 1,
+  "collection": "om-bench-memory",
+  "queries": [
+    {
+      "id": "project-status",
+      "query": "current project status",
+      "type": "topical",
+      "description": "Find the rollout note that describes the current QMD integration slice and what is next.",
+      "expected_files": [
+        "roadmap/current-work.md"
+      ],
+      "expected_in_top_k": 3
+    },
+    {
+      "id": "launchd-over-cron",
+      "query": "launchd instead of cron",
+      "type": "alias",
+      "description": "Find the scheduler note explaining why launchd is preferred on macOS.",
+      "expected_files": [
+        "ops/scheduler.md"
+      ],
+      "expected_in_top_k": 3
+    },
+    {
+      "id": "green-means-green",
+      "query": "green means green",
+      "type": "exact",
+      "description": "Find the release discipline note that encodes the merge rule for passing review and CI.",
+      "expected_files": [
+        "principles/release-discipline.md"
+      ],
+      "expected_in_top_k": 2
+    },
+    {
+      "id": "observer-interval",
+      "query": "OM_CODEX_OBSERVER_INTERVAL_MINUTES",
+      "type": "exact",
+      "description": "Find the configuration note describing how the Codex observer cadence is controlled.",
+      "expected_files": [
+        "ops/scheduler.md"
+      ],
+      "expected_in_top_k": 2
+    },
+    {
+      "id": "agent-visibility-gap",
+      "query": "agent visibility gap",
+      "type": "cross-domain",
+      "description": "Find the note about status, review, and hook visibility gaps across the agent workflow.",
+      "expected_files": [
+        "gaps/agent-observability.md"
+      ],
+      "expected_in_top_k": 3
+    },
+    {
+      "id": "mellona-hive-branding",
+      "query": "mellona hive branding",
+      "type": "alias",
+      "description": "Find the branding note for the Mellona Hive naming work.",
+      "expected_files": [
+        "branding/mellona-hive.md"
+      ],
+      "expected_in_top_k": 3
+    }
+  ]
+}

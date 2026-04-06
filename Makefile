@@ -3,7 +3,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: help test lint format check build clean bump-version publish-test publish install-dev doctor brew-formula brew-check release-homebrew brew-install
+.PHONY: help test lint format check build clean bump-version publish-test publish install-dev doctor qmd-bench-setup qmd-bench-embed qmd-bench-preflight qmd-bench qmd-bench-json brew-formula brew-check release-homebrew brew-install
 
 # ---------- Colors (portable) ----------
 ifdef NO_COLOR
@@ -25,6 +25,10 @@ BUMP ?= patch
 HOMEBREW_TAP_DIR ?= ../homebrew-tap
 HOMEBREW_TAP_NAME ?= intertwine/tap
 HOMEBREW_INSTALL_TARGET ?= intertwine/tap/observational-memory
+QMD_BENCH_INDEX ?= om-bench
+QMD_BENCH_COLLECTION ?= om-bench-memory
+QMD_BENCH_CORPUS_DIR ?= $(CURDIR)/tests/fixtures/qmd-bench-corpus
+QMD_BENCH_FIXTURE ?= $(CURDIR)/tests/fixtures/qmd-bench-memory.json
 
 help:
 	@$(ECHO) "$(GREEN)Observational Memory - Development Commands$(NC)"
@@ -34,6 +38,13 @@ help:
 	@$(ECHO) "  make lint           - Run linter checks"
 	@$(ECHO) "  make format         - Auto-format code"
 	@$(ECHO) "  make check          - Run all quality checks (lint + format check + test)"
+	@$(ECHO) ""
+	@$(ECHO) "$(YELLOW)Benchmarking:$(NC)"
+	@$(ECHO) "  make qmd-bench-setup - Rebuild the dedicated repo-local QMD benchmark collection"
+	@$(ECHO) "  make qmd-bench-embed - Build embeddings for the dedicated QMD benchmark index"
+	@$(ECHO) "  make qmd-bench-preflight - Check that qmd and the benchmark fixture are ready"
+	@$(ECHO) "  make qmd-bench       - Run the QMD benchmark fixture"
+	@$(ECHO) "  make qmd-bench-json  - Run the QMD benchmark fixture with --json output"
 	@$(ECHO) ""
 	@$(ECHO) "$(YELLOW)Building:$(NC)"
 	@$(ECHO) "  make build          - Build sdist and wheel"
@@ -130,6 +141,63 @@ install-dev:
 # Run diagnostics
 doctor:
 	@uv run om doctor
+
+# Build a deterministic repo-local QMD benchmark collection
+qmd-bench-setup:
+	@$(ECHO) "$(YELLOW)Preparing repo-local QMD benchmark corpus...$(NC)"
+	@if ! command -v qmd >/dev/null 2>&1; then \
+		$(ECHO) "$(RED)Error: qmd not found$(NC)"; \
+		$(ECHO) "Install QMD >= 2.1.0 first: npm install -g @tobilu/qmd"; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(QMD_BENCH_CORPUS_DIR)" ]; then \
+		$(ECHO) "$(RED)Error: benchmark corpus not found at $(QMD_BENCH_CORPUS_DIR)$(NC)"; \
+		exit 1; \
+	fi
+	@if qmd --index "$(QMD_BENCH_INDEX)" collection list 2>/dev/null | cut -f1 | grep -Fxq "$(QMD_BENCH_COLLECTION)"; then \
+		$(ECHO) "$(YELLOW)Removing existing benchmark collection $(QMD_BENCH_COLLECTION) from index $(QMD_BENCH_INDEX)...$(NC)"; \
+		qmd --index "$(QMD_BENCH_INDEX)" collection remove "$(QMD_BENCH_COLLECTION)"; \
+	fi
+	@$(ECHO) "$(YELLOW)Adding benchmark collection $(QMD_BENCH_COLLECTION) from $(QMD_BENCH_CORPUS_DIR)...$(NC)"
+	@qmd --index "$(QMD_BENCH_INDEX)" collection add "$(QMD_BENCH_CORPUS_DIR)" --name "$(QMD_BENCH_COLLECTION)"
+	@qmd --index "$(QMD_BENCH_INDEX)" update
+	@$(ECHO) "$(GREEN)✓ QMD benchmark collection ready$(NC)"
+
+# Build embeddings for the repo-local QMD benchmark collection
+qmd-bench-embed: qmd-bench-setup
+	@$(ECHO) "$(YELLOW)Embedding repo-local QMD benchmark corpus...$(NC)"
+	@qmd --index "$(QMD_BENCH_INDEX)" embed
+	@$(ECHO) "$(GREEN)✓ QMD benchmark embeddings ready$(NC)"
+
+# Validate that the benchmark fixture can run on the installed QMD
+qmd-bench-preflight:
+	@if ! command -v qmd >/dev/null 2>&1; then \
+		$(ECHO) "$(RED)Error: qmd not found$(NC)"; \
+		$(ECHO) "Install QMD >= 2.1.0 first: npm install -g @tobilu/qmd"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(QMD_BENCH_FIXTURE)" ]; then \
+		$(ECHO) "$(RED)Error: benchmark fixture not found at $(QMD_BENCH_FIXTURE)$(NC)"; \
+		exit 1; \
+	fi
+	@# QMD does not currently expose a stable machine-readable version command, so use
+	@# bench help text as a capability probe for the 2.1-era subcommand before setup/embed.
+	@if ! qmd --help 2>/dev/null | grep -Fq "qmd bench"; then \
+		$(ECHO) "$(RED)Error: installed qmd does not support 'qmd bench'$(NC)"; \
+		$(ECHO) "Upgrade to QMD >= 2.1.0 first."; \
+		exit 1; \
+	fi
+
+# Run the repo-local QMD benchmark fixture
+qmd-bench: qmd-bench-preflight
+	@$(MAKE) --no-print-directory qmd-bench-embed
+	@$(ECHO) "$(YELLOW)Running QMD benchmark fixture...$(NC)"
+	@qmd --index "$(QMD_BENCH_INDEX)" bench "$(QMD_BENCH_FIXTURE)" --collection "$(QMD_BENCH_COLLECTION)"
+
+# Run the repo-local QMD benchmark fixture with JSON output
+qmd-bench-json: qmd-bench-preflight
+	@$(MAKE) --no-print-directory qmd-bench-embed 1>&2
+	@qmd --index "$(QMD_BENCH_INDEX)" bench "$(QMD_BENCH_FIXTURE)" --collection "$(QMD_BENCH_COLLECTION)" --json
 
 # Generate Homebrew formula from PyPI artifacts (root package + transitive resources)
 brew-formula:
