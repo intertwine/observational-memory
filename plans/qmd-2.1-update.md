@@ -49,16 +49,21 @@ The current integration is good enough for "optional backend" support, but not y
 
 ## Status
 
-Completed in the merged first slice:
+Completed in merged slices:
 
 - dedicated QMD index isolation and env/config support
 - optional `--no-rerank` handling for hybrid search
 - `om status` / `om doctor` QMD visibility
 - README updates for current QMD 2.1 installation and setup
+- repo-local maintainer benchmarking with `qmd bench`
+- search-result UX with truthful `source_path` / `source_line` mapping plus raw QMD metadata
+- `om search --raw-qmd` passthrough for native QMD CLI output and links
 
-Current next slice:
+Remaining work is intentionally strategic rather than plumbing:
 
-- Phase 5 raw QMD passthrough for advanced users who want native QMD CLI output and links
+- do not change the default backend until benchmark results justify it
+- keep AST-aware chunking out of scope unless OM starts indexing code directly
+- revisit deeper QMD-specific tuning only if real-world benchmark data shows a need
 
 ## What Is Actually Useful for `om`
 

@@ -46,6 +46,9 @@ make qmd-bench
 
 # Capture machine-readable results
 make qmd-bench-json > /tmp/om-qmd-bench.json
+
+# Fail fast if the local qmd install is too old for bench support
+make qmd-bench-preflight
 ```
 
 Default benchmark settings:
@@ -66,6 +69,27 @@ Important maintainer rules:
 - Keep the corpus repo-local and reviewable; do not point the fixture at a personal OM memory directory.
 - Keep `expected_files` paths in the fixture relative to the corpus root so they match QMD's benchmark expectations.
 - If you change the corpus or fixture, keep `tests/test_qmd_bench_fixture.py` passing in the same PR so fixture drift stays visible in CI.
+
+## QMD Release Validation
+
+If a release changes QMD-related behavior, run a quick user-facing validation pass in addition to the fixture benchmark:
+
+```bash
+om status
+om doctor
+OM_SEARCH_BACKEND=qmd om search --reindex "launchd"
+OM_SEARCH_BACKEND=qmd-hybrid om search "current project status"
+OM_SEARCH_BACKEND=qmd-hybrid OM_QMD_NO_RERANK=1 om search "current project status"
+OM_SEARCH_BACKEND=qmd-hybrid om search "launchd" --json
+OM_SEARCH_BACKEND=qmd-hybrid om search "launchd" --raw-qmd
+```
+
+Confirm:
+
+- `om status` and `om doctor` agree about install health, collection readiness, and embedding state.
+- `--raw-qmd` preserves native QMD output without OM reindex banners mixed into stdout.
+- `--json` exposes `source_path`, `source_line`, `qmd_file`, `qmd_docid`, and `qmd_line` when available.
+- `OM_QMD_NO_RERANK=1` is only reported as active when the installed QMD actually supports it.
 
 ## Codex Integration Model
 
@@ -186,6 +210,7 @@ observational-memory/
 └── tests/
     ├── test_cli_context.py           # Context injection tests
     ├── test_cli_observe.py           # Observe CLI routing tests
+    ├── test_cli_search.py            # Search CLI output tests
     ├── test_cli_version.py           # Root CLI flag tests
     ├── test_qmd_bench_fixture.py     # QMD benchmark fixture integrity checks
     ├── test_transcripts.py           # Transcript parser tests

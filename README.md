@@ -359,6 +359,10 @@ OM_SEARCH_BACKEND=qmd-hybrid
 OM_QMD_INDEX_NAME=observational-memory
 # Optional on QMD >= 2.1.0: faster hybrid search without reranking
 # OM_QMD_NO_RERANK=1
+# Optional: override QMD's embed / rerank / generate models for OM only
+# OM_QMD_EMBED_MODEL=
+# OM_QMD_RERANK_MODEL=
+# OM_QMD_GENERATE_MODEL=
 OM_CODEX_OBSERVER_INTERVAL_MINUTES=10
 ```
 
@@ -392,19 +396,43 @@ qmd --index observational-memory embed
 
 # 5. Optional on QMD >= 2.1.0: skip reranking for faster hybrid results
 export OM_QMD_NO_RERANK=1
+
+# 6. Verify the install and inspect the collection
+om status
+om doctor
 ```
 
 When using QMD, memory documents are written as `.md` files under `~/.local/share/observational-memory/.qmd-docs/`.
 They are registered as a QMD collection named `observational-memory` inside the QMD index named by `OM_QMD_INDEX_NAME` (default: `observational-memory`).
 `om search` and `om context` use whichever backend is configured.
 
-Notes:
+QMD config:
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `OM_QMD_INDEX_NAME` | `observational-memory` | Keeps OM's collection isolated inside its own QMD index. |
+| `OM_QMD_NO_RERANK` | `0` | On QMD `>= 2.1.0`, skips hybrid reranking for lower-latency queries. |
+| `OM_QMD_EMBED_MODEL` | unset | Overrides QMD's embedding model for OM subprocess calls. |
+| `OM_QMD_RERANK_MODEL` | unset | Overrides QMD's rerank model for OM subprocess calls. |
+| `OM_QMD_GENERATE_MODEL` | unset | Overrides QMD's generation model for OM subprocess calls. |
+
+QMD search output:
 
 - `qmd` uses keyword search only and does not require embeddings.
 - `qmd-hybrid` uses BM25 + vector search and works best after `qmd --index observational-memory embed`.
 - `OM_QMD_NO_RERANK=1` keeps hybrid recall while skipping the slowest reranking step on QMD `>= 2.1.0`.
 - `om status` and `om doctor` will show whether QMD is installed, indexed, and embedded.
+- `om search --json` includes `source_path`, `source_line`, `qmd_file`, `qmd_docid`, and `qmd_line` when available.
+- `om search --raw-qmd` passes through native QMD CLI output and terminal links for advanced users. It only works with `qmd` and `qmd-hybrid`, and it cannot be combined with `--json`.
 - Maintainers can benchmark the repo-local QMD fixture with `make qmd-bench` as documented in [`docs/MAINTAINERS.md`](docs/MAINTAINERS.md).
+
+QMD troubleshooting:
+
+- If `om doctor` says QMD is missing, install QMD first and make sure `qmd` is on your `PATH`.
+- If `qmd-hybrid` returns only lexical-quality results, rebuild the OM collection and run `qmd --index observational-memory embed`.
+- If `OM_QMD_NO_RERANK=1` appears to do nothing, run `om status` or `om doctor`; older QMD installs do not advertise `--no-rerank`.
+- If `om search --raw-qmd` errors, confirm `OM_SEARCH_BACKEND` is `qmd` or `qmd-hybrid`.
+- If maintainer benchmark commands fail at `make qmd-bench-preflight`, your local QMD install is older than the `qmd bench` feature and should be upgraded before release validation.
 
 ### Tuning
 
