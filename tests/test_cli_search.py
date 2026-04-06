@@ -69,6 +69,7 @@ def test_search_json_includes_source_and_qmd_metadata(monkeypatch, tmp_path):
     assert payload[0]["qmd_file"] == "qmd://observational-memory/obs_2026-02-10.md"
     assert payload[0]["qmd_docid"] == "#abc123"
     assert payload[0]["qmd_line"] == 12
+    assert "source_start_line" not in payload[0]["metadata"]
 
 
 def test_search_text_output_shows_source_and_qmd_hit(monkeypatch, tmp_path):

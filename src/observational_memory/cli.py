@@ -367,6 +367,7 @@ def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: b
 def _search_result_payload(result) -> dict[str, object]:
     """Normalize a search result for JSON and terminal rendering."""
     metadata = dict(result.document.metadata)
+    metadata.pop("source_start_line", None)
     qmd_line = metadata.get("qmd_line", metadata.get("line"))
     return {
         "rank": result.rank,
@@ -384,7 +385,7 @@ def _search_result_payload(result) -> dict[str, object]:
     }
 
 
-def _format_location(path: object, line: object) -> str | None:
+def _format_location(path: str | None, line: int | None) -> str | None:
     """Render an optional path[:line] string for search output."""
     if not path:
         return None

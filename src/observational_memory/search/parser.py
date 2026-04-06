@@ -9,7 +9,7 @@ from . import Document, DocumentSource
 
 
 def _line_number_for_offset(content: str, offset: int) -> int:
-    """Return the 1-based line number for a byte offset into content."""
+    """Return the 1-based line number for a character offset into content."""
     return content.count("\n", 0, offset) + 1
 
 
