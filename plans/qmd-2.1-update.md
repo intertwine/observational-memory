@@ -58,7 +58,7 @@ Completed in the merged first slice:
 
 Current next slice:
 
-- Phase 4 maintainer benchmarking using a repo-local OM-shaped corpus plus `qmd bench`
+- Phase 5 search-result UX using truthful `source_path` / `source_line` mapping plus raw QMD metadata
 
 ## What Is Actually Useful for `om`
 

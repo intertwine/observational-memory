@@ -342,22 +342,18 @@ def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: b
     if as_json:
         import json as json_mod
 
-        output = [
-            {
-                "rank": r.rank,
-                "score": r.score,
-                "doc_id": r.document.doc_id,
-                "source": r.document.source.value,
-                "heading": r.document.heading,
-                "content": r.document.content[:500],
-                "metadata": r.document.metadata,
-            }
-            for r in results
-        ]
+        output = [_search_result_payload(r) for r in results]
         click.echo(json_mod.dumps(output, indent=2))
     elif results:
         for r in results:
             click.echo(f"\n--- [{r.rank}] {r.document.heading} (score: {r.score:.2f}) ---")
+            payload = _search_result_payload(r)
+            source_location = _format_location(payload["source_path"], payload["source_line"])
+            qmd_location = _format_location(payload["qmd_file"], payload["qmd_line"])
+            if source_location:
+                click.echo(f"  Source: {source_location}")
+            if qmd_location:
+                click.echo(f"  QMD hit: {qmd_location}")
             # Show first 5 lines of content
             lines = r.document.content.strip().splitlines()
             for line in lines[:5]:
@@ -366,6 +362,35 @@ def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: b
                 click.echo(f"  ... ({len(lines) - 5} more lines)")
     else:
         click.echo("No results found.")
+
+
+def _search_result_payload(result) -> dict[str, object]:
+    """Normalize a search result for JSON and terminal rendering."""
+    metadata = dict(result.document.metadata)
+    qmd_line = metadata.get("qmd_line", metadata.get("line"))
+    return {
+        "rank": result.rank,
+        "score": result.score,
+        "doc_id": result.document.doc_id,
+        "source": result.document.source.value,
+        "heading": result.document.heading,
+        "content": result.document.content[:500],
+        "source_path": metadata.get("file_path"),
+        "source_line": metadata.get("source_line"),
+        "qmd_file": metadata.get("qmd_file"),
+        "qmd_docid": metadata.get("qmd_docid"),
+        "qmd_line": qmd_line,
+        "metadata": metadata,
+    }
+
+
+def _format_location(path: object, line: object) -> str | None:
+    """Render an optional path[:line] string for search output."""
+    if not path:
+        return None
+    if line is None:
+        return str(path)
+    return f"{path}:{line}"
 
 
 @cli.command(hidden=True)
