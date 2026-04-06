@@ -43,11 +43,23 @@ def get_backend(backend_name: str, config):
     elif backend_name == "qmd":
         from .qmd import QMDBackend
 
-        return QMDBackend(config.memory_dir, mode="search")
+        return QMDBackend(
+            config.memory_dir,
+            mode="search",
+            index_name=config.qmd_index_name,
+            no_rerank=config.qmd_no_rerank,
+            model_env=config.qmd_model_env(),
+        )
     elif backend_name == "qmd-hybrid":
         from .qmd import QMDBackend
 
-        return QMDBackend(config.memory_dir, mode="query")
+        return QMDBackend(
+            config.memory_dir,
+            mode="query",
+            index_name=config.qmd_index_name,
+            no_rerank=config.qmd_no_rerank,
+            model_env=config.qmd_model_env(),
+        )
     elif backend_name == "none":
         from .none import NoneBackend
 

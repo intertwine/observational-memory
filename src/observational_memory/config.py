@@ -16,6 +16,13 @@ def _xdg_config_home() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 ENV_FILE_TEMPLATE = """\
 # Observational Memory — API Keys
 # This file is sourced by om, its hooks, and its background scheduler jobs.
@@ -45,6 +52,11 @@ ENV_FILE_TEMPLATE = """\
 
 # Search backend: bm25 (default), qmd, qmd-hybrid, none
 # OM_SEARCH_BACKEND=bm25
+# OM_QMD_INDEX_NAME=observational-memory
+# OM_QMD_NO_RERANK=0
+# OM_QMD_EMBED_MODEL=
+# OM_QMD_RERANK_MODEL=
+# OM_QMD_GENERATE_MODEL=
 #
 # In-session checkpointing (UserPromptSubmit/PreCompact hooks)
 # OM_SESSION_OBSERVER_INTERVAL_SECONDS=900  # 15 minutes
@@ -105,6 +117,11 @@ class Config:
     search_backend: str = field(
         default_factory=lambda: os.environ.get("OM_SEARCH_BACKEND", "bm25")
     )  # "bm25" | "qmd" | "qmd-hybrid" | "none"
+    qmd_index_name: str = field(default_factory=lambda: os.environ.get("OM_QMD_INDEX_NAME", "observational-memory"))
+    qmd_no_rerank: bool = field(default_factory=lambda: _env_flag("OM_QMD_NO_RERANK", False))
+    qmd_embed_model: str | None = field(default_factory=lambda: os.environ.get("OM_QMD_EMBED_MODEL"))
+    qmd_rerank_model: str | None = field(default_factory=lambda: os.environ.get("OM_QMD_RERANK_MODEL"))
+    qmd_generate_model: str | None = field(default_factory=lambda: os.environ.get("OM_QMD_GENERATE_MODEL"))
 
     @property
     def observations_path(self) -> Path:
@@ -297,6 +314,17 @@ class Config:
             raise RuntimeError(f"Unknown provider: {active_provider}")
 
         return active_provider
+
+    def qmd_model_env(self) -> dict[str, str]:
+        """Return configured QMD model overrides for subprocess execution."""
+        env: dict[str, str] = {}
+        if self.qmd_embed_model:
+            env["QMD_EMBED_MODEL"] = self.qmd_embed_model
+        if self.qmd_rerank_model:
+            env["QMD_RERANK_MODEL"] = self.qmd_rerank_model
+        if self.qmd_generate_model:
+            env["QMD_GENERATE_MODEL"] = self.qmd_generate_model
+        return env
 
     # --- Cursor (bookmark) management ---
 

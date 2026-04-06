@@ -10,6 +10,12 @@ from observational_memory.config import Config
 @pytest.fixture(autouse=True)
 def clear_llm_env(monkeypatch):
     for key in [
+        "OM_SEARCH_BACKEND",
+        "OM_QMD_INDEX_NAME",
+        "OM_QMD_NO_RERANK",
+        "OM_QMD_EMBED_MODEL",
+        "OM_QMD_RERANK_MODEL",
+        "OM_QMD_GENERATE_MODEL",
         "OM_LLM_PROVIDER",
         "OM_LLM_MODEL",
         "OM_LLM_OBSERVER_MODEL",
@@ -102,6 +108,25 @@ class TestEnvFile:
         assert config.codex_hooks_path == codex_home / "hooks.json"
         assert config.codex_checkpoint_state_path == memory_dir / ".codex-checkpoint-state.json"
         assert config.codex_checkpoint_lock_dir == memory_dir / ".codex-checkpoint-locks"
+
+    def test_qmd_config_reads_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OM_SEARCH_BACKEND", "qmd-hybrid")
+        monkeypatch.setenv("OM_QMD_INDEX_NAME", "om-review")
+        monkeypatch.setenv("OM_QMD_NO_RERANK", "yes")
+        monkeypatch.setenv("OM_QMD_EMBED_MODEL", "embed-model")
+        monkeypatch.setenv("OM_QMD_RERANK_MODEL", "rerank-model")
+        monkeypatch.setenv("OM_QMD_GENERATE_MODEL", "generate-model")
+
+        config = Config(env_file=tmp_path / "env")
+
+        assert config.search_backend == "qmd-hybrid"
+        assert config.qmd_index_name == "om-review"
+        assert config.qmd_no_rerank is True
+        assert config.qmd_model_env() == {
+            "QMD_EMBED_MODEL": "embed-model",
+            "QMD_RERANK_MODEL": "rerank-model",
+            "QMD_GENERATE_MODEL": "generate-model",
+        }
 
     def test_launchd_paths_live_under_launch_agents_and_memory_dir(self, tmp_path, monkeypatch):
         home = tmp_path / "home"

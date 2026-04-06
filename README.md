@@ -343,8 +343,8 @@ Memory search uses a pluggable backend architecture. Three backends are availabl
 | Backend      | Default | Requires                                     | Method                                                                         |
 | ------------ | ------- | -------------------------------------------- | ------------------------------------------------------------------------------ |
 | `bm25`       | Yes     | Nothing (bundled)                            | Token-based keyword matching via `rank-bm25`                                   |
-| `qmd`        | No      | [QMD CLI](https://github.com/tobi/qmd) + bun | BM25 keyword search via QMD's FTS5 engine                                      |
-| `qmd-hybrid` | No      | [QMD CLI](https://github.com/tobi/qmd) + bun | Hybrid BM25 + vector embeddings + LLM reranking (~2GB models, auto-downloaded) |
+| `qmd`        | No      | [QMD CLI](https://github.com/tobi/qmd)       | BM25 keyword search via QMD's FTS5 engine                                      |
+| `qmd-hybrid` | No      | [QMD CLI](https://github.com/tobi/qmd)       | Hybrid BM25 + vector embeddings + optional reranking                           |
 | `none`       | No      | Nothing                                      | Disables search entirely                                                       |
 
 The default `bm25` backend works out of the box.
@@ -355,6 +355,9 @@ To switch backends, set `OM_SEARCH_BACKEND` in your env file:
 ```bash
 # ~/.config/observational-memory/env
 OM_SEARCH_BACKEND=qmd-hybrid
+OM_QMD_INDEX_NAME=observational-memory
+# Optional on QMD >= 2.1.0: faster hybrid search without reranking
+# OM_QMD_NO_RERANK=1
 OM_CODEX_OBSERVER_INTERVAL_MINUTES=10
 ```
 
@@ -362,30 +365,44 @@ Or export it in your shell:
 
 ```bash
 export OM_SEARCH_BACKEND=qmd-hybrid
+export OM_QMD_INDEX_NAME=observational-memory
 export OM_CODEX_OBSERVER_INTERVAL_MINUTES=10
 ```
 
 #### Using QMD (optional)
 
-[QMD](https://github.com/tobi/qmd) provides hybrid search (BM25 + vector embeddings + LLM reranking) for better recall on semantic queries. Models run locally through node-llama-cpp, so no extra API key is required. To set it up:
+[QMD](https://github.com/tobi/qmd) provides hybrid search (BM25 + vector embeddings + reranking) for better recall on semantic queries. Models run locally, so no extra API key is required. `om` benefits most from QMD `>= 2.1.0`. To set it up:
 
 ```bash
-# 1. Install bun (QMD runtime)
-curl -fsSL https://bun.sh/install | bash
+# 1. Install QMD
+npm install -g @tobilu/qmd
+# or
+bun install -g @tobilu/qmd
 
-# 2. Install QMD (from GitHub — the npm package is a placeholder)
-bun install -g github:tobi/qmd
+# 2. Point om at the QMD backend
+export OM_SEARCH_BACKEND=qmd-hybrid
+export OM_QMD_INDEX_NAME=observational-memory
 
-# 3. Switch the backend in config.py
-#    search_backend: str = "qmd-hybrid"
-
-# 4. Rebuild the index
+# 3. Rebuild the om-managed QMD index
 om search --reindex "test query"
+
+# 4. Build embeddings for hybrid/vector search
+qmd --index observational-memory embed
+
+# 5. Optional on QMD >= 2.1.0: skip reranking for faster hybrid results
+export OM_QMD_NO_RERANK=1
 ```
 
 When using QMD, memory documents are written as `.md` files under `~/.local/share/observational-memory/.qmd-docs/`.
-They are registered as a QMD collection named `observational-memory`.
+They are registered as a QMD collection named `observational-memory` inside the QMD index named by `OM_QMD_INDEX_NAME` (default: `observational-memory`).
 `om search` and `om context` use whichever backend is configured.
+
+Notes:
+
+- `qmd` uses keyword search only and does not require embeddings.
+- `qmd-hybrid` uses BM25 + vector search and works best after `qmd --index observational-memory embed`.
+- `OM_QMD_NO_RERANK=1` keeps hybrid recall while skipping the slowest reranking step on QMD `>= 2.1.0`.
+- `om status` and `om doctor` will show whether QMD is installed, indexed, and embedded.
 
 ### Tuning
 

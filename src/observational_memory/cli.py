@@ -350,6 +350,7 @@ def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: b
                 "source": r.document.source.value,
                 "heading": r.document.heading,
                 "content": r.document.content[:500],
+                "metadata": r.document.metadata,
             }
             for r in results
         ]
@@ -956,6 +957,57 @@ def status(ctx: click.Context) -> None:
     else:
         click.echo("  Exists: no (run 'om install' to create)")
 
+    # Search backend
+    click.echo("\nSearch:")
+    click.echo(f"  Backend: {config.search_backend}")
+    if config.search_backend == "bm25":
+        click.echo(f"  BM25 index: {config.search_index_dir / 'bm25.pkl'}")
+    elif config.search_backend in {"qmd", "qmd-hybrid"}:
+        from .search.qmd import QMDBackend, inspect_qmd_index, inspect_qmd_install
+
+        install = inspect_qmd_install()
+        if not install.available:
+            click.echo("  QMD binary: not installed")
+        else:
+            click.echo(f"  QMD binary: {install.binary_path}")
+            click.echo(f"  QMD index: {config.qmd_index_name}")
+            if install.supports_no_rerank:
+                feature_status = "detected (--no-rerank available)"
+            elif install.supports_bench:
+                feature_status = "partial (bench subcommand detected)"
+            else:
+                feature_status = "not detected"
+            click.echo(f"  QMD 2.1 features: {feature_status}")
+            if config.search_backend == "qmd-hybrid":
+                rerank_status = "disabled via OM_QMD_NO_RERANK=1" if config.qmd_no_rerank else "enabled"
+                click.echo(f"  Hybrid rerank: {rerank_status}")
+
+            status = inspect_qmd_index(
+                config.qmd_index_name,
+                QMDBackend.COLLECTION_NAME,
+                env_overrides=config.qmd_model_env(),
+            )
+            if status.error:
+                click.echo(f"  QMD status: error ({status.error})")
+            elif not status.collection_exists:
+                click.echo(f"  Collection: {QMDBackend.COLLECTION_NAME} not indexed yet")
+            else:
+                click.echo(f"  Collection: {QMDBackend.COLLECTION_NAME}")
+                if status.index_path:
+                    click.echo(f"  Index path: {status.index_path}")
+                if status.total_files is not None:
+                    click.echo(f"  Indexed files: {status.total_files}")
+                if status.vectors_embedded is not None:
+                    click.echo(f"  Embedded vectors: {status.vectors_embedded}")
+                if status.pending_vectors is not None:
+                    click.echo(f"  Pending vectors: {status.pending_vectors}")
+                if status.updated:
+                    click.echo(f"  Updated: {status.updated}")
+
+        model_env = config.qmd_model_env()
+        if model_env:
+            click.echo("  Model overrides: " + ", ".join(f"{key}={value}" for key, value in sorted(model_env.items())))
+
     # LLM provider/model status
     click.echo("\nLLM:")
     try:
@@ -1162,7 +1214,106 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("jq installed", "FAIL", "not found", fix="Install with: brew install jq")
 
-    # 9. Claude hooks
+    # 9. QMD search backend health
+    if config.search_backend in {"qmd", "qmd-hybrid"}:
+        from .search.qmd import QMDBackend, inspect_qmd_index, inspect_qmd_install
+
+        install = inspect_qmd_install()
+        if install.available:
+            _check("QMD binary", "PASS", install.binary_path or "qmd")
+        else:
+            _check(
+                "QMD binary",
+                "FAIL",
+                install.error or "qmd not found",
+                fix="Install with: npm install -g @tobilu/qmd",
+            )
+
+        if install.available:
+            if install.supports_no_rerank:
+                _check("QMD 2.1 features", "PASS", "--no-rerank support detected")
+            elif install.supports_bench:
+                _check("QMD 2.1 features", "WARN", "bench subcommand detected but --no-rerank unavailable")
+            else:
+                _check("QMD 2.1 features", "WARN", "--no-rerank support not detected", fix="Upgrade QMD to >= 2.1.0")
+
+            status = inspect_qmd_index(
+                config.qmd_index_name,
+                QMDBackend.COLLECTION_NAME,
+                env_overrides=config.qmd_model_env(),
+            )
+            if status.error:
+                _check("QMD collection", "WARN", status.error, fix='Run: om search --reindex "test query"')
+            elif status.collection_exists:
+                detail = f"{QMDBackend.COLLECTION_NAME} in index {config.qmd_index_name}"
+                if status.total_files is not None:
+                    detail += f" ({status.total_files} files)"
+                _check("QMD collection", "PASS", detail)
+            else:
+                _check(
+                    "QMD collection",
+                    "WARN",
+                    f"{QMDBackend.COLLECTION_NAME} not indexed in {config.qmd_index_name}",
+                    fix='Run: om search --reindex "test query"',
+                )
+
+            if config.search_backend == "qmd-hybrid":
+                if config.qmd_no_rerank:
+                    if install.supports_no_rerank:
+                        _check("QMD rerank mode", "PASS", "disabled via OM_QMD_NO_RERANK=1")
+                    else:
+                        _check(
+                            "QMD rerank mode",
+                            "WARN",
+                            "OM_QMD_NO_RERANK=1 but installed qmd does not advertise --no-rerank",
+                            fix="Upgrade QMD to >= 2.1.0",
+                        )
+                else:
+                    _check("QMD rerank mode", "PASS", "enabled")
+
+                if status.error:
+                    _check(
+                        "QMD embeddings",
+                        "WARN",
+                        status.error,
+                        fix=f"Run: qmd --index {config.qmd_index_name} embed",
+                    )
+                elif not status.collection_exists:
+                    _check(
+                        "QMD embeddings",
+                        "WARN",
+                        "skipped (collection not indexed yet)",
+                        fix='Run: om search --reindex "test query"',
+                    )
+                elif status.pending_vectors is None and status.vectors_embedded is None:
+                    _check("QMD embeddings", "WARN", "status output did not report embedding counts")
+                elif (status.vectors_embedded or 0) <= 0:
+                    _check(
+                        "QMD embeddings",
+                        "WARN",
+                        "0 embedded vectors",
+                        fix=f"Run: qmd --index {config.qmd_index_name} embed",
+                    )
+                elif (status.pending_vectors or 0) > 0:
+                    _check(
+                        "QMD embeddings",
+                        "WARN",
+                        f"{status.vectors_embedded} embedded, {status.pending_vectors} pending",
+                        fix=f"Run: qmd --index {config.qmd_index_name} embed",
+                    )
+                else:
+                    _check("QMD embeddings", "PASS", f"{status.vectors_embedded} embedded, 0 pending")
+        else:
+            if config.search_backend == "qmd-hybrid":
+                _check("QMD 2.1 features", "WARN", "skipped (qmd not installed)")
+                _check("QMD collection", "WARN", "skipped (qmd not installed)")
+                _check("QMD rerank mode", "WARN", "skipped (qmd not installed)")
+                _check("QMD embeddings", "WARN", "skipped (qmd not installed)")
+            else:
+                _check("QMD 2.1 features", "WARN", "skipped (qmd not installed)")
+                _check("QMD collection", "WARN", "skipped (qmd not installed)")
+
+    # 10. Claude hooks
     if config.claude_settings_path.exists():
         try:
             settings = json_mod.loads(config.claude_settings_path.read_text())
@@ -1179,7 +1330,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Claude hooks", "WARN", "settings.json not found", fix="Run: om install --claude")
 
-    # 10. Codex startup integration
+    # 11. Codex startup integration
     agents_status = _codex_agents_fallback_status(config)
     has_agents_fallback = agents_status in {"fallback", "legacy"}
     feature_enabled, feature_error = _codex_hooks_feature_enabled(config)
@@ -1250,7 +1401,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Codex hook commands valid", "WARN", "skipped (Codex hooks not installed)")
 
-    # 11. Hook paths valid (only check Claude hook commands that look like file paths, not inline shell commands)
+    # 12. Hook paths valid (only check Claude hook commands that look like file paths, not inline shell commands)
     if config.claude_settings_path.exists():
         try:
             settings = json_mod.loads(config.claude_settings_path.read_text())
@@ -1271,7 +1422,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         except Exception:
             pass  # Already reported above
 
-    # 12. Background scheduler
+    # 13. Background scheduler
     _check("Scheduler default", "PASS", _resolve_scheduler_mode("auto", None))
 
     launchd_jobs = _launchd_job_statuses(config) if sys.platform == "darwin" else []
@@ -1327,7 +1478,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Cron jobs", "WARN", "no observational-memory background jobs found", fix="Run: om install")
 
-    # 13. Platform
+    # 14. Platform
     if sys.platform == "win32":
         _check("Platform", "WARN", "Windows — some features may not work")
     else:
