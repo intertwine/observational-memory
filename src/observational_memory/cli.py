@@ -965,16 +965,19 @@ def status(ctx: click.Context) -> None:
     elif config.search_backend in {"qmd", "qmd-hybrid"}:
         from .search.qmd import QMDBackend, inspect_qmd_index, inspect_qmd_install
 
-        install = inspect_qmd_install(env_overrides=config.qmd_model_env())
+        install = inspect_qmd_install()
         if not install.available:
             click.echo("  QMD binary: not installed")
         else:
             click.echo(f"  QMD binary: {install.binary_path}")
             click.echo(f"  QMD index: {config.qmd_index_name}")
-            click.echo(
-                "  QMD 2.1 features: "
-                + ("detected (--no-rerank available)" if install.supports_v21_features else "not detected")
-            )
+            if install.supports_no_rerank:
+                feature_status = "detected (--no-rerank available)"
+            elif install.supports_bench:
+                feature_status = "partial (bench subcommand detected)"
+            else:
+                feature_status = "not detected"
+            click.echo(f"  QMD 2.1 features: {feature_status}")
             if config.search_backend == "qmd-hybrid":
                 rerank_status = "disabled via OM_QMD_NO_RERANK=1" if config.qmd_no_rerank else "enabled"
                 click.echo(f"  Hybrid rerank: {rerank_status}")
@@ -1003,10 +1006,7 @@ def status(ctx: click.Context) -> None:
 
         model_env = config.qmd_model_env()
         if model_env:
-            click.echo(
-                "  Model overrides: "
-                + ", ".join(f"{key}={value}" for key, value in sorted(model_env.items()))
-            )
+            click.echo("  Model overrides: " + ", ".join(f"{key}={value}" for key, value in sorted(model_env.items())))
 
     # LLM provider/model status
     click.echo("\nLLM:")
@@ -1218,7 +1218,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     if config.search_backend in {"qmd", "qmd-hybrid"}:
         from .search.qmd import QMDBackend, inspect_qmd_index, inspect_qmd_install
 
-        install = inspect_qmd_install(env_overrides=config.qmd_model_env())
+        install = inspect_qmd_install()
         if install.available:
             _check("QMD binary", "PASS", install.binary_path or "qmd")
         else:
@@ -1230,8 +1230,10 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
             )
 
         if install.available:
-            if install.supports_v21_features:
+            if install.supports_no_rerank:
                 _check("QMD 2.1 features", "PASS", "--no-rerank support detected")
+            elif install.supports_bench:
+                _check("QMD 2.1 features", "WARN", "bench subcommand detected but --no-rerank unavailable")
             else:
                 _check("QMD 2.1 features", "WARN", "--no-rerank support not detected", fix="Upgrade QMD to >= 2.1.0")
 

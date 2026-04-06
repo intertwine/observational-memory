@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -11,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import Document, DocumentSource, SearchResult
+
+_QMD_INSPECT_TIMEOUT_SECONDS = 5.0
 
 
 def _combine_output(result: subprocess.CompletedProcess) -> str:
@@ -34,6 +38,7 @@ def _run_qmd(
     *,
     env_overrides: dict[str, str] | None = None,
     check: bool = False,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["qmd", *args],
@@ -41,6 +46,7 @@ def _run_qmd(
         text=True,
         check=check,
         env=_qmd_env(env_overrides),
+        timeout=timeout,
     )
 
 
@@ -53,10 +59,6 @@ class QMDInstallInfo:
     supports_bench: bool = False
     help_output: str = ""
     error: str | None = None
-
-    @property
-    def supports_v21_features(self) -> bool:
-        return self.supports_no_rerank or self.supports_bench
 
 
 @dataclass
@@ -80,9 +82,15 @@ def inspect_qmd_install(env_overrides: dict[str, str] | None = None) -> QMDInsta
         return QMDInstallInfo(available=False, error="qmd not found on PATH")
 
     try:
-        result = _run_qmd(["--help"], env_overrides=env_overrides)
+        result = _run_qmd(["--help"], env_overrides=env_overrides, timeout=_QMD_INSPECT_TIMEOUT_SECONDS)
     except FileNotFoundError:
         return QMDInstallInfo(available=False, error="qmd not found on PATH")
+    except subprocess.TimeoutExpired:
+        return QMDInstallInfo(
+            available=False,
+            binary_path=binary_path,
+            error=f"qmd help timed out after {_QMD_INSPECT_TIMEOUT_SECONDS:g}s",
+        )
 
     help_output = _combine_output(result)
     return QMDInstallInfo(
@@ -96,6 +104,56 @@ def inspect_qmd_install(env_overrides: dict[str, str] | None = None) -> QMDInsta
     )
 
 
+def _collection_names(list_output: str) -> list[str]:
+    names = []
+    for line in list_output.splitlines():
+        if not line.strip():
+            continue
+        names.append(line.split("\t", 1)[0].strip())
+    return names
+
+
+def _inspect_collection_listing(
+    index_name: str,
+    *,
+    env_overrides: dict[str, str] | None = None,
+    timeout: float | None = _QMD_INSPECT_TIMEOUT_SECONDS,
+) -> tuple[list[str] | None, str, str | None]:
+    try:
+        list_result = _run_qmd(
+            ["--index", index_name, "collection", "list"],
+            env_overrides=env_overrides,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return None, "", "qmd not found on PATH"
+    except subprocess.TimeoutExpired:
+        return None, "", f"qmd collection list timed out after {timeout:g}s"
+
+    list_output = _combine_output(list_result)
+    if list_result.returncode != 0:
+        return None, list_output, list_output or "qmd collection list failed"
+
+    return _collection_names(list_output), list_output, None
+
+
+def qmd_collection_exists(
+    index_name: str,
+    collection_name: str,
+    *,
+    env_overrides: dict[str, str] | None = None,
+    timeout: float | None = _QMD_INSPECT_TIMEOUT_SECONDS,
+) -> tuple[bool, str, str | None]:
+    names, raw_output, error = _inspect_collection_listing(
+        index_name,
+        env_overrides=env_overrides,
+        timeout=timeout,
+    )
+    if names is None:
+        return False, raw_output, error
+    return collection_name in names, raw_output, None
+
+
 def inspect_qmd_index(
     index_name: str,
     collection_name: str,
@@ -105,23 +163,31 @@ def inspect_qmd_index(
     """Inspect whether an OM-managed QMD index and collection are ready."""
     info = QMDIndexInfo(index_name=index_name, collection_name=collection_name)
 
-    try:
-        list_result = _run_qmd(["--index", index_name, "collection", "list"], env_overrides=env_overrides)
-    except FileNotFoundError:
-        info.error = "qmd not found on PATH"
+    collection_exists, list_output, error = qmd_collection_exists(
+        index_name,
+        collection_name,
+        env_overrides=env_overrides,
+    )
+    if error:
+        info.error = error
+        info.raw_output = list_output
         return info
 
-    list_output = _combine_output(list_result)
-    if list_result.returncode != 0 and "No collections found" not in list_output:
-        info.error = list_output or "qmd collection list failed"
-        return info
-
-    info.collection_exists = collection_name in list_output
+    info.collection_exists = collection_exists
     if not info.collection_exists:
         info.raw_output = list_output
         return info
 
-    status_result = _run_qmd(["--index", index_name, "status"], env_overrides=env_overrides)
+    try:
+        status_result = _run_qmd(
+            ["--index", index_name, "status"],
+            env_overrides=env_overrides,
+            timeout=_QMD_INSPECT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        info.error = f"qmd status timed out after {_QMD_INSPECT_TIMEOUT_SECONDS:g}s"
+        return info
+
     status_output = _combine_output(status_result)
     info.raw_output = status_output
     if status_result.returncode != 0:
@@ -173,6 +239,7 @@ class QMDBackend:
         self._index_name = index_name
         self._no_rerank = no_rerank
         self._model_env = model_env or {}
+        self._collection_ready: bool | None = None
         self._supports_no_rerank: bool | None = None
 
     def index(self, documents: list[Document]) -> None:
@@ -184,9 +251,9 @@ class QMDBackend:
 
         manifest: dict[str, dict[str, object]] = {}
         for doc in documents:
-            safe_name = doc.doc_id.replace(":", "_").replace("/", "_")
-            (self._docs_dir / f"{safe_name}.md").write_text(doc.content)
-            manifest[f"{safe_name}.md"] = {
+            filename = self._filename_for_doc_id(doc.doc_id)
+            (self._docs_dir / filename).write_text(doc.content)
+            manifest[filename] = {
                 "doc_id": doc.doc_id,
                 "source": doc.source.value,
                 "heading": doc.heading,
@@ -266,8 +333,17 @@ class QMDBackend:
         return results
 
     def is_ready(self) -> bool:
-        status = inspect_qmd_index(self._index_name, self.COLLECTION_NAME, env_overrides=self._model_env)
-        return status.collection_exists
+        if self._collection_ready is not None:
+            return self._collection_ready
+
+        collection_exists, _, _ = qmd_collection_exists(
+            self._index_name,
+            self.COLLECTION_NAME,
+            env_overrides=self._model_env,
+            timeout=_QMD_INSPECT_TIMEOUT_SECONDS,
+        )
+        self._collection_ready = collection_exists
+        return collection_exists
 
     def _ensure_collection(self) -> None:
         if self.is_ready():
@@ -287,13 +363,14 @@ class QMDBackend:
             env_overrides=self._model_env,
             check=True,
         )
+        self._collection_ready = True
 
     def _with_index(self, args: list[str]) -> list[str]:
         return ["--index", self._index_name, *args]
 
     def _can_use_no_rerank(self) -> bool:
         if self._supports_no_rerank is None:
-            install = inspect_qmd_install(env_overrides=self._model_env)
+            install = inspect_qmd_install()
             self._supports_no_rerank = install.supports_no_rerank
         return self._supports_no_rerank
 
@@ -308,7 +385,19 @@ class QMDBackend:
 
     def _fallback_doc_id(self, filename: str) -> str:
         stem = filename.removesuffix(".md") if filename else ""
-        return stem.replace("_", ":", 1) if stem else ""
+        if not stem:
+            return ""
+
+        padding = "=" * (-len(stem) % 4)
+        try:
+            return base64.urlsafe_b64decode((stem + padding).encode()).decode()
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            # Best-effort compatibility for pre-round-trip-safe filenames.
+            return stem.replace("_", ":", 1)
+
+    def _filename_for_doc_id(self, doc_id: str) -> str:
+        encoded = base64.urlsafe_b64encode(doc_id.encode()).decode().rstrip("=")
+        return f"{encoded}.md"
 
     def _source_from_manifest_or_docid(
         self,

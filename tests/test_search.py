@@ -286,6 +286,14 @@ class TestGetBackend:
 class TestQMDBackend:
     def test_query_uses_index_and_no_rerank(self, tmp_path, monkeypatch):
         calls = []
+        backend = QMDBackend(
+            tmp_path,
+            mode="query",
+            index_name="om-review",
+            no_rerank=True,
+            model_env={"QMD_EMBED_MODEL": "embed-model"},
+        )
+        encoded_filename = backend._filename_for_doc_id("obs:2026-02-10")
 
         class Result:
             def __init__(self, returncode=0, stdout="", stderr=""):
@@ -315,7 +323,7 @@ class TestQMDBackend:
                         [
                             {
                                 "docid": "#abc123",
-                                "file": "qmd://observational-memory/obs_2026-02-10.md",
+                                "file": f"qmd://observational-memory/{encoded_filename}",
                                 "title": "## 2026-02-10",
                                 "snippet": "launchd migration",
                                 "line": 12,
@@ -327,13 +335,6 @@ class TestQMDBackend:
 
         monkeypatch.setattr("subprocess.run", fake_run)
 
-        backend = QMDBackend(
-            tmp_path,
-            mode="query",
-            index_name="om-review",
-            no_rerank=True,
-            model_env={"QMD_EMBED_MODEL": "embed-model"},
-        )
         results = backend.search("launchd")
 
         assert len(results) == 1
@@ -345,13 +346,15 @@ class TestQMDBackend:
         assert query_call[1]["env"]["QMD_EMBED_MODEL"] == "embed-model"
 
     def test_search_uses_manifest_metadata(self, tmp_path, monkeypatch):
+        backend = QMDBackend(tmp_path)
         docs_dir = tmp_path / ".qmd-docs"
         docs_dir.mkdir(parents=True)
-        (docs_dir / "amem_project_MEMORY.md").write_text("stored content")
+        encoded_filename = backend._filename_for_doc_id("amem:project/MEMORY")
+        (docs_dir / encoded_filename).write_text("stored content")
         (docs_dir / "manifest.json").write_text(
             json.dumps(
                 {
-                    "amem_project_MEMORY.md": {
+                    encoded_filename: {
                         "doc_id": "amem:project/MEMORY",
                         "source": "auto_memory",
                         "heading": "### project: Memory",
@@ -386,7 +389,7 @@ class TestQMDBackend:
                         [
                             {
                                 "docid": "#mem001",
-                                "file": "qmd://observational-memory/amem_project_MEMORY.md",
+                                "file": f"qmd://observational-memory/{encoded_filename}",
                                 "title": "Memory",
                                 "snippet": "snippet",
                                 "line": 7,
@@ -398,7 +401,6 @@ class TestQMDBackend:
 
         monkeypatch.setattr("subprocess.run", fake_run)
 
-        backend = QMDBackend(tmp_path)
         results = backend.search("memory")
 
         assert len(results) == 1
@@ -408,6 +410,20 @@ class TestQMDBackend:
         assert results[0].document.content == "stored content"
         assert results[0].document.metadata["file_path"] == "/tmp/project/MEMORY.md"
         assert results[0].document.metadata["line"] == 7
+
+    def test_search_returns_empty_when_qmd_missing(self, tmp_path, monkeypatch):
+        def fake_run(args, **kwargs):
+            raise FileNotFoundError
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        backend = QMDBackend(tmp_path)
+        assert backend.search("memory") == []
+
+    def test_legacy_fallback_doc_id_best_effort(self, tmp_path):
+        backend = QMDBackend(tmp_path)
+        assert backend._fallback_doc_id("obs_2026-02-10.md") == "obs:2026-02-10"
+        assert backend._fallback_doc_id(backend._filename_for_doc_id("amem:project/MEMORY")) == "amem:project/MEMORY"
 
 
 class TestQMDInspection:
@@ -461,6 +477,47 @@ class TestQMDInspection:
             ),
             error=None,
         )
+
+    def test_inspect_qmd_index_does_not_match_collection_substrings(self, monkeypatch):
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(args, **kwargs):
+            if args == ["qmd", "--index", "om-review", "collection", "list"]:
+                return Result(stdout="observational-memory-backup\tqmd://observational-memory-backup/\n")
+            raise AssertionError(f"Unexpected subprocess call: {args}")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        info = inspect_qmd_index("om-review", "observational-memory")
+
+        assert info.collection_exists is False
+        assert info.error is None
+        assert info.raw_output == "observational-memory-backup\tqmd://observational-memory-backup/"
+
+    def test_is_ready_only_checks_collection_listing(self, tmp_path, monkeypatch):
+        calls = []
+
+        class Result:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if args == ["qmd", "--index", "om-review", "collection", "list"]:
+                return Result(stdout="observational-memory\tqmd://observational-memory/\n")
+            raise AssertionError(f"Unexpected subprocess call: {args}")
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        backend = QMDBackend(tmp_path, index_name="om-review")
+        assert backend.is_ready() is True
+        assert calls == [["qmd", "--index", "om-review", "collection", "list"]]
 
 
 # --- Reindex Tests ---
