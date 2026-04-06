@@ -47,6 +47,19 @@ That means `om` benefits automatically from upstream bug fixes after users upgra
 
 The current integration is good enough for "optional backend" support, but not yet good enough to make QMD 2.1 feel like a first-class `om` feature.
 
+## Status
+
+Completed in the merged first slice:
+
+- dedicated QMD index isolation and env/config support
+- optional `--no-rerank` handling for hybrid search
+- `om status` / `om doctor` QMD visibility
+- README updates for current QMD 2.1 installation and setup
+
+Current next slice:
+
+- Phase 4 maintainer benchmarking using a repo-local OM-shaped corpus plus `qmd bench`
+
 ## What Is Actually Useful for `om`
 
 ### 1. `--no-rerank`
@@ -217,12 +230,14 @@ Turn search backend decisions into measured tradeoffs.
 1. Add a maintainer fixture, for example:
 
 - `tests/fixtures/qmd-bench-memory.json`
+- `tests/fixtures/qmd-bench-corpus/`
 
 2. Add a short maintainer workflow doc or Make target for:
 
 - rebuilding the `om` QMD index
 - running `qmd bench`
 - comparing BM25 vs hybrid vs hybrid-no-rerank
+- keeping the benchmark on a dedicated repo-local QMD index and collection
 
 ### Query examples to include
 
@@ -310,7 +325,7 @@ Update `README.md` to reflect the current QMD path:
 | `README.md` | QMD 2.1 install/tuning docs |
 | `tests/test_search.py` | Backend config and result parsing coverage |
 | `tests/test_cli_doctor.py` | QMD doctor checks |
-| `tests/fixtures/` | Optional benchmark fixture |
+| `tests/fixtures/` | Benchmark corpus and `qmd bench` fixture |
 
 ## Verification
 

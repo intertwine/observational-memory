@@ -19,6 +19,7 @@ make check          # lint + test
 make test           # tests only
 make lint           # linter only
 make format         # auto-format
+make qmd-bench      # repo-local QMD 2.1 benchmark fixture
 make brew-formula   # generate Homebrew formula from current PyPI release
 make brew-check     # sync into active tapped checkout and audit the Homebrew formula
 
@@ -28,6 +29,43 @@ uv run pytest
 uv run pytest tests/test_transcripts.py
 uv run pytest -v
 ```
+
+## QMD Benchmarking
+
+QMD 2.1 adds `qmd bench`, and this repo now ships a small OM-shaped benchmark corpus so maintainers can compare retrieval modes without depending on a live `~/.local/share/observational-memory` store.
+
+```bash
+# Rebuild the dedicated benchmark collection from the repo fixture corpus
+make qmd-bench-setup
+
+# Build embeddings for vector / hybrid evaluation
+make qmd-bench-embed
+
+# Run the benchmark fixture with human-readable output
+make qmd-bench
+
+# Capture machine-readable results
+make qmd-bench-json > /tmp/om-qmd-bench.json
+```
+
+Default benchmark settings:
+
+- index: `om-bench`
+- collection: `om-bench-memory`
+- corpus: `tests/fixtures/qmd-bench-corpus/`
+- fixture: `tests/fixtures/qmd-bench-memory.json`
+
+Override them if you need to isolate a run:
+
+```bash
+make qmd-bench QMD_BENCH_INDEX=om-bench-alt
+```
+
+Important maintainer rules:
+
+- Keep the corpus repo-local and reviewable; do not point the fixture at a personal OM memory directory.
+- Keep `expected_files` paths in the fixture relative to the corpus root so they match QMD's benchmark expectations.
+- If you change the corpus or fixture, update `tests/test_qmd_bench_fixture.py` expectations in the same PR.
 
 ## Codex Integration Model
 
@@ -149,10 +187,11 @@ observational-memory/
     ├── test_cli_context.py           # Context injection tests
     ├── test_cli_observe.py           # Observe CLI routing tests
     ├── test_cli_version.py           # Root CLI flag tests
+    ├── test_qmd_bench_fixture.py     # QMD benchmark fixture integrity checks
     ├── test_transcripts.py           # Transcript parser tests
     ├── test_observe.py               # Observer tests
     ├── test_reflect.py               # Reflector tests
     ├── test_search.py                # Search module tests
     ├── test_auto_memory.py           # Auto-memory scanner tests
-    └── fixtures/                     # Sample transcripts
+    └── fixtures/                     # Sample transcripts + QMD benchmark corpus
 ```
