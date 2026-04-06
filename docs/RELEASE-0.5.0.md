@@ -84,6 +84,8 @@ make publish
 
 After the PyPI publish succeeds, tag the same commit and push the tag:
 
+If you publish from this branch before merge, tag this branch tip. If you merge first, tag the release commit on `main` instead of the branch tip.
+
 ```bash
 git tag v0.5.0
 git push origin codex/om-0.5.0-release
@@ -104,7 +106,7 @@ v0.5.0
 
 Suggested release notes:
 
-```markdown
+````markdown
 ## Highlights
 
 - Upgraded OM's QMD integration for QMD 2.1 with dedicated index isolation, QMD-specific config knobs, and richer search observability.
@@ -126,7 +128,7 @@ PyPI / uv tool:
 ```bash
 uv tool upgrade --reinstall observational-memory==0.5.0
 ```
-```
+````
 
 ## Post-Release Checks
 
