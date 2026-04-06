@@ -78,10 +78,26 @@ class BM25Backend:
             reverse=True,
         )
 
+        positive_scored = [(score, doc) for score, doc in scored if score > 0]
+        if positive_scored:
+            return [
+                SearchResult(document=doc, score=float(score), rank=rank)
+                for rank, (score, doc) in enumerate(positive_scored[:limit], start=1)
+            ]
+
+        # rank-bm25 can assign zero IDF to terms that appear in half the corpus,
+        # which makes obviously matching docs score 0. Fall back to token overlap
+        # only when BM25 produced no positive results at all.
+        overlap_scored = []
+        query_terms = set(tokenized_query)
+        for doc, doc_tokens in zip(self._documents, self._tokenized_corpus):
+            overlap = sum(1 for token in doc_tokens if token in query_terms)
+            if overlap > 0:
+                overlap_scored.append((float(overlap), doc))
+
+        overlap_scored.sort(key=lambda x: x[0], reverse=True)
         results = []
-        for rank, (score, doc) in enumerate(scored[:limit], start=1):
-            if score <= 0:
-                break
+        for rank, (score, doc) in enumerate(overlap_scored[:limit], start=1):
             results.append(SearchResult(document=doc, score=float(score), rank=rank))
         return results
 

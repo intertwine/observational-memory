@@ -420,7 +420,9 @@ QMD search output:
 
 - `qmd` uses keyword search only and does not require embeddings.
 - `qmd-hybrid` uses BM25 + vector search and works best after `qmd --index observational-memory embed`.
+- The first `qmd embed` run downloads QMD's local embedding model, so expect an initial one-time setup cost.
 - `OM_QMD_NO_RERANK=1` keeps hybrid recall while skipping the slowest reranking step on QMD `>= 2.1.0`.
+- In `om`, `OM_QMD_NO_RERANK=1` also avoids QMD's plain-string expansion path, which keeps fast hybrid lookups from pulling larger generation models on first use.
 - `om status` and `om doctor` will show whether QMD is installed, indexed, and embedded.
 - `om search --json` includes `source_path`, `source_line`, `qmd_file`, `qmd_docid`, and `qmd_line` when available.
 - `om search --raw-qmd` passes through native QMD CLI output and terminal links for advanced users. It only works with `qmd` and `qmd-hybrid`, and it cannot be combined with `--json`.
@@ -431,6 +433,7 @@ QMD troubleshooting:
 - If `om doctor` says QMD is missing, install QMD first and make sure `qmd` is on your `PATH`.
 - If `qmd-hybrid` returns only lexical-quality results, rebuild the OM collection and run `qmd --index observational-memory embed`.
 - If `OM_QMD_NO_RERANK=1` appears to do nothing, run `om status` or `om doctor`; older QMD installs do not advertise `--no-rerank`.
+- If the first plain `qmd-hybrid` query feels slow, QMD may be downloading its local rerank or expansion models; use `OM_QMD_NO_RERANK=1` for lower-latency interactive lookups.
 - If `om search --raw-qmd` errors, confirm `OM_SEARCH_BACKEND` is `qmd` or `qmd-hybrid`.
 - If maintainer benchmark commands fail at `make qmd-bench-preflight`, your local QMD install is older than the `qmd bench` feature and should be upgraded before release validation.
 

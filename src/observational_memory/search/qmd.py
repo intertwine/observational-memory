@@ -107,9 +107,17 @@ def inspect_qmd_install(env_overrides: dict[str, str] | None = None) -> QMDInsta
 def _collection_names(list_output: str) -> list[str]:
     names = []
     for line in list_output.splitlines():
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped:
             continue
-        names.append(line.split("\t", 1)[0].strip())
+        if "\t" in line:
+            names.append(line.split("\t", 1)[0].strip())
+            continue
+        if line[:1].isspace() or stripped.startswith("Collections ("):
+            continue
+        match = re.match(r"(.+?)\s+\(qmd://[^)]+\)$", stripped)
+        if match:
+            names.append(match.group(1).strip())
     return names
 
 
@@ -338,10 +346,14 @@ class QMDBackend:
         return result.stdout, result.stderr, result.returncode
 
     def _search_command(self, query: str, *, limit: int, json_output: bool) -> list[str]:
+        query_arg = query
+        if self._mode == "query" and self._no_rerank and self._can_use_no_rerank():
+            query_arg = self._structured_no_rerank_query(query)
+
         command = self._with_index(
             [
                 self._mode,
-                query,
+                query_arg,
                 "-c",
                 self.COLLECTION_NAME,
                 "-n",
@@ -403,12 +415,27 @@ class QMDBackend:
             raw = json.loads(self._manifest_path.read_text())
         except json.JSONDecodeError:
             return {}
-        return raw if isinstance(raw, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+
+        manifest: dict[str, dict[str, object]] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            manifest[key] = value
+            manifest.setdefault(key.lower(), value)
+        return manifest
 
     def _fallback_doc_id(self, filename: str) -> str:
         stem = filename.removesuffix(".md") if filename else ""
         if not stem:
             return ""
+
+        if len(stem) % 2 == 0 and re.fullmatch(r"[0-9a-f]+", stem):
+            try:
+                return bytes.fromhex(stem).decode()
+            except ValueError:
+                pass
 
         padding = "=" * (-len(stem) % 4)
         try:
@@ -418,8 +445,13 @@ class QMDBackend:
             return stem.replace("_", ":", 1)
 
     def _filename_for_doc_id(self, doc_id: str) -> str:
-        encoded = base64.urlsafe_b64encode(doc_id.encode()).decode().rstrip("=")
-        return f"{encoded}.md"
+        # Keep filenames lowercase-safe because qmd:// result URLs may normalize paths.
+        return f"{doc_id.encode().hex()}.md"
+
+    def _structured_no_rerank_query(self, query: str) -> str:
+        # Keep typed query lines single-line so QMD stays on the lightweight lex+vec path.
+        normalized_query = " ".join(query.split())
+        return f"lex: {normalized_query}\nvec: {normalized_query}"
 
     def _source_from_manifest_or_docid(
         self,

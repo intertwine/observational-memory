@@ -87,9 +87,10 @@ OM_SEARCH_BACKEND=qmd-hybrid om search "launchd" --raw-qmd
 Confirm:
 
 - `om status` and `om doctor` agree about install health, collection readiness, and embedding state.
+- The first `qmd embed` pass may download QMD's local embedding model; treat that as expected first-run setup, not an OM regression.
 - `--raw-qmd` preserves native QMD output without OM reindex banners mixed into stdout.
 - `--json` exposes `source_path`, `source_line`, `qmd_file`, `qmd_docid`, and `qmd_line` when available.
-- `OM_QMD_NO_RERANK=1` is only reported as active when the installed QMD actually supports it.
+- `OM_QMD_NO_RERANK=1` is only reported as active when the installed QMD actually supports it, and the no-rerank path should stay on the fast typed lex+vec query flow.
 
 ## Codex Integration Model
 
