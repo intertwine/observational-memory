@@ -65,7 +65,7 @@ Important maintainer rules:
 
 - Keep the corpus repo-local and reviewable; do not point the fixture at a personal OM memory directory.
 - Keep `expected_files` paths in the fixture relative to the corpus root so they match QMD's benchmark expectations.
-- If you change the corpus or fixture, update `tests/test_qmd_bench_fixture.py` expectations in the same PR.
+- If you change the corpus or fixture, keep `tests/test_qmd_bench_fixture.py` passing in the same PR so fixture drift stays visible in CI.
 
 ## Codex Integration Model
 

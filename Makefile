@@ -42,6 +42,7 @@ help:
 	@$(ECHO) "$(YELLOW)Benchmarking:$(NC)"
 	@$(ECHO) "  make qmd-bench-setup - Rebuild the dedicated repo-local QMD benchmark collection"
 	@$(ECHO) "  make qmd-bench-embed - Build embeddings for the dedicated QMD benchmark index"
+	@$(ECHO) "  make qmd-bench-preflight - Check that qmd and the benchmark fixture are ready"
 	@$(ECHO) "  make qmd-bench       - Run the QMD benchmark fixture"
 	@$(ECHO) "  make qmd-bench-json  - Run the QMD benchmark fixture with --json output"
 	@$(ECHO) ""
@@ -179,6 +180,8 @@ qmd-bench-preflight:
 		$(ECHO) "$(RED)Error: benchmark fixture not found at $(QMD_BENCH_FIXTURE)$(NC)"; \
 		exit 1; \
 	fi
+	@# QMD does not currently expose a stable machine-readable version command, so use
+	@# bench help text as a capability probe for the 2.1-era subcommand before setup/embed.
 	@if ! qmd --help 2>/dev/null | grep -Fq "qmd bench"; then \
 		$(ECHO) "$(RED)Error: installed qmd does not support 'qmd bench'$(NC)"; \
 		$(ECHO) "Upgrade to QMD >= 2.1.0 first."; \

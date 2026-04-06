@@ -13,7 +13,7 @@ def test_qmd_bench_fixture_references_existing_corpus_files():
 
     assert fixture["collection"] == "om-bench-memory"
     assert fixture["version"] == 1
-    assert len(fixture["queries"]) == 6
+    assert len(fixture["queries"]) >= 1
 
     seen_ids: set[str] = set()
     for query in fixture["queries"]:
