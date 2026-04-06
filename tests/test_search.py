@@ -1,5 +1,6 @@
 """Tests for the pluggable search module."""
 
+import base64
 import json
 
 import pytest
@@ -663,6 +664,17 @@ class TestQMDBackend:
     def test_legacy_fallback_doc_id_ignores_non_utf8_hex_stems(self, tmp_path):
         backend = QMDBackend(tmp_path)
         assert backend._fallback_doc_id("80.md") == "80"
+
+    def test_legacy_fallback_doc_id_prefers_legacy_decoder_when_hex_text_is_not_docid(self, tmp_path, monkeypatch):
+        backend = QMDBackend(tmp_path)
+
+        def fake_b64decode(value):
+            assert value == b"666f"
+            return b"obs:legacy"
+
+        monkeypatch.setattr(base64, "urlsafe_b64decode", fake_b64decode)
+
+        assert backend._fallback_doc_id("666f.md") == "obs:legacy"
 
 
 class TestQMDInspection:

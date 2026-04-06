@@ -435,9 +435,12 @@ class QMDBackend:
 
         if len(stem) % 2 == 0 and re.fullmatch(r"[0-9a-f]+", stem):
             try:
-                return bytes.fromhex(stem).decode()
+                decoded = bytes.fromhex(stem).decode()
             except (ValueError, UnicodeDecodeError):
                 pass
+            else:
+                if self._looks_like_doc_id(decoded):
+                    return decoded
 
         padding = "=" * (-len(stem) % 4)
         try:
@@ -454,6 +457,9 @@ class QMDBackend:
         # Keep typed query lines single-line so QMD stays on the lightweight lex+vec path.
         normalized_query = " ".join(query.split())
         return f"lex: {normalized_query}\nvec: {normalized_query}"
+
+    def _looks_like_doc_id(self, value: str) -> bool:
+        return bool(re.match(r"^[a-z][a-z0-9_-]*:", value))
 
     def _source_from_manifest_or_docid(
         self,
