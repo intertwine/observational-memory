@@ -102,9 +102,10 @@ def _call_openai_direct(
     import openai
 
     client = openai.OpenAI()
+    token_limit_arg = _openai_token_limit_arg(model, max_tokens)
     response = client.chat.completions.create(
         model=model,
-        max_tokens=max_tokens,
+        **token_limit_arg,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
@@ -117,6 +118,13 @@ def _call_openai_direct(
         raise RuntimeError("OpenAI response contained empty content.")
     # OpenAI can return non-string content arrays in newer SDK response variants.
     return str(content)
+
+
+def _openai_token_limit_arg(model: str, max_tokens: int) -> dict[str, int]:
+    normalized = model.lower()
+    if normalized.startswith(("gpt-5", "o1", "o3", "o4")):
+        return {"max_completion_tokens": max_tokens}
+    return {"max_tokens": max_tokens}
 
 
 def _extract_anthropic_text(message: object) -> str:
