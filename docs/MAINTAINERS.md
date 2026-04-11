@@ -92,6 +92,28 @@ Confirm:
 - `--json` exposes `source_path`, `source_line`, `qmd_file`, `qmd_docid`, and `qmd_line` when available.
 - `OM_QMD_NO_RERANK=1` is only reported as active when the installed QMD actually supports it, and the no-rerank path should stay on the fast typed lex+vec query flow.
 
+## Post-Merge Machine Green
+
+After upgrading, reinstalling, or pulling a release fix, use this lane to confirm the local box is healthy before returning to normal work:
+
+```bash
+om status
+qmd --index observational-memory status
+qmd --index observational-memory embed
+om doctor --validate-key
+om status
+```
+
+What to look for:
+
+- `om status` should show the resolved observer and reflector models, the active search backend, and whether OM sees launchd or cron as the background scheduler.
+- `qmd --index observational-memory status` should show the collection, embedded vectors, and any pending vectors.
+- `qmd --index observational-memory embed` is the repair step when the index exists but embeddings are missing or stale.
+- `om doctor --validate-key` should pass with zero warnings or failures and confirm the configured provider can make a live call.
+- On macOS, `om doctor` should report LaunchAgents as loaded, with no duplicate cron backstop left behind.
+
+If you changed local Codex or agent skill files as part of the same upgrade, run the relevant skill validator too before declaring the machine green.
+
 ## Codex Integration Model
 
 Codex is now hooks-first, not AGENTS-first.
