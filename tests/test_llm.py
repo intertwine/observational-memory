@@ -1,9 +1,12 @@
 """Tests for LLM provider dispatch."""
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from observational_memory.config import Config
-from observational_memory.llm import compress
+from observational_memory.llm import _call_openai_direct, compress
 
 
 @pytest.fixture(autouse=True)
@@ -112,3 +115,34 @@ def test_adapter_errors_are_wrapped(monkeypatch):
         assert False, "Should have raised"
     except RuntimeError as e:
         assert "provider 'openai'" in str(e).lower()
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_token_arg"),
+    [
+        ("gpt-5.4", "max_completion_tokens"),
+        ("gpt-5.2-chat-latest", "max_completion_tokens"),
+        ("o4-mini", "max_completion_tokens"),
+        ("gpt-4o-mini", "max_tokens"),
+    ],
+)
+def test_openai_token_limit_parameter_matches_model_family(monkeypatch, model, expected_token_arg):
+    request = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            request.update(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+
+    class FakeOpenAI:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+
+    result = _call_openai_direct("sys", "user", model, 8, Config())
+
+    assert result == "ok"
+    assert request[expected_token_arg] == 8
+    unexpected_token_arg = "max_tokens" if expected_token_arg == "max_completion_tokens" else "max_completion_tokens"
+    assert unexpected_token_arg not in request
