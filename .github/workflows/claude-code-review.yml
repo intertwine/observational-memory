@@ -10,6 +10,9 @@ on:
     #   - "src/**/*.js"
     #   - "src/**/*.jsx"
 
+permissions:
+  contents: read
+
 jobs:
   claude-review:
     # Optional: Filter by PR author
@@ -31,10 +34,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+
+      - name: Skip when the review workflow itself changes
+        id: workflow-change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if git diff --name-only "${BASE_SHA}...${HEAD_SHA}" | grep -Fxq ".github/workflows/claude-code-review.yml"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping Claude review because this pull request updates the review workflow itself."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run Claude Code Review
         id: claude-review
+        if: steps.workflow-change.outputs.skip != 'true'
         uses: anthropics/claude-code-action@c7c8889b30499b4e46f4c32b892e43cd364bc2fe # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
