@@ -304,6 +304,31 @@ def test_doctor_warns_when_crontab_times_out(monkeypatch, tmp_path):
     assert "timed out after 5s" in cron_check["detail"]
 
 
+def test_status_warns_when_crontab_permission_denied(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    runner = CliRunner()
+
+    class Result:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["launchctl", "print"]:
+            return Result(returncode=1, stderr="not loaded")
+        if args == ["crontab", "-l"]:
+            raise PermissionError(1, "Operation not permitted", "crontab")
+        raise AssertionError(f"Unexpected subprocess call: {args}")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = runner.invoke(cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "Cron jobs: error ([Errno 1] Operation not permitted: 'crontab')" in result.output
+
+
 def test_status_reports_duplicate_backstops_on_macos(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")

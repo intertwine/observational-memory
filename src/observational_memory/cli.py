@@ -2671,6 +2671,8 @@ def _read_crontab(timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS) -> tuple[st
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         return None, "crontab not available"
+    except OSError as e:
+        return None, str(e)
     except subprocess.TimeoutExpired:
         return None, f"timed out after {timeout}s"
 
@@ -2697,6 +2699,8 @@ def _write_crontab(contents: str, timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECO
         )
     except FileNotFoundError:
         return "crontab not available"
+    except OSError as e:
+        return str(e)
     except subprocess.TimeoutExpired:
         return f"timed out after {timeout}s"
 
