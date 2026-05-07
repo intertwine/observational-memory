@@ -50,6 +50,8 @@ def test_chatgpt_export_uses_compact_memory_seed(tmp_path):
     text = seed.read_text()
     assert "## Stable profile" in text
     assert "## Active context" in text
+    # export_platform_memory refreshes derived startup files from reflections
+    # before building the platform seed.
     assert "Direct, concrete answers" in text
     assert "Recent observations" not in text
     assert (output_dir / "manifest.json").exists()
@@ -103,3 +105,46 @@ def test_export_refuses_memory_root_output(tmp_path):
 
     with pytest.raises(ValueError):
         export_platform_memory(config, target="generic", output_dir=config.memory_dir)
+
+
+def test_export_accepts_claude_alias_for_programmatic_callers(tmp_path):
+    config = _config_with_memory(tmp_path)
+    output_dir = tmp_path / "claude-export"
+
+    result = export_platform_memory(config, target="claude", output_dir=output_dir)
+
+    assert result.target == "claude-managed-agents"
+    assert (output_dir / "memories" / "profile.md").exists()
+
+
+def test_export_rejects_unknown_target(tmp_path):
+    config = _config_with_memory(tmp_path)
+
+    with pytest.raises(ValueError, match="Unknown export target"):
+        export_platform_memory(config, target="not-a-platform", output_dir=tmp_path / "export")
+
+
+def test_export_refuses_output_ancestor_of_memory_dir(tmp_path):
+    config = _config_with_memory(tmp_path)
+
+    with pytest.raises(ValueError):
+        export_platform_memory(config, target="generic", output_dir=tmp_path)
+
+
+def test_claude_export_chunks_large_reflection_with_continuation_headings(tmp_path):
+    config = Config(memory_dir=tmp_path / "memory")
+    config.ensure_memory_dir()
+    config.reflections_path.write_text(
+        "# Reflections\n\n"
+        "## Very Large Section\n" + "\n".join(f"- Item {index}: {'x' * 1000}" for index in range(120)) + "\n"
+    )
+    config.observations_path.write_text("")
+    output_dir = tmp_path / "large-claude-export"
+
+    export_platform_memory(config, target="claude-managed-agents", output_dir=output_dir)
+
+    chunked = sorted((output_dir / "memories" / "reflections").glob("very-large-section-part-*.md"))
+    assert len(chunked) > 1
+    assert chunked[0].read_text().startswith("## Very Large Section")
+    assert chunked[1].read_text().startswith("## Very Large Section (continued, part 2)")
+    assert chunked[1].stat().st_size <= 95_000

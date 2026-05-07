@@ -48,7 +48,8 @@ def export_platform_memory(
     The export is intentionally file-based. Current ChatGPT memory controls are
     user-mediated, and Claude Managed Agents memory stores can be seeded with
     text documents. This keeps OM as the local source of truth while producing
-    reviewable artifacts for platform-native memory systems.
+    reviewable artifacts for platform-native memory systems. It may refresh
+    derived startup files in the memory directory before reading them.
     """
     if config is None:
         config = Config()
@@ -103,6 +104,8 @@ def _guard_memory_dir(memory_dir: Path, output_dir: Path) -> None:
     """Prevent export overwrite operations from targeting the OM memory root."""
     memory_root = memory_dir.expanduser().resolve(strict=False)
     output_root = output_dir.expanduser().resolve(strict=False)
+    # Block the memory root and its ancestors, but allow normal exports under
+    # memory_dir/exports/... because they cannot contain the source memory root.
     if output_root == memory_root or _is_parent(output_root, memory_root):
         raise ValueError(f"Refusing to use {output_dir} because it would contain the OM source memory directory.")
 
@@ -278,7 +281,10 @@ def _write_file(path: Path, content: str, role: str) -> ExportedFile:
 
 
 def _write_chunked_file(path: Path, content: str, role: str) -> list[ExportedFile]:
-    chunks = _chunk_text(content, max_bytes=_MAX_CLAUDE_MEMORY_BYTES)
+    heading = _first_markdown_heading(content)
+    continuation_overhead = len(_continuation_heading(heading, index=999).encode()) if heading else 0
+    max_chunk_bytes = max(1, _MAX_CLAUDE_MEMORY_BYTES - continuation_overhead)
+    chunks = _chunk_text(content, max_bytes=max_chunk_bytes)
     if len(chunks) == 1:
         return [_write_file(path, chunks[0].rstrip() + "\n", role)]
 
@@ -287,7 +293,8 @@ def _write_chunked_file(path: Path, content: str, role: str) -> list[ExportedFil
     stem = path.with_suffix("")
     for index, chunk in enumerate(chunks, 1):
         chunk_path = Path(f"{stem}-part-{index:02d}{suffix}")
-        files.append(_write_file(chunk_path, chunk.rstrip() + "\n", role))
+        chunk_content = _prepend_continuation_heading(chunk, heading, index=index)
+        files.append(_write_file(chunk_path, chunk_content.rstrip() + "\n", role))
     return files
 
 
@@ -318,16 +325,37 @@ def _chunk_text(content: str, *, max_bytes: int) -> list[str]:
 
 def _split_long_line(line: str, *, max_bytes: int) -> list[str]:
     pieces = []
-    current = ""
+    current_chars: list[str] = []
+    current_bytes = 0
     for char in line:
-        if current and len((current + char).encode()) > max_bytes:
-            pieces.append(current)
-            current = char
+        char_bytes = len(char.encode())
+        if current_chars and current_bytes + char_bytes > max_bytes:
+            pieces.append("".join(current_chars))
+            current_chars = [char]
+            current_bytes = char_bytes
         else:
-            current += char
-    if current:
-        pieces.append(current)
+            current_chars.append(char)
+            current_bytes += char_bytes
+    if current_chars:
+        pieces.append("".join(current_chars))
     return pieces
+
+
+def _first_markdown_heading(content: str) -> str | None:
+    for line in content.splitlines():
+        if line.startswith("#"):
+            return line.rstrip()
+    return None
+
+
+def _prepend_continuation_heading(chunk: str, heading: str | None, *, index: int) -> str:
+    if index == 1 or not heading:
+        return chunk
+    return _continuation_heading(heading, index=index) + chunk
+
+
+def _continuation_heading(heading: str, *, index: int) -> str:
+    return f"{heading} (continued, part {index})\n\n"
 
 
 def _split_h2_sections(markdown: str) -> list[tuple[str, str]]:
