@@ -1625,6 +1625,7 @@ def _uninstall_claude_hooks(config: Config) -> None:
 
 _CODEX_OM_MARKER = "<!-- observational-memory -->"
 _CODEX_OM_FALLBACK_VERSION_MARKER = "<!-- observational-memory:codex-hooks-fallback-v1 -->"
+_CODEX_HOOKS_FEATURE_FLAGS = ("hooks", "codex_hooks")
 _CODEX_SESSION_START_MATCHER = "startup|resume"
 _CODEX_SESSION_START_STATUS = "Loading observational memory..."
 _CODEX_STOP_STATUS = "Checkpointing observational memory..."
@@ -1914,11 +1915,11 @@ def _codex_hooks_feature_enabled(config: Config) -> tuple[bool | None, str | Non
     if not isinstance(features, dict):
         return False, None
 
-    return features.get("codex_hooks") is True, None
+    return any(features.get(key) is True for key in _CODEX_HOOKS_FEATURE_FLAGS), None
 
 
 def _enable_codex_hooks_feature(config: Config) -> None:
-    """Ensure ~/.codex/config.toml enables the experimental Codex hooks feature."""
+    """Ensure ~/.codex/config.toml enables Codex hooks across old and new flag names."""
     import re
 
     path = config.codex_config_path
@@ -1930,8 +1931,8 @@ def _enable_codex_hooks_feature(config: Config) -> None:
         lines = []
 
     section_re = re.compile(r"^\s*\[([^\]]+)\]\s*$")
-    key_re = re.compile(r"^\s*codex_hooks\s*=")
-    dotted_key_re = re.compile(r"^\s*features\.codex_hooks\s*=")
+    key_res = {key: re.compile(rf"^\s*{re.escape(key)}\s*=") for key in _CODEX_HOOKS_FEATURE_FLAGS}
+    dotted_key_res = {key: re.compile(rf"^\s*features\.{re.escape(key)}\s*=") for key in _CODEX_HOOKS_FEATURE_FLAGS}
     dotted_features_re = re.compile(r"^\s*features\.[A-Za-z0-9_-]+\s*=")
     changed = False
     feature_start = None
@@ -1955,37 +1956,54 @@ def _enable_codex_hooks_feature(config: Config) -> None:
             break
 
     if feature_start is None and dotted_feature_lines:
+        existing_lines = {}
         for i in dotted_feature_lines:
-            if dotted_key_re.match(lines[i]):
-                if lines[i].strip() != "features.codex_hooks = true":
-                    lines[i] = "features.codex_hooks = true"
+            for key, pattern in dotted_key_res.items():
+                if pattern.match(lines[i]):
+                    existing_lines[key] = i
+
+        insert_at = dotted_feature_lines[-1] + 1
+        for key in _CODEX_HOOKS_FEATURE_FLAGS:
+            desired = f"features.{key} = true"
+            existing_line = existing_lines.get(key)
+            if existing_line is not None:
+                if lines[existing_line].strip() != desired:
+                    lines[existing_line] = desired
                     changed = True
-                break
-        else:
-            insert_at = dotted_feature_lines[-1] + 1
-            lines.insert(insert_at, "features.codex_hooks = true")
-            changed = True
+            else:
+                lines.insert(insert_at, desired)
+                insert_at += 1
+                changed = True
     elif feature_start is None:
         if lines and lines[-1].strip():
             lines.append("")
-        lines.extend(["[features]", "codex_hooks = true"])
+        lines.extend(["[features]", *[f"{key} = true" for key in _CODEX_HOOKS_FEATURE_FLAGS]])
         changed = True
     else:
+        existing_lines = {}
         for j in range(feature_start + 1, feature_end):
             if lines[j].lstrip().startswith("#"):
                 continue
-            if key_re.match(lines[j]):
-                if lines[j].strip() != "codex_hooks = true":
-                    indent = lines[j][: len(lines[j]) - len(lines[j].lstrip())]
-                    lines[j] = f"{indent}codex_hooks = true"
+            for key, pattern in key_res.items():
+                if pattern.match(lines[j]):
+                    existing_lines[key] = j
+
+        insert_at = feature_end
+        while insert_at > feature_start + 1 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+
+        for key in _CODEX_HOOKS_FEATURE_FLAGS:
+            desired = f"{key} = true"
+            existing_line = existing_lines.get(key)
+            if existing_line is not None:
+                if lines[existing_line].strip() != desired:
+                    indent = lines[existing_line][: len(lines[existing_line]) - len(lines[existing_line].lstrip())]
+                    lines[existing_line] = f"{indent}{desired}"
                     changed = True
-                break
-        else:
-            insert_at = feature_end
-            while insert_at > feature_start + 1 and not lines[insert_at - 1].strip():
-                insert_at -= 1
-            lines.insert(insert_at, "codex_hooks = true")
-            changed = True
+            else:
+                lines.insert(insert_at, desired)
+                insert_at += 1
+                changed = True
 
     if changed:
         path.write_text("\n".join(lines).rstrip() + "\n")

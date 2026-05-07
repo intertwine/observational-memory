@@ -125,7 +125,7 @@ All hooks are installed automatically to `~/.claude/settings.json`.
 
 ### Codex CLI integration
 
-**Hooks-first startup:** `om install --codex` enables Codex's experimental hooks feature in `~/.codex/config.toml` (`[features].codex_hooks = true`) and installs a global `SessionStart` hook in `~/.codex/hooks.json`. That hook runs `om context`, which injects compact derived startup files (`profile.md` + `active.md`) directly into the Codex session.
+**Hooks-first startup:** `om install --codex` enables Codex's hooks feature in `~/.codex/config.toml` (`[features].hooks = true`). During Codex's feature-flag rename, it also keeps the legacy `[features].codex_hooks = true` alias enabled for older Codex CLI releases. The installer then adds a global `SessionStart` hook in `~/.codex/hooks.json`. That hook runs `om context`, which injects compact derived startup files (`profile.md` + `active.md`) directly into the Codex session.
 
 **Hooks-first checkpointing:** The installer also adds a global `Stop` hook in `~/.codex/hooks.json`. At turn end, that hook queues a transcript-specific checkpoint for the active Codex transcript, so `om` can observe only the current session instead of rescanning all recent sessions.
 

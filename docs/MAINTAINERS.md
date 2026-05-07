@@ -121,7 +121,7 @@ Codex is now hooks-first, not AGENTS-first.
 Installer-managed user-level files:
 
 - `~/.codex/config.toml`
-  `om install --codex` ensures `[features].codex_hooks = true`.
+  `om install --codex` ensures `[features].hooks = true` and, for older Codex CLI compatibility during the rename, `[features].codex_hooks = true`.
 - `~/.codex/hooks.json`
   OM installs and removes only its own global `SessionStart` and `Stop` hook groups.
 - `~/.codex/AGENTS.md`
@@ -140,7 +140,7 @@ Important maintainer rules:
 
 - Preserve unrelated user or third-party hook groups in `hooks.json`.
 - Do not default to repo-local `.codex/hooks.json`; OM is intentionally user-level shared memory.
-- `om uninstall --codex` should remove OM-managed hooks and the OM AGENTS fallback block, but should not disable `codex_hooks = true`.
+- `om uninstall --codex` should remove OM-managed hooks and the OM AGENTS fallback block, but should not disable `hooks = true` or `codex_hooks = true`.
 - AGENTS should stay conditional fallback only; avoid reintroducing unconditional startup reads when hooks are present.
 
 ## Hermes Integration Model

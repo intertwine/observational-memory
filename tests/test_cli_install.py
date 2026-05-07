@@ -10,7 +10,13 @@ from pathlib import Path
 import click
 from click.testing import CliRunner
 
-from observational_memory.cli import _enable_codex_hooks_feature, _resolve_scheduler_mode, _uninstall_cron, cli
+from observational_memory.cli import (
+    _codex_hooks_feature_enabled,
+    _enable_codex_hooks_feature,
+    _resolve_scheduler_mode,
+    _uninstall_cron,
+    cli,
+)
 from observational_memory.config import Config
 
 
@@ -140,7 +146,11 @@ def test_install_generates_compact_files_and_updates_codex_startup_integration(m
 
     config_toml = (tmp_path / "codex" / "config.toml").read_text()
     assert "[features]" in config_toml
+    assert "hooks = true" in config_toml
     assert "codex_hooks = true" in config_toml
+    parsed_config = tomllib.loads(config_toml)
+    assert parsed_config["features"]["hooks"] is True
+    assert parsed_config["features"]["codex_hooks"] is True
 
     hooks_payload = json.loads((tmp_path / "codex" / "hooks.json").read_text())
     session_start = hooks_payload["hooks"]["SessionStart"]
@@ -234,6 +244,7 @@ def test_install_codex_preserves_existing_config_and_hooks(monkeypatch, tmp_path
     updated_config = config_toml.read_text()
     assert 'model = "gpt-5.4"' in updated_config
     assert "shell_snapshot = true" in updated_config
+    assert "hooks = true" in updated_config
     assert "codex_hooks = true" in updated_config
 
     updated_hooks = json.loads(hooks_path.read_text())
@@ -276,10 +287,12 @@ def test_install_codex_preserves_dotted_features_syntax(monkeypatch, tmp_path):
     updated_config = config_toml.read_text()
     assert "[features]" not in updated_config
     assert "features.shell_snapshot = true" in updated_config
+    assert "features.hooks = true" in updated_config
     assert "features.codex_hooks = true" in updated_config
 
     parsed = tomllib.loads(updated_config)
     assert parsed["features"]["shell_snapshot"] is True
+    assert parsed["features"]["hooks"] is True
     assert parsed["features"]["codex_hooks"] is True
 
 
@@ -287,7 +300,7 @@ def test_enable_codex_hooks_feature_is_idempotent(monkeypatch, tmp_path, capsys)
     _set_base_env(monkeypatch, tmp_path)
     codex_home = tmp_path / "codex"
     config_toml = codex_home / "config.toml"
-    config_toml.write_text("[features]\ncodex_hooks = true\n")
+    config_toml.write_text("[features]\nhooks = true\ncodex_hooks = true\n")
     config = Config(codex_home=codex_home)
 
     original_write_text = Path.write_text
@@ -303,8 +316,37 @@ def test_enable_codex_hooks_feature_is_idempotent(monkeypatch, tmp_path, capsys)
 
     captured = capsys.readouterr()
     assert "already enabled" in captured.out
-    assert config_toml.read_text() == "[features]\ncodex_hooks = true\n"
+    assert config_toml.read_text() == "[features]\nhooks = true\ncodex_hooks = true\n"
     assert config_toml not in write_calls
+
+
+def test_enable_codex_hooks_feature_migrates_legacy_flag(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    codex_home = tmp_path / "codex"
+    config_toml = codex_home / "config.toml"
+    config_toml.write_text("[features]\ncodex_hooks = true\n")
+    config = Config(codex_home=codex_home)
+
+    _enable_codex_hooks_feature(config)
+
+    updated_config = config_toml.read_text()
+    assert "hooks = true" in updated_config
+    assert "codex_hooks = true" in updated_config
+    parsed = tomllib.loads(updated_config)
+    assert parsed["features"]["hooks"] is True
+    assert parsed["features"]["codex_hooks"] is True
+
+
+def test_codex_hooks_feature_enabled_accepts_canonical_and_legacy_flags(tmp_path):
+    canonical_home = tmp_path / "canonical"
+    canonical_home.mkdir()
+    (canonical_home / "config.toml").write_text("[features]\nhooks = true\n")
+    assert _codex_hooks_feature_enabled(Config(codex_home=canonical_home)) == (True, None)
+
+    legacy_home = tmp_path / "legacy"
+    legacy_home.mkdir()
+    (legacy_home / "config.toml").write_text("[features]\ncodex_hooks = true\n")
+    assert _codex_hooks_feature_enabled(Config(codex_home=legacy_home)) == (True, None)
 
 
 def test_resolve_scheduler_mode_auto_uses_launchd_on_macos():

@@ -132,6 +132,25 @@ def test_doctor_codex_startup_warns_when_only_agents_fallback_present(monkeypatc
     assert agents_check["status"] == "PASS"
 
 
+def test_doctor_codex_hooks_feature_accepts_canonical_flag(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    runner = CliRunner()
+
+    codex_home = tmp_path / "codex"
+    (codex_home / "config.toml").write_text("[features]\nhooks = true\n")
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(result.output)
+    feature_check = _get_check(data, "Codex hooks feature")
+    assert feature_check is not None
+    assert feature_check["status"] == "PASS"
+
+
 def test_doctor_codex_startup_passes_with_hooks_enabled(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
