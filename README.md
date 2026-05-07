@@ -12,6 +12,7 @@ Observational Memory captures what your agents learn, distills it into local mar
 - Shared memory across Claude Code, Codex, Cowork, and Hermes
 - Automatic capture for Claude/Codex/Cowork, plus Hermes session ingestion
 - Plain markdown memory you can inspect, back up, and search
+- Reviewed export bundles for ChatGPT Memory and Claude Managed Agents memory stores
 - Fast install with `uv tool install observational-memory` and `om install`
 
 **Great fit if you:**
@@ -76,6 +77,22 @@ om doctor
 That's it. Your agents now share persistent memory across sessions — plain markdown you can search and inspect.
 If it saves you repeated onboarding time, a GitHub star helps more people discover it.
 
+### Export to platform-native memory
+
+`om` remains local-first, but it can generate reviewed seed bundles for hosted memory systems:
+
+```bash
+# Concise seed to paste/upload into ChatGPT or a ChatGPT project
+om export --target chatgpt
+
+# Small focused files ready to seed Claude Managed Agents memory stores
+om export --target claude-managed-agents
+```
+
+ChatGPT Memory is user-controlled through saved memories, reference chat history, project memory, files, connected apps, and proactive features like Pulse; there is not a general developer write API for saved ChatGPT memories. The ChatGPT export is therefore a concise seed for the user to review and intentionally import.
+
+Claude Managed Agents memory stores are file/document based, can be attached read-only or read-write, and are the substrate that Anthropic's dreaming research preview refines between sessions. The Claude export writes small, focused markdown files plus a manifest so the bundle can be seeded into a memory store without making OM write directly into platform memory.
+
 ---
 
 ## Why People Install It
@@ -99,6 +116,7 @@ Claude Code, Codex, and Cowork feed the same local memory, start from compact co
 | **Observations**        | Per session + periodic checkpoints (~15 min default) | 7 days       | ~2K tokens/day      | Timestamped, prioritized notes             |
 | **Reflections**         | Daily                                                | Indefinite   | 200–600 lines total | Durable long-term memory                   |
 | **Startup profile/act** | Derived on install + observe/reflect                 | Derived      | small startup slice | Compact default context for session start  |
+| **Platform exports**    | Manual via `om export`                               | Generated    | Target-specific     | Reviewed ChatGPT/Claude seed bundles       |
 
 > Adapted from [Mastra's Observational Memory](https://mastra.ai/docs/memory/observational-memory) pattern. See the [OpenClaw version](https://github.com/intertwine/openclaw-observational-memory) for the original.
 
@@ -278,6 +296,11 @@ om search "current projects" --limit 5
 om search "backfill" --json
 om search "launchd" --raw-qmd       # native qmd output / links (QMD backends only)
 om search "preferences" --reindex   # rebuild index before searching
+
+# Export platform-native memory seed bundles
+om export --target chatgpt
+om export --target claude-managed-agents --output ./om-claude-memory
+om export --target generic --include-observations
 
 # Backfill all historical transcripts
 om backfill --source claude

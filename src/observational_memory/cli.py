@@ -487,6 +487,54 @@ def context(ctx: click.Context) -> None:
         click.echo(json_mod.dumps(output))
 
 
+@cli.command(name="export")
+@click.option(
+    "--target",
+    type=click.Choice(["generic", "chatgpt", "claude-managed-agents"]),
+    default="generic",
+    show_default=True,
+    help="Memory platform bundle to generate.",
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    help="Output directory. Defaults to a timestamped directory under the OM memory dir.",
+)
+@click.option(
+    "--include-observations",
+    is_flag=True,
+    help="Include recent raw observations. Off by default because they are more transient.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace a non-empty output directory.")
+@click.pass_context
+def export_cmd(
+    ctx: click.Context,
+    target: str,
+    output: Path | None,
+    include_observations: bool,
+    overwrite: bool,
+) -> None:
+    """Export local OM memory as a platform-ready seed bundle."""
+    from .platform_export import export_platform_memory
+
+    config = ctx.obj["config"]
+
+    try:
+        result = export_platform_memory(
+            config,
+            target=target,
+            output_dir=output,
+            include_observations=include_observations,
+            overwrite=overwrite,
+        )
+    except (FileExistsError, ValueError) as e:
+        raise click.ClickException(str(e)) from e
+
+    click.echo(f"Exported {result.target} memory bundle to {result.output_dir}")
+    for exported in result.files:
+        click.echo(f"  {exported.path.relative_to(result.output_dir)}")
+
+
 @cli.command(hidden=True, name="codex-checkpoint")
 @click.pass_context
 def codex_checkpoint(ctx: click.Context) -> None:
