@@ -1,6 +1,6 @@
 [project]
 name = "observational-memory"
-version = "0.5.4"
+version = "0.5.5"
 description = "Cross-agent observational memory and local search for Claude Code, Codex CLI, Cowork, and Hermes Agent"
 readme = "README.md"
 license = "MIT"

@@ -2518,12 +2518,22 @@ def _launchd_service_target(label: str) -> str:
     return f"{_launchd_domain_target()}/{label}"
 
 
+def _targets_include_codex_scheduler(targets: str) -> bool:
+    """Return whether a target selection should manage the Codex observer backstop."""
+    return targets in ("codex", "both", "all")
+
+
+def _targets_include_shared_scheduler(targets: str) -> bool:
+    """Return whether a target selection should manage shared auto-memory/reflect jobs."""
+    return targets in ("claude", "codex", "both", "all")
+
+
 def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None) -> list[dict[str, object]]:
     """Return OM-managed launchd job specs for the selected install targets."""
     resolved_om_path = str(Path(om_path).expanduser()) if om_path else None
     specs: list[dict[str, object]] = []
 
-    if targets in ("codex", "both", "all"):
+    if _targets_include_codex_scheduler(targets):
         specs.append(
             {
                 "key": "codex",
@@ -2537,30 +2547,31 @@ def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None)
             }
         )
 
-    specs.extend(
-        [
-            {
-                "key": "claude-memory",
-                "label": config.AUTO_MEMORY_LAUNCHD_LABEL,
-                "plist_path": config.auto_memory_launchd_plist_path,
-                "argv": [resolved_om_path, "observe", "--source", "claude-memory"] if resolved_om_path else [],
-                "run_at_load": True,
-                "start_interval": 3600,
-                "stdout_path": config.auto_memory_launchd_stdout_path,
-                "stderr_path": config.auto_memory_launchd_stderr_path,
-            },
-            {
-                "key": "reflect",
-                "label": config.REFLECT_LAUNCHD_LABEL,
-                "plist_path": config.reflect_launchd_plist_path,
-                "argv": [resolved_om_path, "reflect"] if resolved_om_path else [],
-                "run_at_load": False,
-                "start_calendar_interval": {"Hour": 4, "Minute": 0},
-                "stdout_path": config.reflect_launchd_stdout_path,
-                "stderr_path": config.reflect_launchd_stderr_path,
-            },
-        ]
-    )
+    if _targets_include_shared_scheduler(targets):
+        specs.extend(
+            [
+                {
+                    "key": "claude-memory",
+                    "label": config.AUTO_MEMORY_LAUNCHD_LABEL,
+                    "plist_path": config.auto_memory_launchd_plist_path,
+                    "argv": [resolved_om_path, "observe", "--source", "claude-memory"] if resolved_om_path else [],
+                    "run_at_load": True,
+                    "start_interval": 3600,
+                    "stdout_path": config.auto_memory_launchd_stdout_path,
+                    "stderr_path": config.auto_memory_launchd_stderr_path,
+                },
+                {
+                    "key": "reflect",
+                    "label": config.REFLECT_LAUNCHD_LABEL,
+                    "plist_path": config.reflect_launchd_plist_path,
+                    "argv": [resolved_om_path, "reflect"] if resolved_om_path else [],
+                    "run_at_load": False,
+                    "start_calendar_interval": {"Hour": 4, "Minute": 0},
+                    "stdout_path": config.reflect_launchd_stdout_path,
+                    "stderr_path": config.reflect_launchd_stderr_path,
+                },
+            ]
+        )
     return specs
 
 
@@ -2760,8 +2771,10 @@ def _cron_job_key(line: str) -> str | None:
 
 def _cron_job_keys_for_targets(targets: str) -> set[str]:
     """Return the OM cron job keys scoped to one install target selection."""
-    keys = {"claude-memory", "reflect"}
-    if targets in ("codex", "both", "all"):
+    keys: set[str] = set()
+    if _targets_include_shared_scheduler(targets):
+        keys.update({"claude-memory", "reflect"})
+    if _targets_include_codex_scheduler(targets):
         keys.add("codex")
     return keys
 
@@ -2873,12 +2886,17 @@ def _desired_cron_jobs(config: Config, targets: str) -> dict[str, str]:
     else:
         prefix = ""
 
-    jobs = {
-        "claude-memory": f"0 * * * * {prefix}{om_path} observe --source claude-memory 2>/dev/null",
-        "reflect": f"0 4 * * * {prefix}{om_path} reflect 2>/dev/null",
-    }
+    jobs = {}
 
-    if targets in ("codex", "both", "all"):
+    if _targets_include_shared_scheduler(targets):
+        jobs.update(
+            {
+                "claude-memory": f"0 * * * * {prefix}{om_path} observe --source claude-memory 2>/dev/null",
+                "reflect": f"0 4 * * * {prefix}{om_path} reflect 2>/dev/null",
+            }
+        )
+
+    if _targets_include_codex_scheduler(targets):
         codex_interval = _cron_every_minutes(_codex_observer_interval_minutes())
         jobs["codex"] = f"{codex_interval} * * * * {prefix}{om_path} observe --source codex 2>/dev/null"
 

@@ -12,7 +12,10 @@ from click.testing import CliRunner
 
 from observational_memory.cli import (
     _codex_hooks_feature_enabled,
+    _cron_job_keys_for_targets,
+    _desired_cron_jobs,
     _enable_codex_hooks_feature,
+    _launchd_job_specs,
     _resolve_scheduler_mode,
     _uninstall_cron,
     cli,
@@ -209,9 +212,19 @@ def test_install_cowork_copies_valid_plugin(monkeypatch, tmp_path):
     hooks_json = plugin_dir / "hooks" / "hooks.json"
     hooks_payload = json.loads(hooks_json.read_text())
     assert set(hooks_payload["hooks"]) == {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact"}
-    assert json.loads((plugin_dir / "version.json").read_text()) == {"version": "0.5.4"}
+    assert json.loads((plugin_dir / "version.json").read_text()) == {"version": "0.5.5"}
     assert os.access(plugin_dir / "hooks" / "scripts" / "session-start.sh", os.X_OK)
     assert os.access(plugin_dir / "hooks" / "scripts" / "session-end.sh", os.X_OK)
+
+
+def test_cowork_target_does_not_manage_scheduler_jobs(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+
+    assert _launchd_job_specs(config, "cowork", om_path="/tmp/bin/om") == []
+    assert _cron_job_keys_for_targets("cowork") == set()
+    assert _desired_cron_jobs(config, "cowork") == {}
 
 
 def test_install_codex_preserves_existing_config_and_hooks(monkeypatch, tmp_path):
