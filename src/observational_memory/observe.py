@@ -114,6 +114,64 @@ def observe_all_claude(config: Config | None = None, dry_run: bool = False) -> l
     return results
 
 
+def observe_cowork_transcript(
+    transcript_path: Path,
+    config: Config | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Run observer on a specific Cowork audit.jsonl transcript."""
+    from .transcripts.claude import parse_transcript
+
+    if config is None:
+        config = Config()
+
+    cursor = config.load_cursor()
+    cursor_key = str(transcript_path)
+    after_uuid = cursor.get(cursor_key)
+
+    messages = parse_transcript(transcript_path, after_uuid=after_uuid, source="cowork")
+
+    if not messages:
+        return None
+
+    result = run_observer(messages, config, dry_run)
+
+    if result and not dry_run:
+        import json
+
+        last_uuid = None
+        for line in reversed(transcript_path.read_text().splitlines()):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("type") in ("user", "assistant") and entry.get("uuid"):
+                    last_uuid = entry["uuid"]
+                    break
+            except json.JSONDecodeError:
+                continue
+        if last_uuid:
+            cursor[cursor_key] = last_uuid
+            config.save_cursor(cursor)
+
+    return result
+
+
+def observe_all_cowork(config: Config | None = None, dry_run: bool = False) -> list[str]:
+    """Scan all recent Cowork session transcripts and run observer on each."""
+    from .transcripts.cowork import find_recent_transcripts
+
+    if config is None:
+        config = Config()
+
+    results = []
+    for path in find_recent_transcripts(config.cowork_sessions_dir):
+        result = observe_cowork_transcript(path, config, dry_run)
+        if result:
+            results.append(result)
+    return results
+
+
 def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> tuple[list[str], list[str]]:
     """Scan Claude Code auto-memory files and update the search index.
 
@@ -389,6 +447,45 @@ def observe_claude_transcript_backfill(
     if not messages:
         return None
 
+    return _backfill_from_messages(messages, transcript_path, config, chunk_size, dry_run)
+
+
+def observe_cowork_transcript_backfill(
+    transcript_path: Path,
+    config: Config | None = None,
+    chunk_size: int = 200,
+    dry_run: bool = False,
+) -> int | None:
+    """Process a single Cowork audit.jsonl transcript in backfill mode.
+
+    Same logic as :func:`observe_claude_transcript_backfill` but parses
+    with ``source="cowork"``.
+    """
+    from .transcripts.claude import parse_transcript
+
+    if config is None:
+        config = Config()
+
+    cursor = config.load_cursor()
+    cursor_key = str(transcript_path)
+    after_uuid = cursor.get(cursor_key)
+
+    messages = parse_transcript(transcript_path, after_uuid=after_uuid, source="cowork")
+
+    if not messages:
+        return None
+
+    return _backfill_from_messages(messages, transcript_path, config, chunk_size, dry_run)
+
+
+def _backfill_from_messages(
+    messages: list[Message],
+    transcript_path: Path,
+    config: Config,
+    chunk_size: int,
+    dry_run: bool,
+) -> int:
+    """Shared backfill logic: chunk, observe, update cursor."""
     chunks = _chunk_messages(messages, chunk_size)
     total_chars = 0
 
@@ -401,6 +498,8 @@ def observe_claude_transcript_backfill(
         # Update cursor to the last message UUID in the transcript
         import json
 
+        cursor = config.load_cursor()
+        cursor_key = str(transcript_path)
         last_uuid = None
         for line in reversed(transcript_path.read_text().splitlines()):
             if not line.strip():

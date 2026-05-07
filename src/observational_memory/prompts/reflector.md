@@ -37,6 +37,24 @@ Return the **complete updated reflections.md** content.
 - **Key decisions:** [important choices and rationale]
 - **Current state:** [what's happening now]
 
+## Life & Operations
+
+Non-engineering work: tax preparation, financial planning, legal matters,
+system administration, business operations, applications, health, etc.
+
+### [Activity Name]
+- **Status:** [active / paused / completed]
+- **Key details:** [what's happening, important numbers/dates]
+
+## Creative & Professional
+
+Music, art, teaching, presentations, workshops, writing, professional
+development, fellowship applications, etc.
+
+### [Activity Name]
+- **Status:** [active / paused / completed]
+- **Key details:** [what was created, for whom, upcoming dates]
+
 ## Preferences & Opinions
 - 🔴 [strong preference or firm decision]
 - 🟡 [softer preference, might change]
@@ -62,6 +80,14 @@ Return the **complete updated reflections.md** content.
 
 </details>
 ```
+
+## Routing Observations to Sections
+
+- **Active Projects** — software/engineering: repos, PRs, releases, tech stacks, architecture
+- **Life & Operations** — taxes, finances, legal, system admin, business ops, applications, errands
+- **Creative & Professional** — music, art, presentations, workshops, teaching, writing, professional development
+- If an activity spans multiple sections, place it in the one that best captures its primary nature. A presentation *about* a software project goes in Active Projects; a presentation for a music performance goes in Creative & Professional.
+- Don't leave these sections empty. If no observations fit, keep a minimal placeholder or omit the section heading entirely.
 
 ## Operations
 

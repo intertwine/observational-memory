@@ -335,8 +335,11 @@ class TestReflectChunked:
             "# Reflections\n\n*Last updated: now*\n\n## After chunk 2",
         ]
 
-        # Build observations large enough to force 2 chunks
-        big = "- 🔴 10:00 " + "x" * 50000 + "\n\n"
+        # Build observations large enough to force 2 chunks.
+        # Each section must exceed _MAX_INPUT_TOKENS when combined with
+        # system prompt + reflections, but each individual section must fit
+        # in a single chunk so we get exactly 2 calls.
+        big = "- 🔴 10:00 " + "x" * 25000 + "\n\n"
         observations = f"# Observations\n\n## 2026-02-07\n\n{big}## 2026-02-08\n\n{big}"
 
         result = _reflect_chunked("system prompt", "existing reflections", observations, config)
@@ -353,7 +356,7 @@ class TestReflectChunked:
             "# Reflections after 2",
         ]
 
-        big = "- 🔴 10:00 " + "x" * 50000 + "\n\n"
+        big = "- 🔴 10:00 " + "x" * 25000 + "\n\n"
         observations = f"# Observations\n\n## 2026-02-07\n\n{big}## 2026-02-08\n\n{big}"
 
         _reflect_chunked("system prompt", "", observations, config)
@@ -375,7 +378,7 @@ class TestReflectChunked:
             "# Reflections after 2",
         ]
 
-        big = "- 🔴 10:00 " + "x" * 50000 + "\n\n"
+        big = "- 🔴 10:00 " + "x" * 25000 + "\n\n"
         observations = f"# Observations\n\n## 2026-02-07\n\n{big}## 2026-02-08\n\n{big}"
 
         _reflect_chunked("system prompt", "", observations, config, auto_memory="", amem_changed=True)

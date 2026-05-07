@@ -233,6 +233,35 @@ def test_doctor_codex_startup_passes_with_hooks_enabled(monkeypatch, tmp_path):
     assert command_check["status"] == "PASS"
 
 
+def test_doctor_flags_invalid_cowork_hooks_json(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    runner = CliRunner()
+
+    plugin_dir = (
+        tmp_path
+        / "home"
+        / "Library"
+        / "Application Support"
+        / "Claude"
+        / "local-agent-mode-plugins"
+        / "observational-memory"
+    )
+    (plugin_dir / "hooks").mkdir(parents=True)
+    (plugin_dir / "hooks" / "hooks.json").write_text('{"SessionStart": []}\n')
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(result.output)
+    check = _get_check(data, "Cowork hooks.json")
+    assert check is not None
+    assert check["status"] == "FAIL"
+    assert check["detail"] == "missing top-level hooks object"
+
+
 def test_doctor_reports_launchd_and_legacy_cron_on_macos(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OM_LLM_PROVIDER", "openai")

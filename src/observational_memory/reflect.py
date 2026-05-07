@@ -14,7 +14,8 @@ REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
 # Approximate chars-per-token ratio for estimating input size.
 _CHARS_PER_TOKEN = 3.5
 # Maximum input tokens to send in a single reflector call.
-_MAX_INPUT_TOKENS = 30_000
+# Kept conservative to avoid HTTP body size limits on some networks.
+_MAX_INPUT_TOKENS = 12_000
 # max_tokens for reflector output (200-600 lines needs room)
 _REFLECTOR_MAX_OUTPUT_TOKENS = 8192
 

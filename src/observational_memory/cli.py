@@ -13,7 +13,7 @@ import click
 from . import __version__
 from .config import Config
 
-_OBSERVE_SOURCES = ["claude", "codex", "hermes", "claude-memory", "all"]
+_OBSERVE_SOURCES = ["claude", "codex", "hermes", "cowork", "claude-memory", "all"]
 
 
 @click.group()
@@ -42,10 +42,12 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
     from .observe import (
         observe_all_claude,
         observe_all_codex,
+        observe_all_cowork,
         observe_all_hermes,
         observe_auto_memory,
         observe_claude_transcript,
         observe_codex_transcript,
+        observe_cowork_transcript,
         observe_hermes_transcript,
     )
 
@@ -63,11 +65,14 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
             result = observe_codex_transcript(transcript, config, dry_run)
         elif transcript_source == "hermes":
             result = observe_hermes_transcript(transcript, config, dry_run)
+        elif transcript_source == "cowork":
+            result = observe_cowork_transcript(transcript, config, dry_run)
         elif transcript_source == "claude-memory":
             raise click.ClickException("--transcript does not support --source claude-memory.")
         else:
             raise click.ClickException(
-                "Could not detect transcript source. Pass --source claude, --source codex, or --source hermes."
+                "Could not detect transcript source. "
+                "Pass --source claude, --source codex, --source hermes, or --source cowork."
             )
         if result:
             click.echo(f"Observations updated ({len(result)} chars)")
@@ -91,6 +96,10 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
     if source in ("hermes", "all"):
         click.echo("Scanning Hermes sessions...")
         results.extend(observe_all_hermes(config=config, dry_run=dry_run))
+
+    if source in ("cowork", "all"):
+        click.echo("Scanning Cowork sessions...")
+        results.extend(observe_all_cowork(config, dry_run))
 
     if source in ("claude-memory", "all"):
         click.echo("Scanning Claude Code auto-memory files...")
@@ -141,6 +150,12 @@ def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
     except ValueError:
         pass
 
+    try:
+        transcript.relative_to(config.cowork_sessions_dir)
+        return "cowork"
+    except ValueError:
+        pass
+
     return None
 
 
@@ -186,7 +201,7 @@ def _maybe_run_reflector_catchup(config: Config) -> None:
 @cli.command()
 @click.option(
     "--source",
-    type=click.Choice(["claude", "codex", "claude-memory", "all"]),
+    type=click.Choice(["claude", "codex", "cowork", "claude-memory", "all"]),
     default="all",
     help="Which transcripts to process",
 )
@@ -205,10 +220,11 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
     Idempotent: already-processed transcripts are skipped via the cursor.
     Safe to interrupt and resume.
     """
-    from .observe import observe_claude_transcript_backfill
+    from .observe import observe_claude_transcript_backfill, observe_cowork_transcript_backfill
     from .reflect import run_reflector
     from .transcripts.claude import find_all_transcripts
     from .transcripts.codex import find_recent_sessions
+    from .transcripts.cowork import find_all_transcripts as find_all_cowork
 
     config = ctx.obj["config"]
 
@@ -222,6 +238,10 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
     if source in ("codex", "all"):
         for p in find_recent_sessions(config.codex_home):
             all_transcripts.append((p, "codex"))
+
+    if source in ("cowork", "all"):
+        for p in find_all_cowork(config.cowork_sessions_dir):
+            all_transcripts.append((p, "cowork"))
 
     if not all_transcripts:
         click.echo("No transcripts found.")
@@ -268,6 +288,8 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
         try:
             if src == "claude":
                 chars = observe_claude_transcript_backfill(path, config, chunk_size)
+            elif src == "cowork":
+                chars = observe_cowork_transcript_backfill(path, config, chunk_size)
             else:
                 # Codex backfill uses the same approach via observe_all_codex
                 # For now, process Claude transcripts (Codex support can be added)
@@ -796,7 +818,9 @@ def _configure_llm(
 @cli.command()
 @click.option("--claude", "targets", flag_value="claude", help="Install Claude Code hooks")
 @click.option("--codex", "targets", flag_value="codex", help="Install Codex hooks plus AGENTS fallback")
-@click.option("--both", "targets", flag_value="both", default=True, help="Install both (default)")
+@click.option("--cowork", "targets", flag_value="cowork", help="Install Cowork plugin")
+@click.option("--both", "targets", flag_value="both", default=True, help="Install Claude Code + Codex (default)")
+@click.option("--all", "targets", flag_value="all", help="Install all integrations including Cowork")
 @click.option(
     "--scheduler",
     type=click.Choice(_SCHEDULER_MODES, case_sensitive=False),
@@ -876,11 +900,14 @@ def install(
     click.echo(f"Created {config.profile_path}")
     click.echo(f"Created {config.active_path}")
 
-    if targets in ("claude", "both"):
+    if targets in ("claude", "both", "all"):
         _install_claude_hooks(config)
 
-    if targets in ("codex", "both"):
+    if targets in ("codex", "both", "all"):
         _install_codex(config)
+
+    if targets in ("cowork", "all"):
+        _install_cowork_plugin(config)
 
     if scheduler_mode == "launchd":
         try:
@@ -904,18 +931,23 @@ def install(
 @cli.command()
 @click.option("--claude", "targets", flag_value="claude")
 @click.option("--codex", "targets", flag_value="codex")
+@click.option("--cowork", "targets", flag_value="cowork")
 @click.option("--both", "targets", flag_value="both", default=True)
+@click.option("--all", "targets", flag_value="all")
 @click.option("--purge", is_flag=True, help="Also remove memory files")
 @click.pass_context
 def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
     """Remove observational memory hooks and background scheduler jobs."""
     config = ctx.obj["config"]
 
-    if targets in ("claude", "both"):
+    if targets in ("claude", "both", "all"):
         _uninstall_claude_hooks(config)
 
-    if targets in ("codex", "both"):
+    if targets in ("codex", "both", "all"):
         _uninstall_codex(config)
+
+    if targets in ("cowork", "all"):
+        _uninstall_cowork_plugin(config)
 
     _uninstall_launchd(config, targets)
     _uninstall_cron(targets)
@@ -1149,6 +1181,27 @@ def status(ctx: click.Context) -> None:
             click.echo("  Duplicate backstops: launchd and cron are both present")
     else:
         click.echo("  Cron jobs: none")
+
+    # Cowork plugin
+    cowork_plugin_dir = _cowork_plugin_dir(config)
+    if cowork_plugin_dir.exists():
+        click.echo("\nCowork plugin: installed")
+        click.echo(f"  Path: {cowork_plugin_dir}")
+        hooks_json = cowork_plugin_dir / "hooks" / "hooks.json"
+        if hooks_json.exists():
+            valid, detail = _validate_cowork_hooks_json(hooks_json)
+            click.echo(f"  hooks.json: {'valid' if valid else f'invalid ({detail})'}")
+        else:
+            click.echo("  hooks.json: not found")
+    else:
+        click.echo("\nCowork plugin: not installed")
+        click.echo(f"  Expected at: {_cowork_plugin_dir(config)}")
+
+    # Cowork sessions
+    from .transcripts.cowork import find_all_transcripts as find_all_cowork
+
+    cowork_transcripts = find_all_cowork(config.cowork_sessions_dir)
+    click.echo(f"  Sessions: {len(cowork_transcripts)} audit.jsonl file(s) found")
 
     # Auto-memory (Claude Code per-project memory)
     from .transcripts.auto_memory import find_memory_directories
@@ -1442,7 +1495,31 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Codex hook commands valid", "WARN", "skipped (Codex hooks not installed)")
 
-    # 12. Hook paths valid (only check Claude hook commands that look like file paths, not inline shell commands)
+    # 12. Cowork plugin
+    cowork_plugin_dir = _cowork_plugin_dir(config)
+    if cowork_plugin_dir.exists():
+        _check("Cowork plugin", "PASS", str(cowork_plugin_dir))
+        hooks_json = cowork_plugin_dir / "hooks" / "hooks.json"
+        if hooks_json.exists():
+            valid, detail = _validate_cowork_hooks_json(hooks_json)
+            if valid:
+                _check("Cowork hooks.json", "PASS", detail)
+            else:
+                _check("Cowork hooks.json", "FAIL", detail, fix="Run: om install --cowork")
+        else:
+            _check("Cowork hooks.json", "FAIL", "missing", fix="Run: om install --cowork")
+        for script_name in ("session-start.sh", "session-end.sh"):
+            script = cowork_plugin_dir / "hooks" / "scripts" / script_name
+            if script.exists() and os.access(script, os.X_OK):
+                _check(f"Cowork {script_name}", "PASS", "executable")
+            elif script.exists():
+                _check(f"Cowork {script_name}", "WARN", "not executable", fix=f"Run: chmod +x {script}")
+            else:
+                _check(f"Cowork {script_name}", "FAIL", "missing", fix="Run: om install --cowork")
+    else:
+        _check("Cowork plugin", "WARN", "not installed", fix="Run: om install --cowork")
+
+    # 13. Hook paths valid (only check Claude hook commands that look like file paths, not inline shell commands)
     if config.claude_settings_path.exists():
         try:
             settings = json_mod.loads(config.claude_settings_path.read_text())
@@ -1619,6 +1696,70 @@ def _uninstall_claude_hooks(config: Config) -> None:
 
     config.claude_settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     click.echo("Removed Claude Code hooks")
+
+
+# --- Cowork plugin installation ---
+
+_COWORK_PLUGIN_NAME = "observational-memory"
+_COWORK_HOOK_EVENTS = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact")
+
+
+def _cowork_plugin_dir(config: Config) -> Path:
+    return config.cowork_plugins_dir / _COWORK_PLUGIN_NAME
+
+
+def _validate_cowork_hooks_json(path: Path) -> tuple[bool, str]:
+    """Validate enough of the Cowork plugin hook schema for local diagnostics."""
+    import json
+
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        return False, f"invalid JSON: {exc.msg}"
+
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return False, "missing top-level hooks object"
+
+    missing = [event for event in _COWORK_HOOK_EVENTS if not isinstance(hooks.get(event), list)]
+    if missing:
+        return False, f"missing hook events: {', '.join(missing)}"
+
+    return True, f"{len(_COWORK_HOOK_EVENTS)} event(s) configured"
+
+
+def _install_cowork_plugin(config: Config) -> None:
+    """Copy the bundled Cowork plugin to the local-agent-mode-plugins directory."""
+    import shutil
+
+    source_dir = Path(__file__).parent / "cowork_plugin"
+    if not source_dir.exists():
+        click.echo("Warning: bundled Cowork plugin not found in package", err=True)
+        return
+
+    target_dir = _cowork_plugin_dir(config)
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
+
+    # Ensure hook scripts are executable
+    scripts_dir = target_dir / "hooks" / "scripts"
+    if scripts_dir.exists():
+        for script in scripts_dir.glob("*.sh"):
+            script.chmod(script.stat().st_mode | 0o755)
+
+    click.echo(f"Installed Cowork plugin to {target_dir}")
+
+
+def _uninstall_cowork_plugin(config: Config) -> None:
+    """Remove the observational-memory Cowork plugin."""
+    import shutil
+
+    target_dir = _cowork_plugin_dir(config)
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+        click.echo(f"Removed Cowork plugin from {target_dir}")
+    else:
+        click.echo("Cowork plugin not installed, nothing to remove")
 
 
 # --- Codex integration ---
@@ -2382,7 +2523,7 @@ def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None)
     resolved_om_path = str(Path(om_path).expanduser()) if om_path else None
     specs: list[dict[str, object]] = []
 
-    if targets in ("codex", "both"):
+    if targets in ("codex", "both", "all"):
         specs.append(
             {
                 "key": "codex",
@@ -2620,7 +2761,7 @@ def _cron_job_key(line: str) -> str | None:
 def _cron_job_keys_for_targets(targets: str) -> set[str]:
     """Return the OM cron job keys scoped to one install target selection."""
     keys = {"claude-memory", "reflect"}
-    if targets in ("codex", "both"):
+    if targets in ("codex", "both", "all"):
         keys.add("codex")
     return keys
 
@@ -2737,7 +2878,7 @@ def _desired_cron_jobs(config: Config, targets: str) -> dict[str, str]:
         "reflect": f"0 4 * * * {prefix}{om_path} reflect 2>/dev/null",
     }
 
-    if targets in ("codex", "both"):
+    if targets in ("codex", "both", "all"):
         codex_interval = _cron_every_minutes(_codex_observer_interval_minutes())
         jobs["codex"] = f"{codex_interval} * * * * {prefix}{om_path} observe --source codex 2>/dev/null"
 

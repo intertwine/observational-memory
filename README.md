@@ -5,17 +5,17 @@
 [![CI](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/intertwine/observational-memory?style=social)](https://github.com/intertwine/observational-memory/stargazers)
 
-**Give Claude Code, Codex, and Hermes a shared memory that survives every session.**
+**Give Claude Code, Codex, Cowork, and Hermes a shared memory that survives every session.**
 
 Observational Memory captures what your agents learn, distills it into local markdown memory, and restores the right context when a new session starts. Instead of re-explaining your architecture, preferences, and in-flight work, your agents can pick up where they left off.
 
-- Shared memory across Claude Code, Codex, and Hermes
-- Automatic capture for Claude/Codex, plus Hermes session ingestion
+- Shared memory across Claude Code, Codex, Cowork, and Hermes
+- Automatic capture for Claude/Codex/Cowork, plus Hermes session ingestion
 - Plain markdown memory you can inspect, back up, and search
 - Fast install with `uv tool install observational-memory` and `om install`
 
 **Great fit if you:**
-- switch between Claude Code, Codex, or Hermes on the same project
+- switch between Claude Code, Codex, Cowork, or Hermes on the same project
 - hate re-explaining your architecture, workflow, and preferences
 - want memory that stays local and inspectable
 - want something useful in minutes, not another infra project
@@ -32,7 +32,7 @@ om install
 om doctor
 ```
 
-That gives you hooks for Claude Code, hooks-first startup and checkpointing for Codex, local markdown memory in `~/.local/share/observational-memory/`, and built-in search with `om search`. Hermes session ingestion is available through `om observe --source hermes` or by pointing `om observe --transcript` at a Hermes session log.
+That gives you hooks for Claude Code, hooks-first startup and checkpointing for Codex, local markdown memory in `~/.local/share/observational-memory/`, and built-in search with `om search`. Add `om install --cowork` to install the Cowork plugin. Hermes session ingestion is available through `om observe --source hermes` or by pointing `om observe --transcript` at a Hermes session log.
 
 ### Prerequisites
 
@@ -43,6 +43,7 @@ That gives you hooks for Claude Code, hooks-first startup and checkpointing for 
   - Google Vertex AI auth (ADC) for Anthropic on Vertex
   - AWS credentials/profile/role for Anthropic on Bedrock
 - Claude Code and/or Codex CLI installed
+- Claude Cowork optional: `om install --cowork` installs the local plugin
 - Hermes Agent optional: `om` can ingest session logs from `~/.hermes/sessions/*.jsonl`
 
 ### Install options
@@ -60,6 +61,9 @@ brew install intertwine/tap/observational-memory
 
 # Set up hooks, fallback instructions, LLM provider config, and the background scheduler
 om install
+
+# Optional: install the local Cowork plugin
+om install --cowork
 ```
 
 ### Verify
@@ -76,7 +80,7 @@ If it saves you repeated onboarding time, a GitHub star helps more people discov
 
 ## Why People Install It
 
-If you switch between Claude Code, Codex, and Hermes, context gets lost fast. Yesterday's architecture decisions, today's preferences, and the task you were halfway through all disappear into old transcripts, so every new session starts colder than it should.
+If you switch between Claude Code, Codex, Cowork, and Hermes, context gets lost fast. Yesterday's architecture decisions, today's preferences, and the task you were halfway through all disappear into old transcripts, so every new session starts colder than it should.
 
 Observational Memory gives your agents one shared memory in `~/.local/share/observational-memory/`. It keeps fresh work flowing into observations and reflections, regenerates compact startup context, and leaves everything in plain markdown so you can inspect it instead of trusting a black box:
 
@@ -84,7 +88,7 @@ Observational Memory gives your agents one shared memory in `~/.local/share/obse
   <img src="assets/system-diagram.jpeg" alt="Observational Memory system diagram showing Claude Code and Codex hooks feeding shared local markdown memory, search, and reflection." width="980" />
 </p>
 
-Claude and Codex both feed the same local memory, both start from compact context, and both can search the same accumulated knowledge on demand. Hermes support uses the same observer pipeline through session-log ingestion, so its work can land in the same memory files even though install-time hooks are currently Claude/Codex-specific.
+Claude Code, Codex, and Cowork feed the same local memory, start from compact context, and can search the same accumulated knowledge on demand. Hermes support uses the same observer pipeline through session-log ingestion, so its work can land in the same memory files even though install-time hooks are currently Claude/Codex/Cowork-specific.
 
 ### Five tiers of memory
 
@@ -134,6 +138,21 @@ All hooks are installed automatically to `~/.claude/settings.json`.
 **Scheduler backstop:** A background job still runs every 15 minutes by default, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations. On macOS that backstop uses launchd by default; elsewhere it uses cron. This is now the safety net rather than the primary path, which helps when hooks are unavailable or a session exits before `Stop` fires.
 
 Because Codex hooks are still experimental, keeping the AGENTS fallback and scheduler backstop is intentional.
+
+### Claude Cowork integration
+
+**Local plugin:** `om install --cowork` copies a bundled plugin to `~/Library/Application Support/Claude/local-agent-mode-plugins/observational-memory/`. The plugin follows the current Claude plugin layout with `.claude-plugin/plugin.json`, `version.json`, `hooks/hooks.json`, a skill, and a `/recall` command.
+
+**SessionStart hook:** When a Cowork session starts, the plugin runs `om context` and injects compact derived startup files (`profile.md` + `active.md`) as additional context.
+
+**SessionEnd / checkpoint hooks:** Cowork `SessionEnd`, `UserPromptSubmit`, and `PreCompact` hooks run `om observe --source cowork` for the active `audit.jsonl` transcript. In-session checkpoints use the same throttle variables as Claude Code hooks.
+
+**Manual observe path:** You can process Cowork sessions directly:
+
+```bash
+om observe --source cowork
+om observe --transcript "$HOME/Library/Application Support/Claude/local-agent-mode-sessions/.../audit.jsonl" --source cowork
+```
 
 ### Hermes Agent integration
 
@@ -240,11 +259,13 @@ om observe
 # Run observer on a specific transcript
 om observe --transcript ~/.claude/projects/.../abc123.jsonl
 om observe --transcript ~/.codex/sessions/.../session.jsonl --source codex
+om observe --transcript "$HOME/Library/Application Support/Claude/local-agent-mode-sessions/.../audit.jsonl" --source cowork
 om observe --transcript ~/.hermes/sessions/session-123.jsonl --source hermes
 
 # Run observer for one source only
 om observe --source claude
 om observe --source codex
+om observe --source cowork
 om observe --source hermes
 om observe --source claude-memory
 
@@ -267,10 +288,10 @@ om observe --dry-run
 om reflect --dry-run
 
 # Install/uninstall
-om install [--claude|--codex|--both] [--scheduler auto|launchd|cron|none]
+om install [--claude|--codex|--cowork|--both|--all] [--scheduler auto|launchd|cron|none]
 om install --provider anthropic-vertex --vertex-project-id my-proj --vertex-region us-east5 --llm-model claude-sonnet-4-5-20250929 --non-interactive
 om install --provider anthropic-bedrock --bedrock-region us-east-1 --llm-model anthropic.claude-sonnet-4-5-20250929-v1:0 --non-interactive
-om uninstall [--claude|--codex|--both] [--purge]
+om uninstall [--claude|--codex|--cowork|--both|--all] [--purge]
 
 # Legacy compatibility alias
 # --cron/--no-cron maps to --scheduler cron|none

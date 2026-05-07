@@ -250,3 +250,104 @@ class TestHermesParser:
         messages = parse_hermes(transcript, after_index=1)
 
         assert [m.content for m in messages] == ["two", "three"]
+
+
+class TestCoworkParser:
+    """Tests for Cowork audit.jsonl parsing via the Claude parser with source='cowork'."""
+
+    def test_parse_cowork_transcript(self):
+        messages = parse_claude(FIXTURES / "cowork-audit.jsonl", source="cowork")
+        assert len(messages) > 0
+        assert all(m.source == "cowork" for m in messages)
+
+    def test_messages_have_roles(self):
+        messages = parse_claude(FIXTURES / "cowork-audit.jsonl", source="cowork")
+        roles = {m.role for m in messages}
+        assert "user" in roles
+        assert "assistant" in roles
+
+    def test_audit_timestamp_fallback(self):
+        """Cowork uses _audit_timestamp instead of timestamp — parser should handle it."""
+        messages = parse_claude(FIXTURES / "cowork-audit.jsonl", source="cowork")
+        for msg in messages:
+            assert msg.timestamp, f"Message missing timestamp: {msg.content[:50]}"
+        # Check that the actual _audit_timestamp values came through
+        assert any("2026-03-15" in m.timestamp for m in messages)
+
+    def test_tool_calls_summarized(self):
+        messages = parse_claude(FIXTURES / "cowork-audit.jsonl", source="cowork")
+        contents = [m.content for m in messages]
+        assert any("[Bash:" in c for c in contents)
+
+    def test_incremental_parsing(self):
+        all_messages = parse_claude(FIXTURES / "cowork-audit.jsonl", source="cowork")
+        assert len(all_messages) > 2
+        partial = parse_claude(FIXTURES / "cowork-audit.jsonl", after_uuid="cwk-001", source="cowork")
+        assert len(partial) < len(all_messages)
+
+    def test_system_and_rate_limit_entries_skipped(self):
+        """System init and rate_limit_event entries should not produce messages."""
+        messages = parse_claude(FIXTURES / "cowork-audit.jsonl", source="cowork")
+        for m in messages:
+            assert m.role in ("user", "assistant")
+
+    def test_source_parameter_defaults_to_claude(self):
+        """Without explicit source, parse_transcript should label messages as 'claude'."""
+        messages = parse_claude(FIXTURES / "cowork-audit.jsonl")
+        assert all(m.source == "claude" for m in messages)
+
+
+class TestCoworkDiscovery:
+    """Tests for Cowork transcript discovery functions."""
+
+    def _make_cowork_tree(self, tmp_path):
+        """Create a mock Cowork sessions directory tree."""
+        org = tmp_path / "org-uuid"
+        user = org / "user-uuid"
+        sessions = []
+        for i, name in enumerate(["local_session-1", "local_session-2"]):
+            session_dir = user / name
+            session_dir.mkdir(parents=True)
+            audit = session_dir / "audit.jsonl"
+            audit.write_text(f'{{"type":"user","uuid":"m{i}","message":{{"role":"user","content":"hi"}}}}\n')
+            sessions.append(audit)
+            if i == 0:
+                time.sleep(0.05)  # Ensure different mtimes
+        return tmp_path, sessions
+
+    def test_find_all_transcripts(self, tmp_path):
+        from observational_memory.transcripts.cowork import find_all_transcripts as find_all
+
+        base, sessions = self._make_cowork_tree(tmp_path)
+        results = find_all(base)
+        assert len(results) == 2
+        # Oldest first
+        assert results[0] == sessions[0]
+
+    def test_find_recent_transcripts(self, tmp_path):
+        from observational_memory.transcripts.cowork import find_recent_transcripts as find_recent
+
+        base, sessions = self._make_cowork_tree(tmp_path)
+        results = find_recent(base, max_age_hours=1)
+        assert len(results) == 2
+        # Newest first
+        assert results[0] == sessions[1]
+
+    def test_find_recent_respects_age_cutoff(self, tmp_path):
+        import os
+
+        from observational_memory.transcripts.cowork import find_recent_transcripts as find_recent
+
+        base, sessions = self._make_cowork_tree(tmp_path)
+        # Set the first session's mtime to 48 hours ago
+        old_time = time.time() - (48 * 3600)
+        os.utime(sessions[0], (old_time, old_time))
+        results = find_recent(base, max_age_hours=24)
+        assert len(results) == 1
+        assert results[0] == sessions[1]
+
+    def test_returns_empty_for_missing_dir(self, tmp_path):
+        from observational_memory.transcripts.cowork import find_all_transcripts as find_all
+
+        results = find_all(tmp_path / "nonexistent")
+        assert results == []

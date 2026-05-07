@@ -177,6 +177,43 @@ def test_install_generates_compact_files_and_updates_codex_startup_integration(m
     assert "om search" in updated_agents
 
 
+def test_install_cowork_copies_valid_plugin(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--cowork",
+            "--no-cron",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    plugin_dir = (
+        tmp_path
+        / "home"
+        / "Library"
+        / "Application Support"
+        / "Claude"
+        / "local-agent-mode-plugins"
+        / "observational-memory"
+    )
+    hooks_json = plugin_dir / "hooks" / "hooks.json"
+    hooks_payload = json.loads(hooks_json.read_text())
+    assert set(hooks_payload["hooks"]) == {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact"}
+    assert json.loads((plugin_dir / "version.json").read_text()) == {"version": "0.5.4"}
+    assert os.access(plugin_dir / "hooks" / "scripts" / "session-start.sh", os.X_OK)
+    assert os.access(plugin_dir / "hooks" / "scripts" / "session-end.sh", os.X_OK)
+
+
 def test_install_codex_preserves_existing_config_and_hooks(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")

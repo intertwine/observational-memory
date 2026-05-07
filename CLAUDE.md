@@ -33,12 +33,12 @@ uv run om doctor                 # run diagnostics
 
 ## Architecture
 
-Cross-agent observational memory that works at the **user level** (not per-project) across Claude Code and Codex CLI. Two background processes compress conversation transcripts into shared memory files at `~/.local/share/observational-memory/`.
+Cross-agent observational memory that works at the **user level** (not per-project) across Claude Code, Codex CLI, and Cowork. Two background processes compress conversation transcripts into shared memory files at `~/.local/share/observational-memory/`.
 
 ### Data flow
 
 ```text
-Transcripts (Claude JSONL / Codex sessions)
+Transcripts (Claude JSONL / Codex sessions / Cowork audit.jsonl)
   → observe.py (LLM compression → observations.md)
   → reflect.py (daily consolidation → reflections.md)
 
@@ -50,8 +50,9 @@ Auto-memory (~/.claude/projects/*/memory/*.md)
 
 ### Key modules
 
-- **`src/observational_memory/transcripts/claude.py`** — Parses Claude Code `.jsonl` transcripts. Each line is a JSON object with `type` (user/assistant/progress), `message.content` (text or array of blocks), `uuid`, `timestamp`.
+- **`src/observational_memory/transcripts/claude.py`** — Parses Claude Code `.jsonl` transcripts (and Cowork `audit.jsonl` via `source="cowork"`). Each line is a JSON object with `type` (user/assistant/progress), `message.content` (text or array of blocks), `uuid`, `timestamp` (or `_audit_timestamp` for Cowork).
 - **`src/observational_memory/transcripts/codex.py`** — Parses Codex CLI session files (`*.json` and `*.jsonl`) from `~/.codex/sessions/`.
+- **`src/observational_memory/transcripts/cowork.py`** — Discovery functions for Cowork `audit.jsonl` files under `~/Library/Application Support/Claude/local-agent-mode-sessions/`. Parsing delegates to `claude.py`.
 - **`src/observational_memory/transcripts/auto_memory.py`** — Scans Claude Code auto-memory files (`~/.claude/projects/*/memory/*.md`). Content-hash change detection, project slug extraction, YAML frontmatter parsing. Read-only — never writes to auto-memory directories.
 - **`src/observational_memory/observe.py`** — Observer: reads transcripts, finds new messages via cursor bookmarks, calls LLM to compress, appends to `observations.md`. Also contains `observe_auto_memory()` which bypasses the LLM (auto-memory files are already distilled) and only updates the search index.
 - **`src/observational_memory/reflect.py`** — Reflector: reads observations + reflections + auto-memory context, calls LLM to condense, writes `reflections.md`, trims old observations. Auto-memory is only included when it has changed since last reflection (timestamp comparison). On deletion, the reflector receives cleanup instructions.
@@ -64,6 +65,7 @@ Auto-memory (~/.claude/projects/*/memory/*.md)
 
 - **Claude Code**: `SessionStart` injects memory via `additionalContext`; `SessionEnd`, `UserPromptSubmit`, and `PreCompact` hooks trigger checkpoints. In-session checkpoints are throttled by `OM_SESSION_OBSERVER_INTERVAL_SECONDS` and can be disabled with `OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS`.
 - **Codex CLI**: Instructions appended to `~/.codex/AGENTS.md`; cron job for observer. Startup priming is now driven by derived compact files (`profile.md` + `active.md`) instead of always loading full reflections/observations.
+- **Cowork**: Plugin installed to `~/Library/Application Support/Claude/local-agent-mode-plugins/observational-memory/`. Uses the same hook pattern as Claude Code (SessionStart context injection, SessionEnd/UserPromptSubmit/PreCompact checkpoints). Includes a `/recall` command and an `observational-memory` skill. Install with `om install --cowork`.
 
 ### API keys
 
@@ -71,4 +73,4 @@ API keys live in `~/.config/observational-memory/env` (created by `om install`, 
 
 ### Prompts
 
-`src/observational_memory/prompts/observer.md` and `src/observational_memory/prompts/reflector.md` define the LLM system prompts. They are bundled as package data. The priority system (🔴/🟡/🟢) and output format are critical — downstream parsing depends on them.
+`src/observational_memory/prompts/observer.md` and `src/observational_memory/prompts/reflector.md` define the LLM system prompts. They are bundled as package data. The priority system (🔴/🟡/🟢) and output format are critical — downstream parsing depends on them. The reflector routes observations into three activity sections: `## Active Projects` (software/engineering), `## Life & Operations` (taxes, finance, admin), and `## Creative & Professional` (music, teaching, art). The `startup_memory.py` module extracts all three into `active.md`.

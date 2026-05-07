@@ -135,7 +135,7 @@ def test_openai_token_limit_parameter_matches_model_family(monkeypatch, model, e
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
 
     class FakeOpenAI:
-        def __init__(self):
+        def __init__(self, **_kwargs):
             self.chat = SimpleNamespace(completions=FakeCompletions())
 
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))

@@ -1,7 +1,7 @@
 [project]
 name = "observational-memory"
-version = "0.5.3"
-description = "Cross-agent observational memory and local search for Claude Code, Codex CLI, and Hermes Agent"
+version = "0.5.4"
+description = "Cross-agent observational memory and local search for Claude Code, Codex CLI, Cowork, and Hermes Agent"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

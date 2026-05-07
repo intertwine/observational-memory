@@ -164,6 +164,14 @@ class Config:
         return Path.home() / ".hermes" / "sessions"
 
     @property
+    def cowork_sessions_dir(self) -> Path:
+        return Path.home() / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
+
+    @property
+    def cowork_plugins_dir(self) -> Path:
+        return Path.home() / "Library" / "Application Support" / "Claude" / "local-agent-mode-plugins"
+
+    @property
     def codex_checkpoint_state_path(self) -> Path:
         return self.memory_dir / ".codex-checkpoint-state.json"
 

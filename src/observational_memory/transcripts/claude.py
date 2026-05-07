@@ -8,12 +8,13 @@ from pathlib import Path
 from . import Message
 
 
-def parse_transcript(path: Path, after_uuid: str | None = None) -> list[Message]:
+def parse_transcript(path: Path, after_uuid: str | None = None, source: str = "claude") -> list[Message]:
     """Parse a Claude Code .jsonl transcript into Messages.
 
     Args:
         path: Path to the transcript .jsonl file.
         after_uuid: If set, only return messages after this UUID (for incremental processing).
+        source: Source label for the resulting Messages (default ``"claude"``).
 
     Returns:
         List of normalized Message objects.
@@ -35,7 +36,7 @@ def parse_transcript(path: Path, after_uuid: str | None = None) -> list[Message]
             continue
 
         uuid = entry.get("uuid", "")
-        timestamp = entry.get("timestamp", "")
+        timestamp = entry.get("timestamp") or entry.get("_audit_timestamp", "")
         msg = entry.get("message", {})
         role = msg.get("role", "")
 
@@ -56,7 +57,7 @@ def parse_transcript(path: Path, after_uuid: str | None = None) -> list[Message]
                     role=role,
                     content=content,
                     timestamp=timestamp,
-                    source="claude",
+                    source=source,
                 )
             )
 
@@ -72,6 +73,7 @@ def _extract_content(msg: dict) -> str:
 
     if isinstance(content, list):
         parts = []
+        image_count = 0
         for block in content:
             if isinstance(block, str):
                 parts.append(block)
@@ -84,9 +86,17 @@ def _extract_content(msg: dict) -> str:
                     inp = block.get("input", {})
                     parts.append(_summarize_tool_use(tool, inp))
                 elif block_type == "tool_result":
+                    # Skip tool results — the tool_use summary carries the signal.
+                    # Count any embedded images so they're not silently lost.
                     result = block.get("content", "")
-                    if isinstance(result, str) and len(result) < 500:
-                        parts.append(f"[result: {result[:200]}]")
+                    if isinstance(result, list):
+                        for sub in result:
+                            if isinstance(sub, dict) and sub.get("type") == "image":
+                                image_count += 1
+                elif block_type == "image":
+                    image_count += 1
+        if image_count:
+            parts.append(f"[{image_count} image(s) shared]")
         return "\n".join(p for p in parts if p).strip()
 
     return ""

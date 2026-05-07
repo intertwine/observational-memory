@@ -1,0 +1,11 @@
+{
+  "name": "observational-memory",
+  "version": "0.5.4",
+  "description": "Cross-session observational memory — compresses conversation transcripts into shared observations and reflections that persist across Cowork sessions.",
+  "author": {
+    "name": "Intertwine Systems"
+  },
+  "repository": "https://github.com/intertwine/observational-memory",
+  "license": "MIT",
+  "keywords": ["memory", "observational-memory", "context", "recall"]
+}

@@ -83,7 +83,7 @@ def _build_active(reflections: str, observations: str) -> str:
         "<!-- Auto-maintained from reflections.md and observations.md. -->",
     ]
 
-    for heading in ("## Active Projects", "## Recent Themes"):
+    for heading in ("## Active Projects", "## Life & Operations", "## Creative & Professional", "## Recent Themes"):
         section = _extract_h2_section(reflections, heading)
         if section:
             parts.extend(["", section.strip()])
