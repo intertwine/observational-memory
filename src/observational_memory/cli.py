@@ -590,14 +590,21 @@ def codex_checkpoint(ctx: click.Context) -> None:
         )
 
         worker_command = _build_codex_checkpoint_worker_command(transcript)
-        subprocess.Popen(
-            worker_command,
-            cwd=payload.get("cwd") or None,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        popen_kwargs: dict[str, object] = {
+            "cwd": payload.get("cwd") or None,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if sys.platform == "win32":
+            # start_new_session is POSIX-only. On Windows, detach into a new
+            # process group so the child survives the parent hook process.
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+                subprocess, "DETACHED_PROCESS", 0
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+        subprocess.Popen(worker_command, **popen_kwargs)
     except Exception:
         _update_codex_checkpoint_state(
             config,
@@ -641,8 +648,58 @@ def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
         _release_codex_checkpoint_lock(lock_path)
 
 
+@cli.command(hidden=True, name="claude-checkpoint")
+@click.pass_context
+def claude_checkpoint(ctx: click.Context) -> None:
+    """Process a Claude Code session checkpoint from a hook payload.
+
+    Reads the hook JSON payload from stdin (Claude Code passes
+    ``transcript_path`` and ``hook_event_name``) and runs the observer
+    against the transcript. This is the Python equivalent of the bash
+    ``session-end.sh`` hook and is used by the Windows install path,
+    which cannot rely on bash + jq being available.
+    """
+    import json as json_mod
+
+    config = ctx.obj["config"]
+
+    try:
+        payload = json_mod.load(sys.stdin)
+    except json_mod.JSONDecodeError:
+        return
+
+    if not isinstance(payload, dict):
+        return
+
+    transcript_raw = payload.get("transcript_path")
+    if not isinstance(transcript_raw, str) or not transcript_raw.strip():
+        return
+
+    transcript = Path(transcript_raw).expanduser()
+    if not transcript.is_file():
+        return
+
+    event_name = payload.get("hook_event_name") or ""
+    is_force_event = event_name in {"SessionEnd", "Stop", ""}
+    is_checkpoint_event = event_name in {"UserPromptSubmit", "PreCompact"}
+
+    if is_checkpoint_event and not is_force_event:
+        disable = (os.environ.get("OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS") or "").strip().lower()
+        if disable in {"1", "true", "yes", "on"}:
+            return
+
+    from .observe import observe_claude_transcript
+
+    try:
+        observe_claude_transcript(transcript, config, dry_run=False)
+        _maybe_run_reflector_catchup(config)
+    except Exception:
+        # Hooks must never raise into the parent agent. Suppress and exit.
+        return
+
+
 _SUPPORTED_PROVIDERS = ("anthropic", "openai", "anthropic-vertex", "anthropic-bedrock")
-_SCHEDULER_MODES = ("auto", "launchd", "cron", "none")
+_SCHEDULER_MODES = ("auto", "launchd", "cron", "schtasks", "none")
 _SCHEDULER_COMMAND_TIMEOUT_SECONDS = 5
 
 
@@ -964,6 +1021,11 @@ def install(
             click.echo(f"Warning: launchd scheduler setup failed: {exc}", err=True)
         else:
             _uninstall_cron(targets)
+    elif scheduler_mode == "schtasks":
+        try:
+            _install_schtasks(config, targets)
+        except click.ClickException as exc:
+            click.echo(f"Warning: schtasks scheduler setup failed: {exc}", err=True)
     elif scheduler_mode == "cron":
         _install_cron(config, targets)
         if sys.platform == "darwin":
@@ -971,7 +1033,10 @@ def install(
     elif scheduler_mode == "none":
         if sys.platform == "darwin":
             _uninstall_launchd(config, targets)
-        _uninstall_cron(targets)
+        if sys.platform == "win32":
+            _uninstall_schtasks(config, targets)
+        else:
+            _uninstall_cron(targets)
 
     click.echo("\nInstallation complete! Run 'om status' to verify.")
 
@@ -998,7 +1063,10 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
         _uninstall_cowork_plugin(config)
 
     _uninstall_launchd(config, targets)
-    _uninstall_cron(targets)
+    _uninstall_schtasks(config, targets)
+    if sys.platform != "win32":
+        # crontab calls only make sense on POSIX hosts.
+        _uninstall_cron(targets)
 
     if purge:
         import shutil
@@ -1220,15 +1288,26 @@ def status(ctx: click.Context) -> None:
         if load_errors:
             click.echo(f"  launchctl: {', '.join(load_errors)}")
 
-    cron_jobs, cron_error = _om_cron_jobs()
-    if cron_error:
-        click.echo(f"  Cron jobs: error ({cron_error})")
-    elif cron_jobs:
-        click.echo(f"  Cron jobs: {len(cron_jobs)} found ({', '.join(sorted(cron_jobs))})")
-        if sys.platform == "darwin" and any(job["installed"] for job in launchd_jobs):
-            click.echo("  Duplicate backstops: launchd and cron are both present")
+    if sys.platform == "win32":
+        schtasks_jobs = _schtasks_job_statuses(config)
+        installed_tasks = [job for job in schtasks_jobs if job["installed"]]
+        missing_tasks = [str(job["key"]) for job in schtasks_jobs if not job["installed"]]
+        task_errors = [f"{job['key']}: {job['error']}" for job in schtasks_jobs if job["error"]]
+        click.echo(f"  Scheduled tasks: {len(installed_tasks)}/{len(schtasks_jobs)} installed")
+        if missing_tasks:
+            click.echo(f"  Missing: {', '.join(missing_tasks)}")
+        if task_errors:
+            click.echo(f"  schtasks: {', '.join(task_errors)}")
     else:
-        click.echo("  Cron jobs: none")
+        cron_jobs, cron_error = _om_cron_jobs()
+        if cron_error:
+            click.echo(f"  Cron jobs: error ({cron_error})")
+        elif cron_jobs:
+            click.echo(f"  Cron jobs: {len(cron_jobs)} found ({', '.join(sorted(cron_jobs))})")
+            if sys.platform == "darwin" and any(job["installed"] for job in launchd_jobs):
+                click.echo("  Duplicate backstops: launchd and cron are both present")
+        else:
+            click.echo("  Cron jobs: none")
 
     # Cowork plugin
     cowork_plugin_dir = _cowork_plugin_dir(config)
@@ -1342,16 +1421,28 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
 
     # 7. Env file permissions
     if config.env_file.exists():
-        mode = config.env_file.stat().st_mode & 0o777
-        if mode == 0o600:
-            _check("Env file permissions", "PASS", "600 (owner-only)")
+        if sys.platform == "win32":
+            # POSIX modes don't map to NTFS ACLs; %APPDATA% is per-user by
+            # default, so we skip the chmod check on Windows.
+            _check("Env file permissions", "PASS", "per-user APPDATA (Windows ACL)")
         else:
-            _check("Env file permissions", "WARN", f"{oct(mode)} (too open)", fix=f"Run: chmod 600 {config.env_file}")
+            mode = config.env_file.stat().st_mode & 0o777
+            if mode == 0o600:
+                _check("Env file permissions", "PASS", "600 (owner-only)")
+            else:
+                _check(
+                    "Env file permissions",
+                    "WARN",
+                    f"{oct(mode)} (too open)",
+                    fix=f"Run: chmod 600 {config.env_file}",
+                )
     else:
         _check("Env file permissions", "WARN", "env file not found", fix="Run: om install")
 
-    # 8. jq installed
-    if shutil.which("jq"):
+    # 8. jq installed (only required by the bash-based hook scripts on POSIX)
+    if sys.platform == "win32":
+        _check("jq installed", "PASS", "skipped (Windows hooks invoke om directly)")
+    elif shutil.which("jq"):
         _check("jq installed", "PASS", shutil.which("jq"))
     else:
         _check("jq installed", "FAIL", "not found", fix="Install with: brew install jq")
@@ -1558,12 +1649,16 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
             _check("Cowork hooks.json", "FAIL", "missing", fix="Run: om install --cowork")
         for script_name in ("session-start.sh", "session-end.sh"):
             script = cowork_plugin_dir / "hooks" / "scripts" / script_name
-            if script.exists() and os.access(script, os.X_OK):
-                _check(f"Cowork {script_name}", "PASS", "executable")
-            elif script.exists():
-                _check(f"Cowork {script_name}", "WARN", "not executable", fix=f"Run: chmod +x {script}")
-            else:
+            if not script.exists():
                 _check(f"Cowork {script_name}", "FAIL", "missing", fix="Run: om install --cowork")
+            elif sys.platform == "win32":
+                # POSIX X_OK doesn't apply to Windows; report the script as
+                # present but flag that Cowork isn't supported here.
+                _check(f"Cowork {script_name}", "WARN", "present but Cowork is not supported on Windows")
+            elif os.access(script, os.X_OK):
+                _check(f"Cowork {script_name}", "PASS", "executable")
+            else:
+                _check(f"Cowork {script_name}", "WARN", "not executable", fix=f"Run: chmod +x {script}")
     else:
         _check("Cowork plugin", "WARN", "not installed", fix="Run: om install --cowork")
 
@@ -1626,29 +1721,46 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         else:
             _check("LaunchAgents", "WARN", "no OM LaunchAgents found", fix="Run: om install")
 
-    cron_jobs, cron_error = _om_cron_jobs()
-    if cron_error:
-        _check("Cron jobs", "WARN", f"could not read crontab: {cron_error}")
-    elif cron_jobs:
-        if sys.platform == "darwin" and installed_launchd_jobs:
-            _check(
-                "Legacy cron jobs",
-                "WARN",
-                f"{len(cron_jobs)} OM job(s) still present alongside launchd",
-                fix="Run: om install",
-            )
+    if sys.platform == "win32":
+        schtasks_jobs = _schtasks_job_statuses(config)
+        installed_tasks = [job for job in schtasks_jobs if job["installed"]]
+        missing_tasks = [str(job["key"]) for job in schtasks_jobs if not job["installed"]]
+        task_errors = [f"{job['key']}: {job['error']}" for job in schtasks_jobs if job["error"]]
+        if installed_tasks:
+            if missing_tasks:
+                _check(
+                    "Scheduled tasks",
+                    "WARN",
+                    f"{len(installed_tasks)}/{len(schtasks_jobs)} installed; missing: {', '.join(missing_tasks)}",
+                    fix="Run: om install",
+                )
+            else:
+                _check("Scheduled tasks", "PASS", f"{len(installed_tasks)}/{len(schtasks_jobs)} installed")
         else:
-            _check("Cron jobs", "PASS", f"{len(cron_jobs)} job(s) found")
-    elif sys.platform == "darwin" and installed_launchd_jobs:
-        _check("Legacy cron jobs", "PASS", "none found")
+            _check("Scheduled tasks", "WARN", "no OM scheduled tasks found", fix="Run: om install")
+        if task_errors:
+            _check("schtasks errors", "WARN", "; ".join(task_errors))
     else:
-        _check("Cron jobs", "WARN", "no observational-memory background jobs found", fix="Run: om install")
+        cron_jobs, cron_error = _om_cron_jobs()
+        if cron_error:
+            _check("Cron jobs", "WARN", f"could not read crontab: {cron_error}")
+        elif cron_jobs:
+            if sys.platform == "darwin" and installed_launchd_jobs:
+                _check(
+                    "Legacy cron jobs",
+                    "WARN",
+                    f"{len(cron_jobs)} OM job(s) still present alongside launchd",
+                    fix="Run: om install",
+                )
+            else:
+                _check("Cron jobs", "PASS", f"{len(cron_jobs)} job(s) found")
+        elif sys.platform == "darwin" and installed_launchd_jobs:
+            _check("Legacy cron jobs", "PASS", "none found")
+        else:
+            _check("Cron jobs", "WARN", "no observational-memory background jobs found", fix="Run: om install")
 
     # 14. Platform
-    if sys.platform == "win32":
-        _check("Platform", "WARN", "Windows — some features may not work")
-    else:
-        _check("Platform", "PASS", sys.platform)
+    _check("Platform", "PASS", sys.platform)
 
     # Output
     if as_json:
@@ -1677,13 +1789,32 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
 # --- Claude Code hook installation ---
 
 
+def _claude_hook_commands() -> tuple[str, str]:
+    """Return (session_start_command, checkpoint_command) for Claude Code hooks.
+
+    On Windows we cannot rely on bash + jq, so we point hooks at the ``om``
+    CLI directly (``om context`` for SessionStart, ``om claude-checkpoint``
+    for the checkpoint events). On POSIX we keep the bash hook scripts that
+    have been the production behavior for some time.
+    """
+    if sys.platform == "win32":
+        import shlex
+
+        om_path = _find_om_path() or "om"
+        # Even on Windows, hook commands are invoked via cmd.exe — quoting
+        # with shlex (POSIX-style) is what Claude Code expects.
+        quoted = shlex.quote(om_path)
+        return f"{quoted} context", f"{quoted} claude-checkpoint"
+
+    hooks_dir = Path(__file__).parent / "hooks" / "claude"
+    return str(hooks_dir / "session-start.sh"), str(hooks_dir / "session-end.sh")
+
+
 def _install_claude_hooks(config: Config) -> None:
     """Add SessionStart and session checkpoint hooks to ~/.claude/settings.json."""
     import json
 
-    hooks_dir = Path(__file__).parent / "hooks" / "claude"
-    session_start_hook = hooks_dir / "session-start.sh"
-    session_end_hook = hooks_dir / "session-end.sh"
+    session_start_command, checkpoint_command = _claude_hook_commands()
 
     if not config.claude_settings_path.exists():
         config.claude_settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1699,7 +1830,7 @@ def _install_claude_hooks(config: Config) -> None:
             "hooks": [
                 {
                     "type": "command",
-                    "command": str(session_start_hook),
+                    "command": session_start_command,
                     "timeout": 5,
                     "statusMessage": "Loading observational memory...",
                 }
@@ -1709,18 +1840,16 @@ def _install_claude_hooks(config: Config) -> None:
 
     # SessionEnd hook
     hooks["SessionEnd"] = [
-        {"hooks": [{"type": "command", "command": str(session_end_hook), "timeout": 60, "async": True}]}
+        {"hooks": [{"type": "command", "command": checkpoint_command, "timeout": 60, "async": True}]}
     ]
 
     # UserPromptSubmit checkpoint hook
     hooks["UserPromptSubmit"] = [
-        {"hooks": [{"type": "command", "command": str(session_end_hook), "timeout": 5, "async": True}]}
+        {"hooks": [{"type": "command", "command": checkpoint_command, "timeout": 5, "async": True}]}
     ]
 
     # PreCompact checkpoint hook
-    hooks["PreCompact"] = [
-        {"hooks": [{"type": "command", "command": str(session_end_hook), "timeout": 5, "async": True}]}
-    ]
+    hooks["PreCompact"] = [{"hooks": [{"type": "command", "command": checkpoint_command, "timeout": 5, "async": True}]}]
 
     config.claude_settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     click.echo("Installed Claude Code hooks (SessionStart, UserPromptSubmit, PreCompact, SessionEnd)")
@@ -1780,6 +1909,13 @@ def _install_cowork_plugin(config: Config) -> None:
     """Copy the bundled Cowork plugin to the local-agent-mode-plugins directory."""
     import shutil
 
+    if sys.platform == "win32":
+        # Cowork ships only on macOS today and its bash hook scripts depend
+        # on jq + bash. We surface a clear message rather than copy files
+        # that cannot execute on Windows.
+        click.echo("Cowork plugin install is only supported on macOS; skipping on Windows.")
+        return
+
     source_dir = Path(__file__).parent / "cowork_plugin"
     if not source_dir.exists():
         click.echo("Warning: bundled Cowork plugin not found in package", err=True)
@@ -1789,7 +1925,7 @@ def _install_cowork_plugin(config: Config) -> None:
     target_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
 
-    # Ensure hook scripts are executable
+    # Ensure hook scripts are executable (POSIX permission bits).
     scripts_dir = target_dir / "hooks" / "scripts"
     if scripts_dir.exists():
         for script in scripts_dir.glob("*.sh"):
@@ -1879,7 +2015,10 @@ def _command_invokes_om_subcommand(command: str, subcommand: str) -> bool:
     except ValueError:
         return False
 
-    return len(parts) == 2 and Path(parts[0]).name == "om" and parts[1] == subcommand
+    if len(parts) != 2 or parts[1] != subcommand:
+        return False
+    # On Windows, uv installs ``om`` as ``om.exe``; treat the stem as canonical.
+    return Path(parts[0]).stem.lower() == "om"
 
 
 def _command_invokes_om_context(command: str) -> bool:
@@ -2548,16 +2687,29 @@ def _resolve_scheduler_mode(requested: str, cron_compat: bool | None, platform: 
         requested = compat_mode
 
     if requested == "auto":
-        return "launchd" if active_platform == "darwin" else "cron"
+        if active_platform == "darwin":
+            return "launchd"
+        if active_platform == "win32":
+            return "schtasks"
+        return "cron"
 
     if requested == "launchd" and active_platform != "darwin":
         raise click.ClickException("--scheduler launchd is only supported on macOS.")
+
+    if requested == "schtasks" and active_platform != "win32":
+        raise click.ClickException("--scheduler schtasks is only supported on Windows.")
+
+    if requested == "cron" and active_platform == "win32":
+        raise click.ClickException("--scheduler cron is not supported on Windows; use --scheduler schtasks.")
 
     return requested
 
 
 def _launchd_domain_target() -> str:
     """Return the per-user GUI domain target for launchctl."""
+    if sys.platform != "darwin":
+        # launchd targets are macOS-only; os.getuid() doesn't exist on Windows.
+        raise click.ClickException("launchd targets are only available on macOS.")
     return f"gui/{os.getuid()}"
 
 
@@ -3000,3 +3152,204 @@ def _find_om_path() -> str | None:
     import shutil
 
     return shutil.which("om")
+
+
+# --- Windows Task Scheduler installation ---
+
+
+def _schtasks_job_specs(config: Config, targets: str, om_path: str | None = None) -> list[dict[str, object]]:
+    """Return OM-managed Windows scheduled task specs for the selected install targets."""
+    resolved_om_path = om_path or _find_om_path() or "om"
+    specs: list[dict[str, object]] = []
+
+    if _targets_include_codex_scheduler(targets):
+        specs.append(
+            {
+                "key": "codex",
+                "name": config.CODEX_OBSERVE_SCHTASKS_NAME,
+                "argv": [resolved_om_path, "observe", "--source", "codex"],
+                # Repeat every N minutes for an effectively-unbounded duration.
+                "schedule_minutes": _codex_observer_interval_minutes(),
+                "schedule_kind": "minute",
+            }
+        )
+
+    if _targets_include_shared_scheduler(targets):
+        specs.extend(
+            [
+                {
+                    "key": "claude-memory",
+                    "name": config.AUTO_MEMORY_SCHTASKS_NAME,
+                    "argv": [resolved_om_path, "observe", "--source", "claude-memory"],
+                    "schedule_minutes": 60,
+                    "schedule_kind": "minute",
+                },
+                {
+                    "key": "reflect",
+                    "name": config.REFLECT_SCHTASKS_NAME,
+                    "argv": [resolved_om_path, "reflect"],
+                    "schedule_kind": "daily",
+                    "schedule_time": "04:00",
+                },
+            ]
+        )
+    return specs
+
+
+def _schtasks_job_keys_for_targets(targets: str) -> set[str]:
+    """Return scheduled-task keys scoped to one install target selection."""
+    keys: set[str] = set()
+    if _targets_include_shared_scheduler(targets):
+        keys.update({"claude-memory", "reflect"})
+    if _targets_include_codex_scheduler(targets):
+        keys.add("codex")
+    return keys
+
+
+def _schtasks_argv_to_command(argv: list[object]) -> str:
+    """Quote argv into a single command string for /TR.
+
+    schtasks.exe expects /TR to be a single string. Surround the executable in
+    quotes when it contains spaces (common on Windows where Path.home() lives
+    under "C:\\Users\\First Last\\..."). Arguments are quoted defensively too.
+    """
+
+    def quote(part: str) -> str:
+        if not part:
+            return '""'
+        if any(ch in part for ch in (" ", "\t", '"')):
+            escaped = part.replace('"', '\\"')
+            return f'"{escaped}"'
+        return part
+
+    return " ".join(quote(str(p)) for p in argv)
+
+
+def _run_schtasks(args: list[str], timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS) -> tuple[int, str, str]:
+    """Run schtasks.exe with the given args. Returns (returncode, stdout, stderr)."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["schtasks.exe", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return 9009, "", "schtasks.exe not found"
+    except OSError as e:
+        return -1, "", str(e)
+    except subprocess.TimeoutExpired:
+        return -1, "", f"timed out after {timeout}s"
+
+    return result.returncode, result.stdout or "", result.stderr or ""
+
+
+def _schtasks_query_task(name: str) -> tuple[bool, str | None]:
+    """Return (installed, error). When installed is True, error is None."""
+    rc, _stdout, stderr = _run_schtasks(["/Query", "/TN", name])
+    if rc == 0:
+        return True, None
+    detail = (stderr or "").strip()
+    if "cannot find" in detail.lower() or "does not exist" in detail.lower() or rc == 1:
+        return False, None
+    return False, detail or f"exit {rc}"
+
+
+def _schtasks_create_task(spec: dict[str, object]) -> str | None:
+    """Create or replace one OM scheduled task. Returns an error string on failure."""
+    name = str(spec["name"])
+    argv = list(spec.get("argv", []))
+    if not argv:
+        return "missing argv"
+
+    tr = _schtasks_argv_to_command(argv)
+    base_args = ["/Create", "/F", "/TN", name, "/TR", tr]
+
+    schedule_kind = spec.get("schedule_kind", "minute")
+    if schedule_kind == "minute":
+        minutes = int(spec.get("schedule_minutes", 60))
+        # /SC MINUTE /MO N runs every N minutes; /SC HOURLY for >= 60 keeps
+        # downstream display tools happy. Use HOURLY when N is a clean multiple.
+        if minutes >= 60 and minutes % 60 == 0:
+            args = [*base_args, "/SC", "HOURLY", "/MO", str(minutes // 60)]
+        else:
+            args = [*base_args, "/SC", "MINUTE", "/MO", str(max(1, minutes))]
+    elif schedule_kind == "daily":
+        time_of_day = str(spec.get("schedule_time", "04:00"))
+        args = [*base_args, "/SC", "DAILY", "/ST", time_of_day]
+    else:
+        return f"unsupported schedule_kind: {schedule_kind}"
+
+    rc, _stdout, stderr = _run_schtasks(args)
+    if rc == 0:
+        return None
+    return (stderr or "").strip() or f"exit {rc}"
+
+
+def _schtasks_delete_task(name: str) -> None:
+    """Best-effort delete of a scheduled task; missing tasks are not an error."""
+    _run_schtasks(["/Delete", "/F", "/TN", name])
+
+
+def _install_schtasks(config: Config, targets: str) -> None:
+    """Install OM-managed scheduled tasks via schtasks.exe on Windows."""
+    if sys.platform != "win32":
+        raise click.ClickException("schtasks installation is only supported on Windows.")
+
+    om_path = _find_om_path()
+    if not om_path:
+        click.echo("Warning: 'om' not found in PATH. Scheduled tasks will use 'om' literally.")
+
+    specs = _schtasks_job_specs(config, targets, om_path=om_path)
+    installed = 0
+    for spec in specs:
+        error = _schtasks_create_task(spec)
+        if error is None:
+            installed += 1
+        else:
+            click.echo(f"Warning: failed to install scheduled task {spec['name']}: {error}", err=True)
+
+    click.echo(f"Installed {installed} scheduled task(s) via schtasks")
+
+
+def _uninstall_schtasks(config: Config, targets: str = "both") -> None:
+    """Remove OM-managed scheduled tasks via schtasks.exe on Windows."""
+    if sys.platform != "win32":
+        return
+
+    specs = _schtasks_job_specs(config, targets)
+    if not specs:
+        return
+
+    for spec in specs:
+        installed, _ = _schtasks_query_task(str(spec["name"]))
+        if installed:
+            _schtasks_delete_task(str(spec["name"]))
+
+    click.echo("Removed scheduled tasks")
+
+
+def _schtasks_job_statuses(config: Config, targets: str = "both") -> list[dict[str, object]]:
+    """Return installed/loaded state for OM-managed scheduled tasks."""
+    if sys.platform != "win32":
+        return []
+
+    jobs: list[dict[str, object]] = []
+    for spec in _schtasks_job_specs(config, targets):
+        name = str(spec["name"])
+        installed, error = _schtasks_query_task(name)
+        jobs.append(
+            {
+                "key": spec.get("key", name),
+                "name": name,
+                # Windows tasks are managed by the Task Scheduler service, so
+                # "installed" implies "loaded". We keep both fields for parity
+                # with the launchd job-status shape.
+                "installed": installed,
+                "loaded": installed,
+                "error": error,
+            }
+        )
+    return jobs

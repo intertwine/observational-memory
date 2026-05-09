@@ -61,9 +61,15 @@ Auto-memory (~/.claude/projects/*/memory/*.md)
 - **`src/observational_memory/cli.py`** — Click CLI (`om` command). Commands: observe, reflect, backfill, search, context, install, uninstall, status, doctor.
 - **`src/observational_memory/search/`** — Pluggable search over memory files. Three document sources: `OBSERVATIONS`, `REFLECTIONS`, `AUTO_MEMORY`. BM25 backend (default, uses `rank-bm25`), QMD backend (optional, shells out to `qmd` CLI — `"qmd"` for keyword search, `"qmd-hybrid"` for hybrid BM25 + vector + LLM reranking), None backend (no-op). Parser splits observations by date, reflections by section, auto-memory by file. The `reindex()` orchestrator is called automatically after observe/reflect writes. Auto-memory doc IDs use `amem:<project-slug>/<stem>` prefix.
 
+### Platform support
+
+- **macOS**: launchd-based scheduler (`om install` defaults to `--scheduler launchd`).
+- **Linux**: cron-based scheduler (`om install` defaults to `--scheduler cron`).
+- **Windows**: Task Scheduler via `schtasks.exe` (`om install` defaults to `--scheduler schtasks`). Memory dir defaults to `%LOCALAPPDATA%\observational-memory\` and the env file to `%APPDATA%\observational-memory\env`. Claude hooks call `om context` and `om claude-checkpoint` directly — no `bash` or `jq` required. Cowork is macOS-only and `om install --cowork` is a no-op on Windows.
+
 ### Agent integration
 
-- **Claude Code**: `SessionStart` injects memory via `additionalContext`; `SessionEnd`, `UserPromptSubmit`, and `PreCompact` hooks trigger checkpoints. In-session checkpoints are throttled by `OM_SESSION_OBSERVER_INTERVAL_SECONDS` and can be disabled with `OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS`.
+- **Claude Code**: `SessionStart` injects memory via `additionalContext`; `SessionEnd`, `UserPromptSubmit`, and `PreCompact` hooks trigger checkpoints. In-session checkpoints are throttled by `OM_SESSION_OBSERVER_INTERVAL_SECONDS` and can be disabled with `OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS`. On POSIX hosts the hooks run `hooks/claude/session-{start,end}.sh` (which require `bash` + `jq`); on Windows they invoke `om context` and `om claude-checkpoint` directly.
 - **Codex CLI**: Instructions appended to `~/.codex/AGENTS.md`; cron job for observer. Startup priming is now driven by derived compact files (`profile.md` + `active.md`) instead of always loading full reflections/observations.
 - **Cowork**: Plugin installed to `~/Library/Application Support/Claude/local-agent-mode-plugins/observational-memory/`. Uses the same hook pattern as Claude Code (SessionStart context injection, SessionEnd/UserPromptSubmit/PreCompact checkpoints). Includes a `/recall` command and an `observational-memory` skill. Install with `om install --cowork`.
 
