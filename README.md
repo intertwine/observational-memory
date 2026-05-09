@@ -1,25 +1,38 @@
 # Observational Memory
 
+![Observational Memory header showing local agent memory moving through Codex hooks, Claude Dreaming, ChatGPT Memory, Claude Cowork, and Hermes.](assets/observational-memory-header.png)
+
 [![PyPI version](https://img.shields.io/pypi/v/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![CI](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/intertwine/observational-memory?style=social)](https://github.com/intertwine/observational-memory/stargazers)
 
-**Give Claude Code, Codex, Cowork, and Hermes a shared memory that survives every session.**
+**Local memory that travels with your agents.**
 
-Observational Memory captures what your agents learn, distills it into local markdown memory, and restores the right context when a new session starts. Instead of re-explaining your architecture, preferences, and in-flight work, your agents can pick up where they left off.
+Observational Memory gives Claude Code, Codex, Claude Cowork, and Hermes a shared memory that survives session boundaries. It captures what your agents learn, distills it into local markdown, restores the right context at startup, and now exports reviewed seed bundles for hosted platform memory.
 
-- Shared memory across Claude Code, Codex, Cowork, and Hermes
-- Automatic capture for Claude/Codex/Cowork, plus Hermes session ingestion
-- Plain markdown memory you can inspect, back up, and search
-- Reviewed export bundles for ChatGPT Memory and Claude Managed Agents memory stores
-- Fast install with `uv tool install observational-memory` and `om install`
+Version `0.5.6` turns `om` into a portable-memory bridge: your local `profile.md`, `active.md`, `reflections.md`, and `observations.md` stay the source of truth, while `om export` prepares clean bundles for ChatGPT Memory/project context, Claude Managed Agents memory stores, and other file-consuming systems.
 
-**Great fit if you:**
-- switch between Claude Code, Codex, Cowork, or Hermes on the same project
-- hate re-explaining your architecture, workflow, and preferences
-- want memory that stays local and inspectable
-- want something useful in minutes, not another infra project
+```bash
+brew install intertwine/tap/observational-memory
+om install
+om doctor
+```
+
+Prefer `uv`?
+
+```bash
+uv tool install observational-memory
+om install
+om doctor
+```
+
+What you get:
+
+- **Shared agent context:** Claude Code, Codex, and Cowork hook into the same local memory; Hermes sessions can be ingested from logs.
+- **Portable memory exports:** `om export --target chatgpt` and `om export --target claude-managed-agents` generate reviewed, import-ready memory seeds.
+- **Inspectable storage:** memory lives as plain markdown under `~/.local/share/observational-memory/`, with local search via `om search`.
+- **Forgiving setup:** installer-managed hooks, provider config, scheduler backstops, and diagnostics keep first contact focused on success.
 
 ---
 
@@ -28,7 +41,12 @@ Observational Memory captures what your agents learn, distills it into local mar
 ### Fast path
 
 ```bash
+# macOS
+brew install intertwine/tap/observational-memory
+
+# Or with uv
 uv tool install observational-memory
+
 om install
 om doctor
 ```
@@ -74,12 +92,12 @@ om --version
 om doctor
 ```
 
-That's it. Your agents now share persistent memory across sessions — plain markdown you can search and inspect.
+That's it. Your agents now share persistent memory across sessions: plain markdown you can search, inspect, export, and carry into the next platform.
 If it saves you repeated onboarding time, a GitHub star helps more people discover it.
 
 ### Export to platform-native memory
 
-`om` remains local-first, but it can generate reviewed seed bundles for hosted memory systems:
+`om` remains local-first, but `0.5.6` adds reviewed seed bundles for hosted memory systems:
 
 ```bash
 # Concise seed to paste/upload into ChatGPT or a ChatGPT project
@@ -183,9 +201,9 @@ om observe --source hermes
 om observe --transcript ~/.hermes/sessions/session-123.jsonl --source hermes
 ```
 
-**Current scope:** `0.4.x` Hermes support is transcript ingestion plus shared-memory compatibility. `om install` does not currently install Hermes hooks or a Hermes-specific scheduler backstop, so Hermes is a manual or integration-driven input path rather than a first-class installer target.
+**Current scope:** Hermes support is transcript ingestion plus shared-memory compatibility. `om install` does not currently install Hermes hooks or a Hermes-specific scheduler backstop, so Hermes is a manual or integration-driven input path rather than a first-class installer target.
 
-### Reflector (both)
+### Reflector
 
 A daily background job runs the reflector at 04:00 local machine time, which:
 
@@ -555,13 +573,14 @@ Contributor and maintainer instructions have moved to [`docs/MAINTAINERS.md`](do
 
 | Feature                | OpenClaw Version        | This Version                                |
 | ---------------------- | ----------------------- | ------------------------------------------- |
-| **Agents supported**   | OpenClaw only           | Claude Code + Codex CLI                     |
+| **Agents supported**   | OpenClaw only           | Claude Code, Codex CLI, Claude Cowork, and Hermes session logs |
 | **Scope**              | Per-workspace           | User-level (shared across all projects)     |
-| **Observer trigger**   | OpenClaw cron job       | Claude: SessionEnd/checkpoint hooks; Codex: Stop hook + scheduler backstop |
-| **Context injection**  | AGENTS.md instructions  | Claude: SessionStart hook; Codex: SessionStart hook + AGENTS fallback |
+| **Observer trigger**   | OpenClaw cron job       | Claude/Cowork hooks; Codex hooks + scheduler backstop; Hermes manual/log ingestion |
+| **Context injection**  | AGENTS.md instructions  | Claude/Cowork SessionStart hooks; Codex SessionStart hook + AGENTS fallback |
 | **Memory location**    | `workspace/memory/`     | `~/.local/share/observational-memory/`      |
 | **Compression engine** | OpenClaw agent sessions | Direct LLM API calls (Anthropic/OpenAI)     |
 | **Cross-agent memory** | No                      | Yes                                         |
+| **Platform exports**   | No                      | ChatGPT, Claude Managed Agents, and generic seed bundles |
 
 ---
 
