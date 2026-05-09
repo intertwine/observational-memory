@@ -1,3 +1,3 @@
 """Cross-agent observational memory for Claude Code, Codex CLI, Cowork, and Hermes Agent."""
 
-__version__ = "0.5.6"
+__version__ = "0.6.0"

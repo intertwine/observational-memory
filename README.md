@@ -11,7 +11,7 @@
 
 Observational Memory gives Claude Code, Codex, Claude Cowork, and Hermes a shared memory that survives session boundaries. It captures what your agents learn, distills it into local markdown, restores the right context at startup, and now exports reviewed seed bundles for hosted platform memory.
 
-Version `0.5.6` turns `om` into a portable-memory bridge: your local `profile.md`, `active.md`, `reflections.md`, and `observations.md` stay the source of truth, while `om export` prepares clean bundles for ChatGPT Memory/project context, Claude Managed Agents memory stores, and other file-consuming systems.
+Version `0.6.0` adds OM Cluster: an opt-in sync layer that moves signed, encrypted memory records across machines through untrusted filesystem transports while keeping local Markdown views inspectable. The platform export bridge from `0.5.6` remains available for reviewed ChatGPT and Claude memory seed bundles.
 
 ```bash
 brew install intertwine/tap/observational-memory
@@ -118,7 +118,7 @@ Cluster sync is disabled until `om cluster init` or `om cluster join` creates lo
 
 ### Export to platform-native memory
 
-`om` remains local-first, but `0.5.6` adds reviewed seed bundles for hosted memory systems:
+`om` remains local-first, with reviewed seed bundles for hosted memory systems:
 
 ```bash
 # Concise seed to paste/upload into ChatGPT or a ChatGPT project
