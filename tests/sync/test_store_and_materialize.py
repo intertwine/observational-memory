@@ -94,6 +94,32 @@ def test_public_node_metadata_import_is_pending_only(tmp_path):
     assert store.import_node_metadata_bytes(json.dumps(metadata.to_dict()).encode("utf-8")) is False
 
 
+def test_public_node_metadata_import_is_capped_and_path_safe(tmp_path, monkeypatch):
+    _config, store = _init_store(tmp_path)
+    monkeypatch.setattr("observational_memory.sync.store._MAX_PENDING_NODE_METADATA", 1)
+    first = NodeMetadata(
+        node_id="node_first",
+        alias="first",
+        signing_public_key_b64="abc",
+    )
+    second = NodeMetadata(
+        node_id="node_second",
+        alias="second",
+        signing_public_key_b64="def",
+    )
+    unsafe = NodeMetadata(
+        node_id="../escape",
+        alias="escape",
+        signing_public_key_b64="ghi",
+    )
+
+    assert store.import_node_metadata_bytes(json.dumps(first.to_dict()).encode("utf-8")) is True
+    assert store.import_node_metadata_bytes(json.dumps(second.to_dict()).encode("utf-8")) is False
+    assert store.import_node_metadata_bytes(json.dumps(unsafe.to_dict()).encode("utf-8")) is False
+    assert set(store.pending_nodes()) == {"node_first"}
+    assert not (store.pending_nodes_dir.parent / "escape.json").exists()
+
+
 def test_revoked_node_future_records_are_rejected(tmp_path):
     config_a, store_a = _init_store(tmp_path, alias="node-a")
     invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h")

@@ -23,6 +23,8 @@ from .crypto import ClusterSecret, NodeKeypair, b64url_encode
 from .frontier import frontier_from_records
 from .records import RecordEnvelope, create_record, decrypt_record_payload, record_path_name, verify_record_envelope
 
+_MAX_PENDING_NODE_METADATA = 128
+
 
 @dataclass(frozen=True)
 class ImportResult:
@@ -269,9 +271,21 @@ class ClusterStore:
             nodes[node.node_id] = node
         return nodes
 
+    def pending_nodes(self) -> dict[str, NodeMetadata]:
+        nodes: dict[str, NodeMetadata] = {}
+        if not self.pending_nodes_dir.exists():
+            return nodes
+        for path in self.pending_nodes_dir.glob("*.json"):
+            try:
+                node = NodeMetadata.from_dict(json.loads(path.read_text()))
+            except (json.JSONDecodeError, KeyError):
+                continue
+            nodes[node.node_id] = node
+        return nodes
+
     def write_node_metadata(self, metadata: NodeMetadata) -> None:
         atomic_write_text(
-            self.nodes_dir / f"{metadata.node_id}.json",
+            self._node_metadata_path(self.nodes_dir, metadata.node_id),
             json.dumps(metadata.to_dict(), indent=2, sort_keys=True) + "\n",
         )
 
@@ -285,9 +299,19 @@ class ClusterStore:
         # Public metadata alone is not trust. Keep it separate so diagnostics can
         # show pending/unknown nodes without authorizing their records.
         self.pending_nodes_dir.mkdir(parents=True, exist_ok=True)
-        path = self.pending_nodes_dir / f"{metadata.node_id}.json"
+        try:
+            path = self._node_metadata_path(self.pending_nodes_dir, metadata.node_id)
+        except ValueError:
+            return False
         content = json.dumps(metadata.to_dict(), indent=2, sort_keys=True).encode("utf-8") + b"\n"
         if path.exists() and path.read_bytes() == content:
+            return False
+        if not path.exists() and len(list(self.pending_nodes_dir.glob("*.json"))) >= _MAX_PENDING_NODE_METADATA:
+            self._record_diagnostic(
+                "rejected",
+                None,
+                f"pending node metadata cap reached ({_MAX_PENDING_NODE_METADATA})",
+            )
             return False
         atomic_write_bytes(path, content)
         return True
@@ -332,6 +356,12 @@ class ClusterStore:
         if not path.exists():
             return None
         return json.loads(path.read_text())
+
+    @staticmethod
+    def _node_metadata_path(directory: Path, node_id: str) -> Path:
+        if not node_id or "/" in node_id or "\\" in node_id or node_id in {".", ".."}:
+            raise ValueError(f"Invalid node_id {node_id!r}")
+        return directory / f"{node_id}.json"
 
     def _has_record(self, record_id: str) -> bool:
         return self._record_path_by_id(record_id) is not None

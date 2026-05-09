@@ -56,6 +56,8 @@ The filesystem transport is treated as untrusted. Record payloads are encrypted 
 
 Unknown nodes are rejected by default. `om cluster join` creates an invite-backed membership record; existing nodes accept that membership only when the invite was signed by a trusted node and has not expired.
 
+Public metadata from unknown nodes may be cached as pending peers for diagnostics, but it does not authorize those nodes or their records. `om cluster status --json` reports pending peers so operators can inspect unexpected shared-folder activity.
+
 Invite tokens are sensitive. The current filesystem v1 invite is a trusted direct invite and includes cluster key material so the second machine can decrypt existing records. Copy it only over a trusted channel and keep the expiration short.
 
 Private keys and provider credentials are stored only under the local config directory. Cluster key directories are owner-only (`0700`) and key files are owner-only (`0600`).

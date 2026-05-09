@@ -362,6 +362,7 @@ def add_cluster_data_key(
     secret = load_cluster_secret(config, cluster_id)
     data_keys = dict(secret.data_keys)
     data_keys[key_id] = data_key_b64
+    # HLC strings are fixed-width, so lexicographic order matches timestamp order.
     should_activate = activate and (
         secret.active_key_hlc is None or active_key_hlc is None or active_key_hlc >= secret.active_key_hlc
     )

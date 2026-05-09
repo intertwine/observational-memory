@@ -643,6 +643,7 @@ def cluster_status(ctx: click.Context, as_json: bool) -> None:
             "transports": [transport.to_dict() for transport in cluster_config.transports],
             "heads": store.all_heads(),
             "peers": {node_id: node.to_dict() for node_id, node in store.public_nodes().items()},
+            "pending_peers": {node_id: node.to_dict() for node_id, node in store.pending_nodes().items()},
             "records": {
                 "total": len(records),
                 "observations": len([r for r in records if r.kind == "observation"]),
@@ -671,6 +672,10 @@ def cluster_status(ctx: click.Context, as_json: bool) -> None:
     for node_id, seq in data["heads"].items():
         alias = data["peers"].get(node_id, {}).get("alias", node_id)
         click.echo(f"  {node_id} {alias} seq={seq}")
+    if data.get("pending_peers"):
+        click.echo("Pending peers:")
+        for node_id, peer in data["pending_peers"].items():
+            click.echo(f"  {node_id} {peer.get('alias', node_id)}")
 
 
 @cluster.command("peers")

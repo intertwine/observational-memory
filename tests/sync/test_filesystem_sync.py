@@ -1,3 +1,5 @@
+import json
+
 from click.testing import CliRunner
 
 from observational_memory.cli import cli
@@ -10,7 +12,7 @@ from observational_memory.sync.config import (
 )
 from observational_memory.sync.engine import sync_cluster
 from observational_memory.sync.materialize import materialize_cluster_memory
-from observational_memory.sync.store import ClusterStore
+from observational_memory.sync.store import ClusterStore, NodeMetadata
 
 
 def _membership(store, invite=None):
@@ -155,8 +157,28 @@ def test_cli_init_status_materialize(isolated_om_home):
 
     result = runner.invoke(cli, ["cluster", "status", "--json"])
     assert result.exit_code == 0, result.output
-    assert '"initialized": true' in result.output
-    assert '"cli-node"' in result.output
+    status = json.loads(result.stdout)
+    assert status["initialized"] is True
+    assert status["node"]["alias"] == "cli-node"
+    assert status["pending_peers"] == {}
+
+    store = ClusterStore.from_config(Config())
+    pending = NodeMetadata(
+        node_id="node_pending",
+        alias="pending",
+        signing_public_key_b64="abc",
+    )
+    assert store.import_node_metadata_bytes(json.dumps(pending.to_dict()).encode("utf-8")) is True
+
+    result = runner.invoke(cli, ["cluster", "status", "--json"])
+    assert result.exit_code == 0, result.output
+    status = json.loads(result.stdout)
+    assert status["pending_peers"]["node_pending"]["alias"] == "pending"
+
+    result = runner.invoke(cli, ["cluster", "status"])
+    assert result.exit_code == 0, result.output
+    assert "Pending peers:" in result.output
+    assert "node_pending pending" in result.output
 
     result = runner.invoke(cli, ["cluster", "materialize", "--no-reindex"])
     assert result.exit_code == 0, result.output
@@ -188,7 +210,8 @@ def test_cli_invite_join_revoke_rotate(tmp_path):
 
     result = runner.invoke(cli, ["cluster", "invite", "--expires", "1h"], env=env_a)
     assert result.exit_code == 0, result.output
-    token = result.output.strip().splitlines()[-1]
+    assert "carries cluster key material" in result.stderr
+    token = result.stdout.strip()
     assert token.startswith("omc1:")
 
     result = runner.invoke(cli, ["cluster", "join", token, "--node-alias", "node-b"], env=env_b)

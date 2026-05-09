@@ -19,6 +19,7 @@ Implementation status for the local Codex worktree.
 - Hosted relay transport. The sync engine accepts additional transports without changing record verification. Follow-up: [#35](https://github.com/intertwine/observational-memory/issues/35), targeted for `0.6.2`.
 - Direct P2P transport. The sync engine accepts additional transports without changing record verification. Follow-up: [#36](https://github.com/intertwine/observational-memory/issues/36), targeted for `0.6.3`.
 - Re-encryption of historical records during key rotation. Current rotation affects future records and distributes the new key through an encrypted key-rotation record. Follow-up: [#37](https://github.com/intertwine/observational-memory/issues/37), targeted for `0.6.4`.
+- Cluster feature-flag caching. The current gate is conservative and reparses local config/key state on each probe. Follow-up: [#38](https://github.com/intertwine/observational-memory/issues/38), targeted for `0.6.5`.
 
 ## Verification
 
