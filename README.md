@@ -44,14 +44,28 @@ What you get:
 # macOS
 brew install intertwine/tap/observational-memory
 
-# Or with uv
+# Linux / macOS / Windows — with uv
 uv tool install observational-memory
 
 om install
 om doctor
 ```
 
-That gives you hooks for Claude Code, hooks-first startup and checkpointing for Codex, local markdown memory in `~/.local/share/observational-memory/`, and built-in search with `om search`. Add `om install --cowork` to install the Cowork plugin. Hermes session ingestion is available through `om observe --source hermes` or by pointing `om observe --transcript` at a Hermes session log.
+That gives you hooks for Claude Code, hooks-first startup and checkpointing for Codex, local markdown memory in `~/.local/share/observational-memory/` (or `%LOCALAPPDATA%\observational-memory\` on Windows), and built-in search with `om search`. Add `om install --cowork` to install the Cowork plugin (macOS only). Hermes session ingestion is available through `om observe --source hermes` or by pointing `om observe --transcript` at a Hermes session log.
+
+### Windows support
+
+`om` runs on Windows 10/11 with Python 3.11+. Behavior matches macOS/Linux with these substitutions:
+
+| Concern              | macOS / Linux                            | Windows                                                       |
+| -------------------- | ---------------------------------------- | ------------------------------------------------------------- |
+| Memory dir           | `~/.local/share/observational-memory/`   | `%LOCALAPPDATA%\observational-memory\` (XDG_DATA_HOME wins)   |
+| Env file             | `~/.config/observational-memory/env`     | `%APPDATA%\observational-memory\env` (XDG_CONFIG_HOME wins)   |
+| Background scheduler | launchd (macOS) / cron (Linux)           | Windows Task Scheduler (`schtasks.exe`)                       |
+| Claude hooks         | bash + jq scripts shipped with the wheel | Hooks call `om context` and `om claude-checkpoint` directly   |
+| Cowork plugin        | Installed under Application Support      | Not supported (Cowork is macOS-only)                          |
+
+`om install` auto-detects Windows and uses `--scheduler schtasks`; pass `--scheduler none` if you'd rather run observe/reflect manually. The Windows Claude hooks invoke `om` directly, so neither `bash` nor `jq` is required.
 
 ### Prerequisites
 
