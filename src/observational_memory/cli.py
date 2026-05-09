@@ -540,7 +540,6 @@ def export_cmd(
 def codex_checkpoint(ctx: click.Context) -> None:
     """Queue a Codex transcript-specific checkpoint from the Stop hook payload."""
     import json as json_mod
-    import subprocess
 
     config = ctx.obj["config"]
 
@@ -590,21 +589,7 @@ def codex_checkpoint(ctx: click.Context) -> None:
         )
 
         worker_command = _build_codex_checkpoint_worker_command(transcript)
-        popen_kwargs: dict[str, object] = {
-            "cwd": payload.get("cwd") or None,
-            "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-        }
-        if sys.platform == "win32":
-            # start_new_session is POSIX-only. On Windows, detach into a new
-            # process group so the child survives the parent hook process.
-            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
-                subprocess, "DETACHED_PROCESS", 0
-            )
-        else:
-            popen_kwargs["start_new_session"] = True
-        subprocess.Popen(worker_command, **popen_kwargs)
+        _spawn_detached(worker_command, cwd=payload.get("cwd"))
     except Exception:
         _update_codex_checkpoint_state(
             config,
@@ -648,16 +633,49 @@ def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
         _release_codex_checkpoint_lock(lock_path)
 
 
+def _build_claude_checkpoint_worker_command(transcript: Path) -> list[str]:
+    """Return argv for the detached Claude checkpoint worker process."""
+    om_path = _find_om_path() or sys.argv[0] or "om"
+    return [om_path, "claude-checkpoint-worker", "--transcript", str(transcript)]
+
+
+def _spawn_detached(argv: list[str], cwd: str | Path | None = None) -> None:
+    """Spawn *argv* as a detached background process.
+
+    Uses ``start_new_session`` on POSIX and ``CREATE_NEW_PROCESS_GROUP |
+    DETACHED_PROCESS`` on Windows so the worker survives the parent hook
+    process exiting.
+    """
+    import subprocess
+
+    popen_kwargs: dict[str, object] = {
+        "cwd": cwd or None,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+            subprocess, "DETACHED_PROCESS", 0
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    subprocess.Popen(argv, **popen_kwargs)
+
+
 @cli.command(hidden=True, name="claude-checkpoint")
 @click.pass_context
 def claude_checkpoint(ctx: click.Context) -> None:
-    """Process a Claude Code session checkpoint from a hook payload.
+    """Queue a Claude Code session checkpoint from a hook payload.
 
-    Reads the hook JSON payload from stdin (Claude Code passes
-    ``transcript_path`` and ``hook_event_name``) and runs the observer
-    against the transcript. This is the Python equivalent of the bash
-    ``session-end.sh`` hook and is used by the Windows install path,
-    which cannot rely on bash + jq being available.
+    Mirrors the POSIX ``session-end.sh`` hook: parses the JSON payload from
+    stdin, throttles in-session checkpoints by
+    ``OM_SESSION_OBSERVER_INTERVAL_SECONDS`` (skipping force events
+    SessionEnd/Stop), holds a per-transcript filesystem lock, persists
+    state to ``.session-observer-state.json``, and spawns a detached
+    ``claude-checkpoint-worker`` so the calling agent isn't blocked by
+    LLM work.
     """
     import json as json_mod
 
@@ -683,19 +701,94 @@ def claude_checkpoint(ctx: click.Context) -> None:
     is_force_event = event_name in {"SessionEnd", "Stop", ""}
     is_checkpoint_event = event_name in {"UserPromptSubmit", "PreCompact"}
 
+    # Cheap early-exit for disabled checkpoints (no lock needed).
     if is_checkpoint_event and not is_force_event:
         disable = (os.environ.get("OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS") or "").strip().lower()
         if disable in {"1", "true", "yes", "on"}:
             return
 
+    lock_path = _checkpoint_lock_path(config.claude_checkpoint_lock_dir, transcript)
+    if not _acquire_checkpoint_lock(config.claude_checkpoint_lock_dir, lock_path):
+        return
+
+    try:
+        current_count = _count_claude_transcript_messages(transcript)
+
+        # Throttle non-force events: skip if no new messages since the last
+        # observation OR if the last observation was within the configured
+        # interval. Force events (SessionEnd/Stop) always proceed.
+        if not is_force_event:
+            state = _load_checkpoint_state(config.claude_checkpoint_state_path)
+            previous = state.get(str(transcript), {})
+            previous_count = previous.get("message_count")
+            previous_observed = previous.get("last_observed")
+            interval = _session_observer_interval_seconds()
+
+            if isinstance(previous_count, int) and previous_count >= current_count:
+                _release_checkpoint_lock(lock_path)
+                return
+
+            if (
+                interval > 0
+                and isinstance(previous_observed, int)
+                and (datetime.now(timezone.utc).timestamp() - previous_observed) < interval
+            ):
+                _release_checkpoint_lock(lock_path)
+                return
+
+        _update_checkpoint_state(
+            config.claude_checkpoint_state_path,
+            transcript,
+            message_count=current_count,
+            status="in_progress",
+        )
+
+        worker_command = _build_claude_checkpoint_worker_command(transcript)
+        _spawn_detached(worker_command, cwd=payload.get("cwd"))
+    except Exception:
+        _update_checkpoint_state(
+            config.claude_checkpoint_state_path,
+            transcript,
+            message_count=_count_claude_transcript_messages(transcript),
+            status="failed",
+        )
+        _release_checkpoint_lock(lock_path)
+        # Hooks must never raise into the parent agent.
+        return
+
+
+@cli.command(hidden=True, name="claude-checkpoint-worker")
+@click.option("--transcript", type=click.Path(path_type=Path), required=True)
+@click.pass_context
+def claude_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
+    """Observe one Claude transcript and release its checkpoint lock."""
     from .observe import observe_claude_transcript
+
+    config = ctx.obj["config"]
+    transcript = transcript.expanduser()
+    lock_path = _checkpoint_lock_path(config.claude_checkpoint_lock_dir, transcript)
 
     try:
         observe_claude_transcript(transcript, config, dry_run=False)
         _maybe_run_reflector_catchup(config)
+        _update_checkpoint_state(
+            config.claude_checkpoint_state_path,
+            transcript,
+            message_count=_count_claude_transcript_messages(transcript),
+            status="success",
+        )
     except Exception:
-        # Hooks must never raise into the parent agent. Suppress and exit.
+        _update_checkpoint_state(
+            config.claude_checkpoint_state_path,
+            transcript,
+            message_count=_count_claude_transcript_messages(transcript),
+            status="failed",
+        )
+        # Suppress to keep the worker from exiting non-zero into a
+        # background context where nothing reads the status.
         return
+    finally:
+        _release_checkpoint_lock(lock_path)
 
 
 _SUPPORTED_PROVIDERS = ("anthropic", "openai", "anthropic-vertex", "anthropic-bedrock")
@@ -1789,6 +1882,27 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
 # --- Claude Code hook installation ---
 
 
+def _quote_hook_executable(path: str) -> str:
+    """Quote *path* for use as the executable in a Claude/Codex hook command.
+
+    cmd.exe treats single quotes as literal characters, so paths with
+    spaces (e.g. ``C:\\Program Files\\...`` or ``C:\\Users\\First Last\\...``)
+    must be wrapped in double quotes. POSIX shells need POSIX-style
+    quoting (``shlex.quote``) instead.
+    """
+    if sys.platform == "win32":
+        if not path:
+            return '""'
+        if any(ch in path for ch in (" ", "\t", '"')):
+            escaped = path.replace('"', '\\"')
+            return f'"{escaped}"'
+        return path
+
+    import shlex
+
+    return shlex.quote(path)
+
+
 def _claude_hook_commands() -> tuple[str, str]:
     """Return (session_start_command, checkpoint_command) for Claude Code hooks.
 
@@ -1798,12 +1912,8 @@ def _claude_hook_commands() -> tuple[str, str]:
     have been the production behavior for some time.
     """
     if sys.platform == "win32":
-        import shlex
-
         om_path = _find_om_path() or "om"
-        # Even on Windows, hook commands are invoked via cmd.exe — quoting
-        # with shlex (POSIX-style) is what Claude Code expects.
-        quoted = shlex.quote(om_path)
+        quoted = _quote_hook_executable(om_path)
         return f"{quoted} context", f"{quoted} claude-checkpoint"
 
     hooks_dir = Path(__file__).parent / "hooks" / "claude"
@@ -1986,18 +2096,14 @@ These files are auto-maintained. Do not modify them directly.
 
 def _build_codex_session_start_command() -> str:
     """Return the command string for the Codex SessionStart hook."""
-    import shlex
-
     om_path = _find_om_path() or "om"
-    return f"{shlex.quote(om_path)} context"
+    return f"{_quote_hook_executable(om_path)} context"
 
 
 def _build_codex_checkpoint_command() -> str:
     """Return the command string for the Codex Stop hook."""
-    import shlex
-
     om_path = _find_om_path() or "om"
-    return f"{shlex.quote(om_path)} codex-checkpoint"
+    return f"{_quote_hook_executable(om_path)} codex-checkpoint"
 
 
 def _build_codex_checkpoint_worker_command(transcript: Path) -> list[str]:
@@ -2562,15 +2668,20 @@ def _count_codex_transcript_messages(transcript: Path) -> int:
         return 0
 
 
-def _codex_checkpoint_lock_path(config: Config, transcript: Path) -> Path:
-    """Return the lock directory path for one Codex transcript."""
-    import hashlib
+def _count_claude_transcript_messages(transcript: Path) -> int:
+    """Return the number of parsed Claude (or Cowork) messages in a transcript."""
+    from .transcripts.claude import parse_transcript
 
-    digest = hashlib.sha256(str(transcript).encode("utf-8")).hexdigest()
-    return config.codex_checkpoint_lock_dir / digest
+    if not transcript.exists():
+        return 0
+
+    try:
+        return len(parse_transcript(transcript))
+    except OSError:
+        return 0
 
 
-def _codex_checkpoint_lock_stale_minutes(default: int = 60) -> int:
+def _checkpoint_lock_stale_minutes(default: int = 60) -> int:
     raw_value = os.environ.get("OM_SESSION_OBSERVER_LOCK_STALE_MINUTES", str(default))
     try:
         stale_minutes = int(raw_value)
@@ -2580,10 +2691,30 @@ def _codex_checkpoint_lock_stale_minutes(default: int = 60) -> int:
     return max(stale_minutes, 0)
 
 
-def _acquire_codex_checkpoint_lock(config: Config, lock_path: Path) -> bool:
-    """Acquire a best-effort mkdir lock for a Codex checkpoint worker."""
-    stale_minutes = _codex_checkpoint_lock_stale_minutes()
-    lock_dir = config.codex_checkpoint_lock_dir
+def _session_observer_interval_seconds(default: int = 900) -> int:
+    """Return the in-session checkpoint throttle interval in seconds."""
+    raw_value = os.environ.get("OM_SESSION_OBSERVER_INTERVAL_SECONDS", str(default))
+    try:
+        seconds = int(raw_value)
+    except ValueError:
+        return default
+    return max(seconds, 0)
+
+
+def _hash_transcript_path(transcript: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(str(transcript).encode("utf-8")).hexdigest()
+
+
+def _checkpoint_lock_path(lock_dir: Path, transcript: Path) -> Path:
+    """Return the lock directory path for one transcript under *lock_dir*."""
+    return lock_dir / _hash_transcript_path(transcript)
+
+
+def _acquire_checkpoint_lock(lock_dir: Path, lock_path: Path) -> bool:
+    """Acquire a best-effort mkdir lock, sweeping stale entries first."""
+    stale_minutes = _checkpoint_lock_stale_minutes()
     lock_dir.mkdir(parents=True, exist_ok=True)
 
     if stale_minutes > 0:
@@ -2613,25 +2744,87 @@ def _acquire_codex_checkpoint_lock(config: Config, lock_path: Path) -> bool:
             return False
 
 
-def _release_codex_checkpoint_lock(lock_path: Path) -> None:
-    """Release a Codex checkpoint mkdir lock if it exists."""
+def _release_checkpoint_lock(lock_path: Path) -> None:
+    """Release a checkpoint mkdir lock if it exists."""
     shutil.rmtree(lock_path, ignore_errors=True)
 
 
-def _load_codex_checkpoint_state(config: Config) -> dict[str, dict]:
-    """Load Codex checkpoint hook state, tolerating missing or invalid files."""
+def _load_checkpoint_state(state_path: Path) -> dict[str, dict]:
+    """Load checkpoint hook state, tolerating missing or invalid files."""
     import json
 
-    path = config.codex_checkpoint_state_path
-    if not path.exists():
+    if not state_path.exists():
         return {}
 
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(state_path.read_text())
     except (json.JSONDecodeError, OSError):
         return {}
 
     return payload if isinstance(payload, dict) else {}
+
+
+def _update_checkpoint_state(
+    state_path: Path,
+    transcript: Path,
+    *,
+    message_count: int,
+    status: str,
+) -> None:
+    """Persist the latest checkpoint hook state for one transcript."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX fallback
+        fcntl = None
+
+    import json
+    import tempfile
+
+    state_lock_path = state_path.with_suffix(".lock")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with state_lock_path.open("a+") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            state = _load_checkpoint_state(state_path)
+            state[str(transcript)] = {
+                "last_observed": int(datetime.now(timezone.utc).timestamp()),
+                "message_count": max(message_count, 0),
+                "status": status,
+            }
+
+            with tempfile.NamedTemporaryFile("w", dir=state_path.parent, delete=False) as tmp:
+                json.dump(state, tmp, indent=2, sort_keys=True)
+                tmp.write("\n")
+                tmp_path = Path(tmp.name)
+            tmp_path.replace(state_path)
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+# --- Codex-specific wrappers (kept for backward-compat with existing imports) ---
+
+
+def _codex_checkpoint_lock_path(config: Config, transcript: Path) -> Path:
+    return _checkpoint_lock_path(config.codex_checkpoint_lock_dir, transcript)
+
+
+def _codex_checkpoint_lock_stale_minutes(default: int = 60) -> int:
+    return _checkpoint_lock_stale_minutes(default)
+
+
+def _acquire_codex_checkpoint_lock(config: Config, lock_path: Path) -> bool:
+    return _acquire_checkpoint_lock(config.codex_checkpoint_lock_dir, lock_path)
+
+
+def _release_codex_checkpoint_lock(lock_path: Path) -> None:
+    _release_checkpoint_lock(lock_path)
+
+
+def _load_codex_checkpoint_state(config: Config) -> dict[str, dict]:
+    return _load_checkpoint_state(config.codex_checkpoint_state_path)
 
 
 def _update_codex_checkpoint_state(
@@ -2641,38 +2834,12 @@ def _update_codex_checkpoint_state(
     message_count: int,
     status: str,
 ) -> None:
-    """Persist the latest Codex checkpoint hook state for one transcript."""
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - non-POSIX fallback
-        fcntl = None
-
-    import json
-    import tempfile
-
-    path = config.codex_checkpoint_state_path
-    lock_path = path.with_suffix(".lock")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+") as lock_file:
-        if fcntl is not None:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-
-        try:
-            state = _load_codex_checkpoint_state(config)
-            state[str(transcript)] = {
-                "last_observed": int(datetime.now(timezone.utc).timestamp()),
-                "message_count": max(message_count, 0),
-                "status": status,
-            }
-
-            with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as tmp:
-                json.dump(state, tmp, indent=2, sort_keys=True)
-                tmp.write("\n")
-                tmp_path = Path(tmp.name)
-            tmp_path.replace(path)
-        finally:
-            if fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    _update_checkpoint_state(
+        config.codex_checkpoint_state_path,
+        transcript,
+        message_count=message_count,
+        status=status,
+    )
 
 
 def _resolve_scheduler_mode(requested: str, cron_compat: bool | None, platform: str | None = None) -> str:

@@ -252,6 +252,17 @@ class Config:
     def codex_checkpoint_lock_dir(self) -> Path:
         return self.memory_dir / ".codex-checkpoint-locks"
 
+    # Claude Code session-end / checkpoint state. Names match the bash
+    # session-end.sh hook so a host that switches from POSIX to Windows
+    # picks up the existing state file in place.
+    @property
+    def claude_checkpoint_state_path(self) -> Path:
+        return self.memory_dir / ".session-observer-state.json"
+
+    @property
+    def claude_checkpoint_lock_dir(self) -> Path:
+        return self.memory_dir / ".session-observer-locks"
+
     @property
     def launch_agents_dir(self) -> Path:
         return Path.home() / "Library" / "LaunchAgents"

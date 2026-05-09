@@ -58,6 +58,15 @@ def windows_env(monkeypatch, tmp_path):
     monkeypatch.setattr("observational_memory.config.sys.platform", "win32")
     monkeypatch.setattr(config_module, "is_windows", lambda: True)
 
+    # ``shutil.which`` on Python 3.13 dispatches into ``_winapi`` when
+    # ``sys.platform == 'win32'``; faking the platform on a POSIX runner
+    # raises AttributeError. Stub ``_find_om_path`` to a stable path so
+    # the install flow doesn't take that codepath under test.
+    monkeypatch.setattr(
+        "observational_memory.cli._find_om_path",
+        lambda: "C:/tools/om.exe",
+    )
+
     return {"appdata": appdata, "local_appdata": local_appdata, "home": home}
 
 
@@ -278,49 +287,180 @@ def test_claude_hook_commands_on_windows_use_om_directly(windows_env, monkeypatc
     assert "om.exe" in checkpoint_cmd
 
 
+def test_claude_hook_commands_on_windows_use_doublequote_for_paths_with_spaces(windows_env, monkeypatch):
+    """cmd.exe treats single quotes as literal characters; paths must be wrapped in double quotes."""
+    monkeypatch.setattr(
+        "observational_memory.cli._find_om_path",
+        lambda: r"C:\Users\First Last\AppData\Local\bin\om.exe",
+    )
+    session_start_cmd, checkpoint_cmd = _claude_hook_commands()
+    # Double-quoted, not single-quoted (POSIX shlex.quote would have produced
+    # a single-quoted string that cmd.exe treats as literal characters).
+    assert session_start_cmd.startswith(r'"C:\Users\First Last\AppData\Local\bin\om.exe"')
+    assert checkpoint_cmd.startswith(r'"C:\Users\First Last\AppData\Local\bin\om.exe"')
+    assert "'" not in session_start_cmd
+    assert "'" not in checkpoint_cmd
+    # And shlex.split (used by uninstall idempotency) recovers the path.
+    import shlex
+
+    parts = shlex.split(session_start_cmd)
+    assert parts[0] == r"C:\Users\First Last\AppData\Local\bin\om.exe"
+    assert parts[1] == "context"
+
+
+def test_codex_hook_commands_on_windows_use_doublequote_for_paths_with_spaces(windows_env, monkeypatch):
+    """The Codex hook builders must use the same Windows-friendly quoting as Claude."""
+    from observational_memory.cli import (
+        _build_codex_checkpoint_command,
+        _build_codex_session_start_command,
+    )
+
+    monkeypatch.setattr(
+        "observational_memory.cli._find_om_path",
+        lambda: r"C:\Program Files\om\om.exe",
+    )
+
+    start_cmd = _build_codex_session_start_command()
+    stop_cmd = _build_codex_checkpoint_command()
+    assert start_cmd.startswith(r'"C:\Program Files\om\om.exe"')
+    assert stop_cmd.startswith(r'"C:\Program Files\om\om.exe"')
+    assert "'" not in start_cmd
+    assert "'" not in stop_cmd
+
+
 # --- claude-checkpoint command ---
 
 
-def test_claude_checkpoint_runs_observer_when_transcript_exists(windows_env, monkeypatch, tmp_path):
+def _claude_transcript_line(uuid: str, content: str = "hi") -> str:
+    return json.dumps(
+        {
+            "type": "user",
+            "message": {"content": content},
+            "uuid": uuid,
+            "timestamp": "2026-05-09T00:00:00Z",
+        }
+    )
+
+
+def test_claude_checkpoint_spawns_worker_for_force_event(windows_env, monkeypatch, tmp_path):
+    """SessionEnd events must skip throttling and spawn a detached worker."""
     transcript = tmp_path / "session.jsonl"
-    transcript.write_text('{"type":"user","message":{"content":"hi"},"uuid":"a","timestamp":"2026-05-09T00:00:00Z"}\n')
+    transcript.write_text(_claude_transcript_line("a") + "\n")
 
-    calls: list = []
+    spawned: list[tuple[list[str], str | None]] = []
 
-    def fake_observe(transcript_path, config, dry_run):
-        calls.append(("observe", transcript_path, dry_run))
+    def fake_spawn(argv, cwd=None):
+        spawned.append((list(argv), cwd))
 
-    def fake_catchup(config):
-        calls.append(("catchup",))
-
-    monkeypatch.setattr(
-        "observational_memory.observe.observe_claude_transcript",
-        fake_observe,
-    )
-    monkeypatch.setattr(
-        "observational_memory.cli._maybe_run_reflector_catchup",
-        fake_catchup,
-    )
+    monkeypatch.setattr("observational_memory.cli._spawn_detached", fake_spawn)
 
     runner = CliRunner()
     payload = json.dumps({"transcript_path": str(transcript), "hook_event_name": "SessionEnd"})
     result = runner.invoke(cli, ["claude-checkpoint"], input=payload)
 
     assert result.exit_code == 0, result.output
-    assert ("observe", transcript, False) in calls
-    assert ("catchup",) in calls
+    assert len(spawned) == 1
+    argv, _ = spawned[0]
+    assert argv[1:] == ["claude-checkpoint-worker", "--transcript", str(transcript)]
+
+
+def test_claude_checkpoint_throttles_on_interval(windows_env, monkeypatch, tmp_path):
+    """Within OM_SESSION_OBSERVER_INTERVAL_SECONDS, in-session events are skipped."""
+    from datetime import datetime, timezone
+
+    from observational_memory.cli import _update_checkpoint_state
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(_claude_transcript_line("a") + "\n")
+
+    config = Config(memory_dir=windows_env["local_appdata"] / "observational-memory")
+    config.memory_dir.mkdir(parents=True, exist_ok=True)
+    # Pretend we observed this transcript 1 second ago at an older message count.
+    _update_checkpoint_state(
+        config.claude_checkpoint_state_path,
+        transcript,
+        message_count=0,
+        status="success",
+    )
+
+    spawned: list = []
+    monkeypatch.setattr(
+        "observational_memory.cli._spawn_detached",
+        lambda argv, cwd=None: spawned.append((argv, cwd)),
+    )
+
+    monkeypatch.setenv("OM_SESSION_OBSERVER_INTERVAL_SECONDS", "900")
+
+    runner = CliRunner()
+    payload = json.dumps({"transcript_path": str(transcript), "hook_event_name": "UserPromptSubmit"})
+    result = runner.invoke(cli, ["claude-checkpoint"], input=payload)
+    assert result.exit_code == 0, result.output
+    # Most recent observation is within the throttle interval AND message
+    # count hasn't grown (state has 0, transcript has 1) → message count
+    # check passes but the time-based throttle short-circuits.
+    # Burn down the message-count skip first by showing that the count
+    # difference *would* allow it but the timestamp throttles instead.
+    # Because state has count 0 < current 1, the message-count skip
+    # doesn't trigger — only the interval throttle blocks the spawn.
+    assert spawned == []
+    # Sanity: a force event still runs even with throttling state in place.
+    state_then = _update_checkpoint_state  # alias to silence unused linters
+    _ = state_then
+    runner2 = CliRunner()
+    force = json.dumps({"transcript_path": str(transcript), "hook_event_name": "SessionEnd"})
+    result2 = runner2.invoke(cli, ["claude-checkpoint"], input=force)
+    assert result2.exit_code == 0, result2.output
+    # Force event always advances past the throttle.
+    assert len(spawned) == 1
+
+    # And confirm a present-day timestamp lives inside the interval window.
+    now = datetime.now(timezone.utc).timestamp()
+    state = json.loads(config.claude_checkpoint_state_path.read_text())
+    last = state[str(transcript)]["last_observed"]
+    assert now - last < 900
+
+
+def test_claude_checkpoint_skips_when_message_count_unchanged(windows_env, monkeypatch, tmp_path):
+    """If message count hasn't grown since the last observation, skip."""
+    from observational_memory.cli import _update_checkpoint_state
+
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(_claude_transcript_line("a") + "\n")
+
+    config = Config(memory_dir=windows_env["local_appdata"] / "observational-memory")
+    config.memory_dir.mkdir(parents=True, exist_ok=True)
+    # Pretend we already observed at the same message count.
+    _update_checkpoint_state(
+        config.claude_checkpoint_state_path,
+        transcript,
+        message_count=1,
+        status="success",
+    )
+
+    spawned: list = []
+    monkeypatch.setattr(
+        "observational_memory.cli._spawn_detached",
+        lambda argv, cwd=None: spawned.append(argv),
+    )
+    # Interval is 0 to ensure only the message-count gate is exercised.
+    monkeypatch.setenv("OM_SESSION_OBSERVER_INTERVAL_SECONDS", "0")
+
+    runner = CliRunner()
+    payload = json.dumps({"transcript_path": str(transcript), "hook_event_name": "UserPromptSubmit"})
+    result = runner.invoke(cli, ["claude-checkpoint"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert spawned == []
 
 
 def test_claude_checkpoint_respects_disable_env(windows_env, monkeypatch, tmp_path):
     transcript = tmp_path / "session.jsonl"
-    transcript.write_text("{}\n")
+    transcript.write_text(_claude_transcript_line("a") + "\n")
     monkeypatch.setenv("OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS", "1")
 
-    calls: list = []
-
+    spawned: list = []
     monkeypatch.setattr(
-        "observational_memory.observe.observe_claude_transcript",
-        lambda *a, **k: calls.append("observe"),
+        "observational_memory.cli._spawn_detached",
+        lambda argv, cwd=None: spawned.append(argv),
     )
 
     runner = CliRunner()
@@ -328,7 +468,7 @@ def test_claude_checkpoint_respects_disable_env(windows_env, monkeypatch, tmp_pa
     result = runner.invoke(cli, ["claude-checkpoint"], input=payload)
 
     assert result.exit_code == 0
-    assert calls == []
+    assert spawned == []
 
 
 def test_claude_checkpoint_handles_missing_transcript(windows_env):
@@ -336,6 +476,58 @@ def test_claude_checkpoint_handles_missing_transcript(windows_env):
     payload = json.dumps({"transcript_path": "/nonexistent/path.jsonl"})
     result = runner.invoke(cli, ["claude-checkpoint"], input=payload)
     assert result.exit_code == 0
+
+
+def test_claude_checkpoint_writes_state_and_holds_lock(windows_env, monkeypatch, tmp_path):
+    """The checkpoint must persist state and hold the per-transcript lock."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(_claude_transcript_line("a") + "\n")
+
+    monkeypatch.setattr("observational_memory.cli._spawn_detached", lambda argv, cwd=None: None)
+
+    config = Config(memory_dir=windows_env["local_appdata"] / "observational-memory")
+
+    runner = CliRunner()
+    payload = json.dumps({"transcript_path": str(transcript), "hook_event_name": "SessionEnd"})
+    result = runner.invoke(cli, ["claude-checkpoint"], input=payload)
+    assert result.exit_code == 0, result.output
+
+    state = json.loads(config.claude_checkpoint_state_path.read_text())
+    entry = state[str(transcript)]
+    assert entry["status"] == "in_progress"
+    assert entry["message_count"] == 1
+
+    # The per-transcript lock dir should have been created and held — the
+    # worker is responsible for releasing it, and we mocked that out.
+    from observational_memory.cli import _checkpoint_lock_path
+
+    lock_path = _checkpoint_lock_path(config.claude_checkpoint_lock_dir, transcript)
+    assert lock_path.exists()
+
+
+def test_claude_checkpoint_worker_runs_observer(windows_env, monkeypatch, tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(_claude_transcript_line("a") + "\n")
+
+    calls: list = []
+
+    def fake_observe(transcript_path, config, dry_run):
+        calls.append(("observe", transcript_path, dry_run))
+
+    monkeypatch.setattr(
+        "observational_memory.observe.observe_claude_transcript",
+        fake_observe,
+    )
+    monkeypatch.setattr(
+        "observational_memory.cli._maybe_run_reflector_catchup",
+        lambda config: calls.append(("catchup",)),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["claude-checkpoint-worker", "--transcript", str(transcript)])
+    assert result.exit_code == 0, result.output
+    assert ("observe", transcript, False) in calls
+    assert ("catchup",) in calls
 
 
 # --- Uninstall ---
