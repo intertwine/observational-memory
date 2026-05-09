@@ -2617,20 +2617,21 @@ def _install_codex(config: Config) -> None:
 
     agents_md = config.codex_agents_md
 
-    if agents_md.exists():
-        content = agents_md.read_text()
-        if _CODEX_OM_MARKER in content:
-            pattern = rf"\n*{re.escape(_CODEX_OM_MARKER)}.*?{re.escape(_CODEX_OM_MARKER)}\n*"
-            content = re.sub(pattern, "\n\n" + _CODEX_OM_BLOCK + "\n", content, flags=re.DOTALL)
-            agents_md.write_text(content.strip() + "\n")
-            click.echo(f"Updated observational memory instructions in {agents_md}")
-            return
-        content = content.rstrip() + "\n\n" + _CODEX_OM_BLOCK + "\n"
-    else:
+    if not agents_md.exists():
         agents_md.parent.mkdir(parents=True, exist_ok=True)
-        content = _CODEX_OM_BLOCK + "\n"
+        agents_md.write_text(_CODEX_OM_BLOCK + "\n")
+        click.echo(f"Installed Codex AGENTS fallback in {agents_md}")
+        return
 
-    agents_md.write_text(content)
+    existing = agents_md.read_text()
+    if _CODEX_OM_MARKER in existing:
+        pattern = rf"\n*{re.escape(_CODEX_OM_MARKER)}.*?{re.escape(_CODEX_OM_MARKER)}\n*"
+        replaced = re.sub(pattern, "\n\n" + _CODEX_OM_BLOCK + "\n", existing, flags=re.DOTALL)
+        agents_md.write_text(replaced.strip() + "\n")
+        click.echo(f"Updated observational memory instructions in {agents_md}")
+        return
+
+    agents_md.write_text(existing.rstrip() + "\n\n" + _CODEX_OM_BLOCK + "\n")
     click.echo(f"Installed Codex AGENTS fallback in {agents_md}")
 
 
