@@ -8,8 +8,8 @@ from observational_memory.sync.config import (
     initialize_cluster_config,
     join_cluster_from_invite,
 )
-from observational_memory.sync.materialize import materialize_cluster_memory
-from observational_memory.sync.store import ClusterStore
+from observational_memory.sync.materialize import choose_reflection_snapshot, materialize_cluster_memory
+from observational_memory.sync.store import ClusterStore, NodeMetadata
 
 
 def _init_store(tmp_path, name="Test", alias="node-a"):
@@ -80,6 +80,50 @@ def test_duplicate_import_is_idempotent_and_tamper_rejected(tmp_path):
     assert rejected.status == "rejected"
 
 
+def test_public_node_metadata_import_is_pending_only(tmp_path):
+    _config, store = _init_store(tmp_path)
+    metadata = NodeMetadata(
+        node_id="node_pending",
+        alias="pending",
+        signing_public_key_b64="abc",
+    )
+
+    assert store.import_node_metadata_bytes(json.dumps(metadata.to_dict()).encode("utf-8")) is True
+    assert "node_pending" not in store.public_nodes()
+    assert (store.pending_nodes_dir / "node_pending.json").exists()
+    assert store.import_node_metadata_bytes(json.dumps(metadata.to_dict()).encode("utf-8")) is False
+
+
+def test_revoked_node_future_records_are_rejected(tmp_path):
+    config_a, store_a = _init_store(tmp_path, alias="node-a")
+    invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h")
+    config_b = Config(memory_dir=tmp_path / "node-b" / "memory", env_file=tmp_path / "node-b" / "config" / "env")
+    join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
+    store_b = ClusterStore.from_config(config_b)
+    store_b.ensure_layout()
+    node_a = store_a.public_nodes()[store_a.cluster_config.node_id]
+    store_b.write_node_metadata(
+        NodeMetadata(
+            node_id=node_a.node_id,
+            alias=node_a.alias,
+            signing_public_key_b64=node_a.signing_public_key_b64,
+            revoked=True,
+            revoked_after_hlc="2000-01-01T00:00:00.000000Z-000000-node_a",
+        )
+    )
+    record = store_a.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex"},
+        payload={"format": "markdown", "body": "- rejected", "observed_at": "2026-05-08T12:00:00Z"},
+    )
+
+    result = store_b.import_record_bytes(record.to_bytes())
+
+    assert result.status == "rejected"
+    assert "revoked" in (result.reason or "")
+
+
 def test_materialize_observations_reflections_redactions_and_overrides(tmp_path):
     config, store = _init_store(tmp_path)
     observation = store.append_record(
@@ -135,3 +179,42 @@ def test_materialize_observations_reflections_redactions_and_overrides(tmp_path)
     materialize_cluster_memory(config, store)
     assert "hello cluster" not in config.observations_path.read_text()
     assert "Be direct." not in config.profile_path.read_text()
+
+
+def test_tombstoned_reflection_snapshot_is_not_selected(tmp_path):
+    _config, store = _init_store(tmp_path)
+    older = store.append_record(
+        kind="reflection_snapshot",
+        namespace="personal",
+        source={"agent": "reflector"},
+        payload={
+            "format": "markdown",
+            "body": "# Reflections\n\n## Core Identity\n- Older",
+            "frontier": {"node_a": 1},
+            "input_record_ids": [],
+            "base_snapshot_ids": [],
+        },
+    )
+    newer = store.append_record(
+        kind="reflection_snapshot",
+        namespace="personal",
+        source={"agent": "reflector"},
+        payload={
+            "format": "markdown",
+            "body": "# Reflections\n\n## Core Identity\n- Newer",
+            "frontier": {"node_a": 2},
+            "input_record_ids": [],
+            "base_snapshot_ids": [],
+        },
+    )
+    store.append_record(
+        kind="tombstone",
+        namespace="personal",
+        source={"agent": "manual"},
+        payload={"target_record_id": newer.record_id, "reason": "test"},
+    )
+
+    selected, _catchup = choose_reflection_snapshot(store)
+
+    assert selected is not None
+    assert selected.record_id == older.record_id

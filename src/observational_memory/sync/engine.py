@@ -100,6 +100,7 @@ def _sync_transport(
     pulled = pushed = skipped = rejected = 0
     try:
         _publish_known_nodes(store, transport)
+        _pull_public_node_metadata(store, transport)
         if not pull_only:
             pushed += _push_records(store, transport)
         for node_id in sorted(_remote_node_ids(store, transport)):
@@ -132,6 +133,8 @@ def _sync_transport(
                     rejected += 1
         _publish_heads(store, transport)
         if not pull_only:
+            # Push again after pull so membership records imported earlier in
+            # this sync are available to peers on the same manual run.
             pushed += _push_records(store, transport)
     except Exception as e:
         return TransportSummary(transport.name, pulled, pushed, skipped, rejected, error=str(e))
@@ -154,11 +157,16 @@ def _publish_heads(store: ClusterStore, transport: SyncTransport) -> None:
             transport.publish_head(store.cluster_config.id, node_id, head)
 
 
+def _pull_public_node_metadata(store: ClusterStore, transport: SyncTransport) -> None:
+    for node_id in transport.list_nodes(store.cluster_config.id):
+        data = transport.fetch_node(store.cluster_config.id, node_id)
+        if data is not None:
+            store.import_node_metadata_bytes(data)
+
+
 def _remote_node_ids(store: ClusterStore, transport: SyncTransport) -> set[str]:
     nodes = set(transport.list_nodes(store.cluster_config.id))
     nodes.update(transport.list_heads(store.cluster_config.id))
-    local_nodes = {path.name for path in store.records_dir.glob("*") if path.is_dir()}
-    nodes.update(local_nodes)
     return nodes
 
 
@@ -179,4 +187,4 @@ def _push_records(store: ClusterStore, transport: SyncTransport) -> int:
 
 
 def store_has_record(store: ClusterStore, record_id: str) -> bool:
-    return any(record.record_id == record_id for record in store.list_records(include_tombstoned=True))
+    return store._record_path_by_id(record_id) is not None

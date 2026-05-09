@@ -105,6 +105,10 @@ class ClusterStore:
         return self.cluster_dir / "nodes"
 
     @property
+    def pending_nodes_dir(self) -> Path:
+        return self.cluster_dir / "pending-nodes"
+
+    @property
     def diagnostics_path(self) -> Path:
         return self.cluster_dir / "diagnostics.jsonl"
 
@@ -117,7 +121,13 @@ class ClusterStore:
         return self.cluster_dir / ".locks" / "sync.lock"
 
     def ensure_layout(self) -> None:
-        for path in (self.records_dir, self.heads_dir, self.nodes_dir, self.cluster_dir / "tombstones"):
+        for path in (
+            self.records_dir,
+            self.heads_dir,
+            self.nodes_dir,
+            self.pending_nodes_dir,
+            self.cluster_dir / "tombstones",
+        ):
             path.mkdir(parents=True, exist_ok=True)
         self.write_node_metadata(
             NodeMetadata(
@@ -157,7 +167,7 @@ class ClusterStore:
             if kind == "node_membership":
                 self._apply_membership_record(record, payload)
             if kind == "key_rotation":
-                self._apply_key_rotation_payload(payload, activate=True)
+                self._apply_key_rotation_payload(record, payload)
             return record
 
     def import_record_bytes(self, data: bytes) -> ImportResult:
@@ -198,7 +208,7 @@ class ClusterStore:
             if record.kind == "node_membership":
                 self._apply_membership_record(record, payload)
             if record.kind == "key_rotation":
-                self._apply_key_rotation_payload(payload, activate=False)
+                self._apply_key_rotation_payload(record, payload)
             self._merge_clock(record.hlc)
         except Exception as e:
             self._record_diagnostic("rejected", record.record_id, f"storage error: {e}")
@@ -270,11 +280,17 @@ class ClusterStore:
             metadata = NodeMetadata.from_dict(json.loads(data.decode("utf-8")))
         except Exception:
             return False
-        existing = self.public_nodes().get(metadata.node_id)
-        if existing is not None:
+        if metadata.node_id in self.public_nodes():
             return False
-        # Public metadata alone is not trust. It only lets diagnostics show pending nodes.
-        return False
+        # Public metadata alone is not trust. Keep it separate so diagnostics can
+        # show pending/unknown nodes without authorizing their records.
+        self.pending_nodes_dir.mkdir(parents=True, exist_ok=True)
+        path = self.pending_nodes_dir / f"{metadata.node_id}.json"
+        content = json.dumps(metadata.to_dict(), indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        if path.exists() and path.read_bytes() == content:
+            return False
+        atomic_write_bytes(path, content)
+        return True
 
     def tombstoned_record_ids(self) -> set[str]:
         tombstoned: set[str] = set()
@@ -415,11 +431,18 @@ class ClusterStore:
                 )
             )
 
-    def _apply_key_rotation_payload(self, payload: dict[str, Any], *, activate: bool) -> None:
+    def _apply_key_rotation_payload(self, record: RecordEnvelope, payload: dict[str, Any]) -> None:
         key_id = payload.get("new_key_id")
         data_key = payload.get("data_key_b64")
         if isinstance(key_id, str) and isinstance(data_key, str):
-            add_cluster_data_key(self.config, self.cluster_config.id, key_id, data_key, activate=activate)
+            add_cluster_data_key(
+                self.config,
+                self.cluster_config.id,
+                key_id,
+                data_key,
+                activate=True,
+                active_key_hlc=record.hlc,
+            )
             self._reload_secret()
 
     def _reject_if_revoked_future(self, record: RecordEnvelope) -> None:

@@ -572,6 +572,7 @@ def cluster_invite(ctx: click.Context, expires: str) -> None:
     cluster_config = load_cluster_config(config)
     if cluster_config is None:
         raise click.ClickException("OM Cluster is not initialized.")
+    click.echo("Warning: this invite token carries cluster key material. Treat it like a private key.", err=True)
     click.echo(create_invite_token(config, cluster_config, expires=expires))
 
 
@@ -810,11 +811,12 @@ def cluster_revoke(ctx: click.Context, node_id: str, reason: str) -> None:
 @click.pass_context
 def cluster_rotate_key(ctx: click.Context) -> None:
     """Rotate the cluster data key for future records."""
+    import secrets
+
     from .sync.store import ClusterStore, new_data_key_b64
 
     store = ClusterStore.from_config(ctx.obj["config"])
-    next_index = len(store.secret.data_keys) + 1
-    key_id = f"key_{next_index}"
+    key_id = f"key_{store.cluster_config.node_id}_{secrets.token_hex(8)}"
     record = store.append_record(
         kind="key_rotation",
         namespace=store.cluster_config.default_namespace,
@@ -877,7 +879,7 @@ def _parse_transport_spec(spec: str):
 
     kind, sep, value = spec.partition(":")
     if not sep or kind != "filesystem" or not value:
-        raise click.ClickException("Transport must use filesystem:PATH")
+        raise click.ClickException("Only filesystem transports are supported in 0.6.0. Use filesystem:PATH.")
     return TransportConfig(type="filesystem", path=value)
 
 

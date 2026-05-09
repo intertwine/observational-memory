@@ -26,4 +26,5 @@ def build_advertisement(*, cluster_id: str, node_id: str, port: int) -> Discover
 
 
 def discovery_available() -> bool:
+    """Return False until a guarded optional discovery extra is implemented."""
     return False

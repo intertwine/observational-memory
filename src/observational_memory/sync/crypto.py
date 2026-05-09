@@ -39,6 +39,7 @@ class ClusterSecret:
     cluster_id: str
     data_keys: dict[str, str]
     active_key_id: str
+    active_key_hlc: str | None = None
 
     @property
     def data_key_b64(self) -> str:

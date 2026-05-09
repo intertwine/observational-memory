@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from observational_memory.config import Config
@@ -143,7 +144,7 @@ def _render_reflections(store: ClusterStore) -> tuple[str | None, bool]:
     return GENERATED_HEADER + body + (note if catchup_needed else "") + "\n", catchup_needed
 
 
-def _apply_overrides(path, store: ClusterStore, target: str) -> bool:
+def _apply_overrides(path: Path, store: ClusterStore, target: str) -> bool:
     overrides: list[tuple[str, str, RecordEnvelope]] = []
     for record in store.list_records(kind="manual_override"):
         payload = store.read_payload(record)
@@ -169,14 +170,14 @@ def _apply_overrides(path, store: ClusterStore, target: str) -> bool:
     return _write_if_changed(path, "\n".join(lines).rstrip() + "\n")
 
 
-def _prepend_generated_header(path) -> bool:
+def _prepend_generated_header(path: Path) -> bool:
     existing = path.read_text() if path.exists() else ""
     if existing.startswith(GENERATED_HEADER):
         return False
     return _write_if_changed(path, GENERATED_HEADER + existing)
 
 
-def _write_if_changed(path, content: str) -> bool:
+def _write_if_changed(path: Path, content: str) -> bool:
     if path.exists() and path.read_text() == content:
         return False
     atomic_write_text(path, content)

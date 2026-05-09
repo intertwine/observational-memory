@@ -18,6 +18,7 @@ _CHARS_PER_TOKEN = 3.5
 _MAX_INPUT_TOKENS = 12_000
 # max_tokens for reflector output (200-600 lines needs room)
 _REFLECTOR_MAX_OUTPUT_TOKENS = 8192
+_MAX_COMPETING_SNAPSHOT_CHARS = 4000
 
 # Regex for the "Last reflected" timestamp line in reflections.md
 _LAST_REFLECTED_RE = re.compile(r"^\*Last reflected:\s*(\d{4}-\d{2}-\d{2})\b.*\*$", re.MULTILINE)
@@ -578,7 +579,10 @@ def _competing_snapshot_context(store, selected_snapshot, selected_frontier: dic
         payload = store.read_payload(record)
         frontier = payload.get("frontier", {})
         if frontier_compare(selected_frontier, frontier) == "incomparable":
-            sections.append(f"## Candidate snapshot {record.record_id}\n\n{payload.get('body', '')}")
+            body = str(payload.get("body", ""))
+            if len(body) > _MAX_COMPETING_SNAPSHOT_CHARS:
+                body = body[:_MAX_COMPETING_SNAPSHOT_CHARS].rstrip() + "\n\n[truncated]"
+            sections.append(f"## Candidate snapshot {record.record_id}\n\n{body}")
     if not sections:
         return ""
     return "## Competing Cluster Reflection Snapshots\n\n" + "\n\n".join(sections)

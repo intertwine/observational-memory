@@ -58,7 +58,9 @@ Unknown nodes are rejected by default. `om cluster join` creates an invite-backe
 
 Invite tokens are sensitive. The current filesystem v1 invite is a trusted direct invite and includes cluster key material so the second machine can decrypt existing records. Copy it only over a trusted channel and keep the expiration short.
 
-Private keys and provider credentials are stored only under the local config directory and are written with owner-only permissions.
+Private keys and provider credentials are stored only under the local config directory. Cluster key directories are owner-only (`0700`) and key files are owner-only (`0600`).
+
+OM Cluster v1 uses a personal-cluster trust model: any currently trusted node can add, revoke, redact, or rotate cluster state. Do not add machines you would not trust with those administrative actions.
 
 ## Operations
 
@@ -95,7 +97,7 @@ Redaction creates a tombstone record. Materializers and local search ignore tomb
 
 ## Key Rotation And Revocation
 
-`om cluster revoke <node-id>` marks a node as revoked for future records. `om cluster rotate-key` creates a key-rotation record encrypted to the previous cluster key and uses the new key for future records.
+`om cluster revoke <node-id>` marks a node as revoked for future records. `om cluster rotate-key` creates a key-rotation record encrypted to the previous cluster key and uses the new key for future records. When peers import key-rotation records, the rotation with the greatest HLC timestamp becomes the active key, so future writes converge on the latest known rotation.
 
 For a known device compromise, revoke the node, rotate the key, and inspect the shared transport. The v1 rotation path is forward-looking; it does not re-encrypt historical records.
 

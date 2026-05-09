@@ -132,8 +132,7 @@ def load_cluster_config(config: Config) -> ClusterConfig | None:
             bool(cluster.get("sync_before_context", False)),
         ),
         startup_pull_deadline_ms=int(
-            os.environ.get("OM_CLUSTER_STARTUP_PULL_DEADLINE_MS")
-            or cluster.get("startup_pull_deadline_ms", 1500)
+            os.environ.get("OM_CLUSTER_STARTUP_PULL_DEADLINE_MS") or cluster.get("startup_pull_deadline_ms", 1500)
         ),
         background_interval_seconds=int(cluster.get("background_interval_seconds", 300)),
         namespace_rules=rules,
@@ -222,7 +221,7 @@ def initialize_cluster_config(
 
 
 def load_node_keypair(config: Config, cluster_config: ClusterConfig) -> NodeKeypair:
-    path = _cluster_key_dir(config, cluster_config.id) / "node.json"
+    path = _secure_cluster_key_dir(config, cluster_config.id) / "node.json"
     raw = json.loads(path.read_text())
     return NodeKeypair(
         node_id=raw["node_id"],
@@ -233,7 +232,7 @@ def load_node_keypair(config: Config, cluster_config: ClusterConfig) -> NodeKeyp
 
 
 def write_node_keypair(config: Config, cluster_id: str, keypair: NodeKeypair) -> None:
-    path = _cluster_key_dir(config, cluster_id) / "node.json"
+    path = _secure_cluster_key_dir(config, cluster_id) / "node.json"
     data = {
         "node_id": keypair.node_id,
         "alias": keypair.alias,
@@ -244,22 +243,24 @@ def write_node_keypair(config: Config, cluster_id: str, keypair: NodeKeypair) ->
 
 
 def load_cluster_secret(config: Config, cluster_id: str) -> ClusterSecret:
-    path = _cluster_key_dir(config, cluster_id) / "cluster.key"
+    path = _secure_cluster_key_dir(config, cluster_id) / "cluster.key"
     raw = json.loads(path.read_text())
     if "data_keys" in raw:
         return ClusterSecret(
             cluster_id=raw["cluster_id"],
             data_keys=dict(raw["data_keys"]),
             active_key_id=raw["active_key_id"],
+            active_key_hlc=raw.get("active_key_hlc"),
         )
     return ClusterSecret.single(cluster_id=raw["cluster_id"], data_key_b64=raw["data_key_b64"])
 
 
 def write_cluster_secret(config: Config, secret: ClusterSecret) -> None:
-    path = _cluster_key_dir(config, secret.cluster_id) / "cluster.key"
+    path = _secure_cluster_key_dir(config, secret.cluster_id) / "cluster.key"
     data = {
         "cluster_id": secret.cluster_id,
         "active_key_id": secret.active_key_id,
+        "active_key_hlc": secret.active_key_hlc,
         "data_keys": secret.data_keys,
     }
     atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n", mode=0o600)
@@ -284,6 +285,7 @@ def create_invite_token(
         "issuer_signing_public_key_b64": keypair.signing_public_key_b64,
         "data_keys": secret.data_keys,
         "active_key_id": secret.active_key_id,
+        "active_key_hlc": secret.active_key_hlc,
         "transports": [transport.to_dict() for transport in cluster_config.transports],
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
@@ -295,6 +297,12 @@ def create_invite_token(
 
 
 def parse_invite_token(token: str) -> InviteToken:
+    """Parse and syntax-check an invite token.
+
+    The signature check here proves the token body is internally consistent.
+    It does not establish cluster trust by itself; imported membership records
+    still have to chain to a locally trusted issuer node.
+    """
     if not token.startswith("omc1:"):
         raise ValueError("Invite token must start with omc1:")
     raw = json.loads(b64url_decode(token.split(":", 1)[1]).decode("utf-8"))
@@ -333,6 +341,7 @@ def join_cluster_from_invite(
         cluster_id=body["cluster_id"],
         data_keys=dict(body["data_keys"]),
         active_key_id=body["active_key_id"],
+        active_key_hlc=body.get("active_key_hlc"),
     )
     write_cluster_config(config, cluster_config)
     write_node_keypair(config, cluster_config.id, keypair)
@@ -348,14 +357,19 @@ def add_cluster_data_key(
     data_key_b64: str,
     *,
     activate: bool,
+    active_key_hlc: str | None = None,
 ) -> ClusterSecret:
     secret = load_cluster_secret(config, cluster_id)
     data_keys = dict(secret.data_keys)
     data_keys[key_id] = data_key_b64
+    should_activate = activate and (
+        secret.active_key_hlc is None or active_key_hlc is None or active_key_hlc >= secret.active_key_hlc
+    )
     updated = ClusterSecret(
         cluster_id=cluster_id,
         data_keys=data_keys,
-        active_key_id=key_id if activate else secret.active_key_id,
+        active_key_id=key_id if should_activate else secret.active_key_id,
+        active_key_hlc=active_key_hlc if should_activate else secret.active_key_hlc,
     )
     write_cluster_secret(config, updated)
     return updated
@@ -363,6 +377,15 @@ def add_cluster_data_key(
 
 def _cluster_key_dir(config: Config, cluster_id: str) -> Path:
     return config.cluster_keys_dir / cluster_id
+
+
+def _secure_cluster_key_dir(config: Config, cluster_id: str) -> Path:
+    config.cluster_keys_dir.mkdir(parents=True, exist_ok=True)
+    config.cluster_keys_dir.chmod(0o700)
+    key_dir = _cluster_key_dir(config, cluster_id)
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key_dir.chmod(0o700)
+    return key_dir
 
 
 def _write_inviter_public_metadata(config: Config, cluster_id: str, invite_body: dict[str, Any]) -> None:
