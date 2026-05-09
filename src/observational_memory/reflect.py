@@ -44,6 +44,9 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     if config is None:
         config = Config()
 
+    if _cluster_enabled(config):
+        return _run_cluster_reflector(config, dry_run=dry_run)
+
     raw_observations = ""
     if config.observations_path.exists():
         raw_observations = config.observations_path.read_text()
@@ -482,3 +485,100 @@ def _trim_old_observations(config: Config) -> None:
             kept.append(section)
 
     config.observations_path.write_text("".join(kept).rstrip() + "\n")
+
+
+def _cluster_enabled(config: Config) -> bool:
+    try:
+        from .sync import cluster_feature_enabled
+
+        return cluster_feature_enabled(config)
+    except Exception:
+        return False
+
+
+def _run_cluster_reflector(config: Config, dry_run: bool = False) -> str | None:
+    from .sync.engine import sync_cluster
+    from .sync.frontier import frontier_covers, frontier_from_records, frontier_join
+    from .sync.materialize import choose_reflection_snapshot, materialize_cluster_memory
+    from .sync.store import ClusterStore
+
+    store = ClusterStore.from_config(config)
+    materialize_cluster_memory(config, store, reindex=False)
+
+    observations = store.list_records(kind="observation")
+    observation_frontier = frontier_from_records(observations)
+    selected_snapshot, _catchup_needed = choose_reflection_snapshot(store)
+    selected_frontier = {}
+    reflections = ""
+    if selected_snapshot is not None:
+        selected_payload = store.read_payload(selected_snapshot)
+        selected_frontier = selected_payload.get("frontier", {})
+        reflections = str(selected_payload.get("body") or "")
+
+    amem_changed = _auto_memory_changed_since_reflection(config)
+    if frontier_covers(selected_frontier, observation_frontier) and not amem_changed:
+        return None
+
+    raw_observations = config.observations_path.read_text() if config.observations_path.exists() else ""
+    auto_memory = _gather_auto_memory_context(config) if amem_changed else ""
+    system_prompt = _load_reflector_prompt()
+    competing = _competing_snapshot_context(store, selected_snapshot, selected_frontier)
+    if competing:
+        system_prompt += (
+            "\n\nYou are merging durable memory snapshots from multiple machines. Preserve durable facts, "
+            "reconcile duplicates, and prefer newer explicit corrections. Do not include source-machine chatter "
+            "unless it is itself useful memory."
+        )
+        reflections = (reflections + "\n\n" + competing).strip()
+
+    total_input_chars = len(system_prompt) + len(reflections) + len(raw_observations) + len(auto_memory)
+    estimated_tokens = total_input_chars / _CHARS_PER_TOKEN
+    if estimated_tokens <= _MAX_INPUT_TOKENS:
+        result = _reflect_single(system_prompt, reflections, raw_observations, config, auto_memory, amem_changed)
+    else:
+        result = _reflect_chunked(system_prompt, reflections, raw_observations, config, auto_memory, amem_changed)
+
+    latest_obs_date = _extract_latest_observation_date(raw_observations)
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    result = _stamp_timestamps(result, now_utc, latest_obs_date or now_utc)
+
+    if dry_run:
+        return result
+
+    base_snapshot_ids = [selected_snapshot.record_id] if selected_snapshot else []
+    frontier = frontier_join(observation_frontier, selected_frontier)
+    store.append_record(
+        kind="reflection_snapshot",
+        namespace=store.cluster_config.default_namespace,
+        source={"agent": "reflector", "host_alias": store.cluster_config.node_alias},
+        payload={
+            "format": "markdown",
+            "body": result,
+            "frontier": frontier,
+            "input_record_ids": [record.record_id for record in observations],
+            "base_snapshot_ids": base_snapshot_ids,
+        },
+    )
+    materialize_cluster_memory(config, store)
+    if store.cluster_config.sync_on_reflect:
+        try:
+            sync_cluster(config, deadline_ms=1500)
+        except Exception:
+            pass
+    return result
+
+
+def _competing_snapshot_context(store, selected_snapshot, selected_frontier: dict) -> str:
+    from .sync.frontier import frontier_compare
+
+    sections = []
+    for record in store.list_records(kind="reflection_snapshot"):
+        if selected_snapshot is not None and record.record_id == selected_snapshot.record_id:
+            continue
+        payload = store.read_payload(record)
+        frontier = payload.get("frontier", {})
+        if frontier_compare(selected_frontier, frontier) == "incomparable":
+            sections.append(f"## Candidate snapshot {record.record_id}\n\n{payload.get('body', '')}")
+    if not sections:
+        return ""
+    return "## Competing Cluster Reflection Snapshots\n\n" + "\n\n".join(sections)

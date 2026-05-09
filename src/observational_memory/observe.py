@@ -16,6 +16,9 @@ def run_observer(
     messages: list[Message],
     config: Config | None = None,
     dry_run: bool = False,
+    *,
+    transcript_path: Path | None = None,
+    source: str | None = None,
 ) -> str | None:
     """Compress a list of messages into observations and append to observations.md.
 
@@ -51,6 +54,10 @@ def run_observer(
     if dry_run:
         return result
 
+    if _cluster_enabled(config):
+        _write_observation_record(result, messages, config, transcript_path=transcript_path, source=source)
+        return result
+
     _write_observations(result, config)
     return result
 
@@ -75,7 +82,7 @@ def observe_claude_transcript(
     if not messages:
         return None
 
-    result = run_observer(messages, config, dry_run)
+    result = run_observer(messages, config, dry_run, transcript_path=transcript_path, source="claude")
 
     if result and not dry_run:
         # Update cursor to last message UUID — find it from the transcript
@@ -134,7 +141,7 @@ def observe_cowork_transcript(
     if not messages:
         return None
 
-    result = run_observer(messages, config, dry_run)
+    result = run_observer(messages, config, dry_run, transcript_path=transcript_path, source="cowork")
 
     if result and not dry_run:
         import json
@@ -246,7 +253,7 @@ def observe_hermes_transcript(
     if not messages:
         return None
 
-    result = run_observer(messages, config, dry_run)
+    result = run_observer(messages, config, dry_run, transcript_path=transcript_path, source="hermes")
     if result and not dry_run:
         cursor[cursor_key] = after_index + len(messages)
         config.save_cursor(cursor)
@@ -302,7 +309,7 @@ def observe_codex_transcript(
     if not messages:
         return None
 
-    result = run_observer(messages, config, dry_run)
+    result = run_observer(messages, config, dry_run, transcript_path=transcript_path, source="codex")
     if result and not dry_run:
         cursor[str(transcript_path)] = total_messages
         config.save_cursor(cursor)
@@ -401,6 +408,10 @@ def run_observer_backfill(
     result = compress(system_prompt, user_content, config, operation="observer")
 
     if dry_run:
+        return result
+
+    if _cluster_enabled(config):
+        _write_observation_record(result, messages, config, source="backfill")
         return result
 
     _append_observations(result, config, skip_reindex=True)
@@ -568,6 +579,68 @@ def _reindex_if_enabled(config: Config) -> None:
         reindex(config)
     except Exception:
         pass  # Never block observe/reflect on search failures
+
+
+def _cluster_enabled(config: Config) -> bool:
+    try:
+        from .sync import cluster_feature_enabled
+
+        return cluster_feature_enabled(config)
+    except Exception:
+        return False
+
+
+def _write_observation_record(
+    result: str,
+    messages: list[Message],
+    config: Config,
+    *,
+    transcript_path: Path | None = None,
+    source: str | None = None,
+) -> None:
+    from .sync.config import load_cluster_config
+    from .sync.engine import sync_cluster
+    from .sync.materialize import materialize_cluster_memory
+    from .sync.source import namespace_for_event, source_metadata
+    from .sync.store import ClusterStore
+
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        _write_observations(result, config)
+        return
+
+    store = ClusterStore.from_config(config)
+    source_event = source_metadata(
+        config=config,
+        cluster_config=cluster_config,
+        messages=messages,
+        source=source,
+        transcript_path=transcript_path,
+    )
+    observed_at = _latest_message_timestamp(messages) or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    store.append_record(
+        kind="observation",
+        namespace=namespace_for_event(cluster_config, source_event),
+        source=source_event,
+        payload={
+            "format": "markdown",
+            "body": result,
+            "observed_at": observed_at,
+            "message_count": len(messages),
+            "retention": "recent",
+        },
+    )
+    materialize_cluster_memory(config, store)
+    if cluster_config.sync_on_observe:
+        try:
+            sync_cluster(config, deadline_ms=1500)
+        except Exception:
+            pass
+
+
+def _latest_message_timestamp(messages: list[Message]) -> str | None:
+    timestamps = [message.timestamp for message in messages if message.timestamp]
+    return max(timestamps) if timestamps else None
 
 
 def _write_observations(new_observations: str, config: Config) -> None:

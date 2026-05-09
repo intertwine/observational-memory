@@ -95,6 +95,27 @@ om doctor
 That's it. Your agents now share persistent memory across sessions: plain markdown you can search, inspect, export, and carry into the next platform.
 If it saves you repeated onboarding time, a GitHub star helps more people discover it.
 
+### Sync across machines
+
+OM Cluster is an opt-in sync layer for moving memory between machines without syncing the whole OM data directory. It replicates signed, encrypted, append-only records through an untrusted shared folder, then rebuilds local `observations.md`, `reflections.md`, `profile.md`, and `active.md` on each machine.
+
+```bash
+# First machine
+om cluster init --name "Personal Memory" --transport filesystem:~/Sync/om-cluster --import-existing
+om cluster invite --expires 10m
+
+# Second machine
+om cluster join "omc1:..."
+om cluster sync
+
+# Anytime
+om cluster status
+```
+
+Do **not** point Syncthing, Dropbox, iCloud Drive, rsync, or a NAS at `~/.local/share/observational-memory/`. Use the filesystem transport directory from `om cluster init` instead. OM Cluster never syncs provider env files, private keys, `.cursor.json`, `.search-index`, `.scheduler-logs`, or `.qmd-docs`.
+
+Cluster sync is disabled until `om cluster init` or `om cluster join` creates local config and keys. See [docs/om-cluster-sync.md](docs/om-cluster-sync.md) for setup, operation, security, redaction caveats, and recovery guidance.
+
 ### Export to platform-native memory
 
 `om` remains local-first, but `0.5.6` adds reviewed seed bundles for hosted memory systems:

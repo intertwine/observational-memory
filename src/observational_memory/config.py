@@ -148,6 +148,18 @@ class Config:
         return self.memory_dir / ".search-index"
 
     @property
+    def cluster_config_path(self) -> Path:
+        return self.env_file.parent / "cluster.toml"
+
+    @property
+    def cluster_keys_dir(self) -> Path:
+        return self.env_file.parent / "cluster-keys"
+
+    @property
+    def clusters_dir(self) -> Path:
+        return self.memory_dir / "clusters"
+
+    @property
     def codex_agents_md(self) -> Path:
         return self.codex_home / "AGENTS.md"
 
