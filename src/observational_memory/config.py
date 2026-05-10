@@ -4,16 +4,83 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def is_windows() -> bool:
+    """Return True when running on Windows."""
+    return sys.platform == "win32" or os.name == "nt"
+
+
+def _windows_data_home() -> Path:
+    """Return the per-user data directory on Windows.
+
+    Honors LOCALAPPDATA when set, falling back to %USERPROFILE%/AppData/Local.
+    Used for files that should not roam across machines (caches, logs).
+    """
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data)
+    return Path.home() / "AppData" / "Local"
+
+
+def _windows_config_home() -> Path:
+    """Return the per-user roaming config directory on Windows.
+
+    Honors APPDATA when set, falling back to %USERPROFILE%/AppData/Roaming.
+    Used for configuration that may roam between machines (env file).
+    """
+    app_data = os.environ.get("APPDATA")
+    if app_data:
+        return Path(app_data)
+    return Path.home() / "AppData" / "Roaming"
+
+
 def _xdg_data_home() -> Path:
-    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    explicit = os.environ.get("XDG_DATA_HOME")
+    if explicit:
+        return Path(explicit)
+    if is_windows():
+        return _windows_data_home()
+    return Path.home() / ".local" / "share"
 
 
 def _xdg_config_home() -> Path:
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    explicit = os.environ.get("XDG_CONFIG_HOME")
+    if explicit:
+        return Path(explicit)
+    if is_windows():
+        return _windows_config_home()
+    return Path.home() / ".config"
+
+
+def _claude_user_dir() -> Path:
+    """Return the Claude Code per-user directory.
+
+    Claude Code uses ``~/.claude`` on every supported platform (it expands
+    ``~`` to ``%USERPROFILE%`` on Windows), so we honor that convention.
+    """
+    return Path.home() / ".claude"
+
+
+def _codex_user_dir() -> Path:
+    """Return the Codex CLI per-user directory."""
+    return Path.home() / ".codex"
+
+
+def _cowork_app_support_dir() -> Path:
+    """Return the directory containing Cowork local-agent-mode session/plugin trees.
+
+    Cowork ships only on macOS today. On Windows we point at ``%APPDATA%``
+    so that path resolution itself doesn't crash; the install command is
+    still gated to skip the actual copy on Windows. Everywhere else we
+    keep the macOS-native path so the call is a no-op on Linux too.
+    """
+    if is_windows():
+        return _windows_config_home() / "Claude"
+    return Path.home() / "Library" / "Application Support" / "Claude"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -76,6 +143,12 @@ class Config:
     AUTO_MEMORY_LAUNCHD_LABEL = "com.intertwine.observational-memory.auto-memory"
     REFLECT_LAUNCHD_LABEL = "com.intertwine.observational-memory.reflect"
 
+    # Windows Task Scheduler task names mirror the launchd labels for parity
+    # across platforms — the stable identifier is the bare label.
+    CODEX_OBSERVE_SCHTASKS_NAME = CODEX_OBSERVE_LAUNCHD_LABEL
+    AUTO_MEMORY_SCHTASKS_NAME = AUTO_MEMORY_LAUNCHD_LABEL
+    REFLECT_SCHTASKS_NAME = REFLECT_LAUNCHD_LABEL
+
     # Memory storage
     memory_dir: Path = field(default_factory=lambda: _xdg_data_home() / "observational-memory")
 
@@ -83,11 +156,11 @@ class Config:
     env_file: Path = field(default_factory=lambda: _xdg_config_home() / "observational-memory" / "env")
 
     # Claude Code paths
-    claude_projects_dir: Path = field(default_factory=lambda: Path.home() / ".claude" / "projects")
-    claude_settings_path: Path = field(default_factory=lambda: Path.home() / ".claude" / "settings.json")
+    claude_projects_dir: Path = field(default_factory=lambda: _claude_user_dir() / "projects")
+    claude_settings_path: Path = field(default_factory=lambda: _claude_user_dir() / "settings.json")
 
     # Codex CLI paths
-    codex_home: Path = field(default_factory=lambda: Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")))
+    codex_home: Path = field(default_factory=lambda: Path(os.environ.get("CODEX_HOME", _codex_user_dir())))
 
     # LLM settings
     llm_provider: str = field(
@@ -177,11 +250,11 @@ class Config:
 
     @property
     def cowork_sessions_dir(self) -> Path:
-        return Path.home() / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
+        return _cowork_app_support_dir() / "local-agent-mode-sessions"
 
     @property
     def cowork_plugins_dir(self) -> Path:
-        return Path.home() / "Library" / "Application Support" / "Claude" / "local-agent-mode-plugins"
+        return _cowork_app_support_dir() / "local-agent-mode-plugins"
 
     @property
     def codex_checkpoint_state_path(self) -> Path:
@@ -190,6 +263,17 @@ class Config:
     @property
     def codex_checkpoint_lock_dir(self) -> Path:
         return self.memory_dir / ".codex-checkpoint-locks"
+
+    # Claude Code session-end / checkpoint state. Names match the bash
+    # session-end.sh hook so a host that switches from POSIX to Windows
+    # picks up the existing state file in place.
+    @property
+    def claude_checkpoint_state_path(self) -> Path:
+        return self.memory_dir / ".session-observer-state.json"
+
+    @property
+    def claude_checkpoint_lock_dir(self) -> Path:
+        return self.memory_dir / ".session-observer-locks"
 
     @property
     def launch_agents_dir(self) -> Path:
@@ -261,7 +345,10 @@ class Config:
             return False
         self.env_file.parent.mkdir(parents=True, exist_ok=True)
         self.env_file.write_text(ENV_FILE_TEMPLATE)
-        self.env_file.chmod(0o600)
+        if not is_windows():
+            # chmod 600 is a no-op on Windows; per-user APPDATA already
+            # restricts access via NTFS ACLs to the current user.
+            self.env_file.chmod(0o600)
         return True
 
     def resolve_provider(self) -> str:

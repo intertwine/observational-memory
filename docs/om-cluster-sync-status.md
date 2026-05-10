@@ -21,6 +21,10 @@ Implementation status for the local Codex worktree.
 - Re-encryption of historical records during key rotation. Current rotation affects future records and distributes the new key through an encrypted key-rotation record. Follow-up: [#37](https://github.com/intertwine/observational-memory/issues/37), targeted for `0.6.4`.
 - Cluster feature-flag caching. The current gate is conservative and reparses local config/key state on each probe. Follow-up: [#38](https://github.com/intertwine/observational-memory/issues/38), targeted for `0.6.5`.
 
+## Known Compatibility Follow-ups
+
+- Windows OM Cluster hardening. The 0.6.0 branch now merges cleanly over the 0.5.7 Windows compatibility release, and local Windows simulation plus sync tests pass. Remaining Windows-specific OM Cluster gaps are tracked in [#40](https://github.com/intertwine/observational-memory/issues/40).
+
 ## Verification
 
 - `uv run pytest tests/sync -q`
