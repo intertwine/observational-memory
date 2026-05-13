@@ -33,7 +33,7 @@ uv run om doctor                 # run diagnostics
 
 ## Architecture
 
-Cross-agent observational memory that works at the **user level** (not per-project) across Claude Code, Codex CLI, and Cowork. Two background processes compress conversation transcripts into shared memory files at `~/.local/share/observational-memory/`.
+Cross-agent observational memory that works at the **user level** (not per-project) across Claude Code, Codex CLI, Cowork, and Hermes. Two background processes compress conversation transcripts into shared memory files at `~/.local/share/observational-memory/`.
 
 ### Data flow
 
@@ -53,6 +53,7 @@ Auto-memory (~/.claude/projects/*/memory/*.md)
 - **`src/observational_memory/transcripts/claude.py`** — Parses Claude Code `.jsonl` transcripts (and Cowork `audit.jsonl` via `source="cowork"`). Each line is a JSON object with `type` (user/assistant/progress), `message.content` (text or array of blocks), `uuid`, `timestamp` (or `_audit_timestamp` for Cowork).
 - **`src/observational_memory/transcripts/codex.py`** — Parses Codex CLI session files (`*.json` and `*.jsonl`) from `~/.codex/sessions/`.
 - **`src/observational_memory/transcripts/cowork.py`** — Discovery functions for Cowork `audit.jsonl` files under `~/Library/Application Support/Claude/local-agent-mode-sessions/`. Parsing delegates to `claude.py`.
+- **`src/observational_memory/transcripts/hermes.py`** — Parses Hermes Agent session JSONL logs from `~/.hermes/sessions/` for manual or plugin-driven observation.
 - **`src/observational_memory/transcripts/auto_memory.py`** — Scans Claude Code auto-memory files (`~/.claude/projects/*/memory/*.md`). Content-hash change detection, project slug extraction, YAML frontmatter parsing. Read-only — never writes to auto-memory directories.
 - **`src/observational_memory/observe.py`** — Observer: reads transcripts, finds new messages via cursor bookmarks, calls LLM to compress, appends to `observations.md`. Also contains `observe_auto_memory()` which bypasses the LLM (auto-memory files are already distilled) and only updates the search index.
 - **`src/observational_memory/reflect.py`** — Reflector: reads observations + reflections + auto-memory context, calls LLM to condense, writes `reflections.md`, trims old observations. Auto-memory is only included when it has changed since last reflection (timestamp comparison). On deletion, the reflector receives cleanup instructions.
@@ -72,6 +73,7 @@ Auto-memory (~/.claude/projects/*/memory/*.md)
 - **Claude Code**: `SessionStart` injects memory via `additionalContext`; `SessionEnd`, `UserPromptSubmit`, and `PreCompact` hooks trigger checkpoints. In-session checkpoints are throttled by `OM_SESSION_OBSERVER_INTERVAL_SECONDS` and can be disabled with `OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS`. On POSIX hosts the hooks run `hooks/claude/session-{start,end}.sh` (which require `bash` + `jq`); on Windows they invoke `om context` and `om claude-checkpoint` directly.
 - **Codex CLI**: Instructions appended to `~/.codex/AGENTS.md`; cron job for observer. Startup priming is now driven by derived compact files (`profile.md` + `active.md`) instead of always loading full reflections/observations.
 - **Cowork**: Plugin installed to `~/Library/Application Support/Claude/local-agent-mode-plugins/observational-memory/`. Uses the same hook pattern as Claude Code (SessionStart context injection, SessionEnd/UserPromptSubmit/PreCompact checkpoints). Includes a `/recall` command and an `observational-memory` skill. Install with `om install --cowork`.
+- **Hermes Agent**: Current OM support includes `om observe --source hermes` and direct transcript parsing. The post-`0.6.0` plan is to make `intertwine/hermes-observational-memory` the first-class Hermes memory-provider plugin, then close the native Hermes PR. Keep the plugin work scoped to the standalone provider repo and avoid broad Hermes core changes unless a missing plugin extension point is proven. See `plans/hermes-first-class-plugin.md` and issue #42.
 
 ### API keys
 
