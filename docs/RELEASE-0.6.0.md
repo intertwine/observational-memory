@@ -68,10 +68,12 @@ Do not push the tag before PyPI has `0.6.0`, or the Homebrew workflow will fail.
 ## Highlights
 
 - OM Cluster syncs memory across machines through signed, encrypted append-only records.
-- Filesystem transport works with common shared-folder tools while treating the transport as untrusted.
+- Filesystem, relay, and explicit-peer P2P transports move opaque signed/encrypted artifacts while treating the transport as untrusted.
 - Markdown files remain local materialized views, so existing inspectable OM workflows stay intact.
 - Cluster mode is opt-in and disabled unless initialized with `om cluster init` or `om cluster join`.
-- Key rotation in this preview is forward-looking; full compromise recovery and historical re-encryption are not included yet.
+- Request-mode joins require approval from an already trusted node before the joining node receives encrypted cluster key material.
+- Key rotation uses per-node wrapped key epochs, and `om cluster reencrypt` can append historical payload rewrap records after a rotation.
+- Historical rewrap does not delete old transport blobs or backups automatically; compromise recovery still requires operator cleanup.
 
 ## Upgrade
 
