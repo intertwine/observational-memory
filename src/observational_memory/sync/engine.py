@@ -14,6 +14,7 @@ from .materialize import materialize_cluster_memory
 from .store import ClusterStore
 from .transports import SyncTransport
 from .transports.filesystem import FilesystemTransport
+from .transports.relay import RelayTransport
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,8 @@ def sync_cluster(
 def build_transport(config: TransportConfig) -> SyncTransport:
     if config.type == "filesystem" and config.path:
         return FilesystemTransport(Path(config.path))
+    if config.type == "relay" and config.path:
+        return RelayTransport(config.path)
     raise ValueError(f"Unsupported transport: {config.type}")
 
 

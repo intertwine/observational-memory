@@ -1402,9 +1402,13 @@ def _parse_transport_spec(spec: str):
     from .sync.config import TransportConfig
 
     kind, sep, value = spec.partition(":")
-    if not sep or kind != "filesystem" or not value:
-        raise click.ClickException("Only filesystem transports are supported in 0.6.0. Use filesystem:PATH.")
-    return TransportConfig(type="filesystem", path=_expand_transport_path(value))
+    if not sep or kind not in {"filesystem", "relay"} or not value:
+        raise click.ClickException("Use filesystem:PATH or relay:URL.")
+    if kind == "filesystem":
+        return TransportConfig(type="filesystem", path=_expand_transport_path(value))
+    if not value.startswith(("http://", "https://")):
+        raise click.ClickException("Relay transports must use relay:http://... or relay:https://...")
+    return TransportConfig(type="relay", path=value)
 
 
 def _expand_transport_path(value: str) -> str:

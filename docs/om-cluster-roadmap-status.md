@@ -245,3 +245,39 @@ Known limitations:
 Next milestone:
 
 - Milestone 6: hosted relay transport (#35).
+
+## Milestone 6 - Hosted Relay Transport
+
+Goals:
+
+- Add an optional relay transport that moves only opaque signed/encrypted cluster artifacts.
+- Keep relay access separate from cluster trust and preserve all local verification semantics.
+- Avoid adding required relay server or HTTP client dependencies to the base package.
+- Prove two nodes can converge without a shared filesystem.
+
+Completed work:
+
+- Added a stdlib `RelayTransport` client implementing the existing sync transport protocol over HTTP.
+- Supported relay storage for heads, public node metadata, records, join requests, and join approvals.
+- Added `relay:http://...` and `relay:https://...` transport specs for `om cluster init`.
+- Extended transport construction so relay can run alongside filesystem transport.
+- Documented relay operator boundaries, metadata exposure, retention, and compromise-recovery caveats.
+
+Tests added:
+
+- Loopback relay fixture proves two trusted nodes converge through relay transport with no shared filesystem.
+- Relay fixture storage is checked for plaintext memory, private signing key fields, and cluster `data_keys` leakage.
+
+Validation:
+
+- `mise exec -- uv run pytest tests/sync/test_relay_transport.py -q` - 1 passed.
+- `mise exec -- uv run ruff check src/observational_memory/sync/transports/relay.py src/observational_memory/sync/engine.py src/observational_memory/cli.py tests/sync/test_relay_transport.py` - passed.
+
+Known limitations:
+
+- This implements the relay client contract and test fixture, not a production relay server package.
+- Relay authorization tokens and retention policy are operator concerns and do not replace OM Cluster membership.
+
+Next milestone:
+
+- Milestone 7: optional direct P2P evaluation and transport (#36).

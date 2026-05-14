@@ -147,9 +147,19 @@ For a known device compromise, revoke the node, rotate the key, and inspect the 
 
 `om cluster purge-old-ciphertext --key-id <key-id>` is a readiness report, not an automatic deletion command. True old-ciphertext recovery requires removing old encrypted blobs from every shared transport and backup that a revoked device could still access, so OM does not delete append-only records automatically.
 
-## Discovery And P2P
+## Relay, Discovery, And P2P
 
-The core sync engine is transport-agnostic. Filesystem transport is implemented first. LAN discovery and direct P2P/relay transports are currently extension seams, not required dependencies. Discovery must never imply trust; future discovered peers will still need membership authorization.
+The core sync engine is transport-agnostic. Filesystem transport works for shared folders, and relay transport works with an HTTP service that stores opaque cluster artifacts:
+
+```bash
+om cluster init --name "Personal Memory" --transport relay:https://relay.example.com
+```
+
+The relay stores signed/encrypted records, heads, public node metadata, join requests, and join approvals only. It never receives cluster data keys, node private keys, provider env files, generated Markdown, or plaintext memory. Relay access control can prevent abuse, but relay access is not cluster trust; local nodes still verify membership, signatures, revocation, tombstones, key epochs, and payload hashes exactly as they do with filesystem transport.
+
+The base install uses the stdlib relay client and does not require a relay server dependency. Relay operator responsibilities include retention, availability, metadata exposure, and backup cleanup during compromise recovery.
+
+Direct P2P is not enabled yet. Discovery must never imply trust; future discovered peers will still need membership authorization.
 
 ## Recovery
 
