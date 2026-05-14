@@ -24,6 +24,7 @@ from .crypto import (
     sign_ed25519,
     verify_ed25519,
 )
+from .ids import validate_cluster_id, validate_invite_id, validate_key_id, validate_node_id
 from .records import canonical_json_bytes
 
 
@@ -114,6 +115,11 @@ def load_cluster_config(config: Config) -> ClusterConfig | None:
         for item in raw.get("namespace_rule", [])
     ]
     cluster_id = os.environ.get("OM_CLUSTER_ID") or str(cluster.get("id", ""))
+    if cluster_id:
+        validate_cluster_id(cluster_id)
+    node_id = str(node.get("id", ""))
+    if node_id:
+        validate_node_id(node_id)
     default_namespace = os.environ.get("OM_CLUSTER_DEFAULT_NAMESPACE") or str(
         namespaces.get("default", cluster.get("default_namespace", "personal"))
     )
@@ -122,7 +128,7 @@ def load_cluster_config(config: Config) -> ClusterConfig | None:
         id=cluster_id,
         name=str(cluster.get("name", cluster_id or "OM Cluster")),
         default_namespace=default_namespace,
-        node_id=str(node.get("id", "")),
+        node_id=node_id,
         node_alias=str(node.get("alias", socket.gethostname() or "local")),
         transports=transports,
         sync_on_observe=_env_or_bool("OM_CLUSTER_SYNC_ON_OBSERVE", bool(cluster.get("sync_on_observe", False))),
@@ -221,8 +227,10 @@ def initialize_cluster_config(
 
 
 def load_node_keypair(config: Config, cluster_config: ClusterConfig) -> NodeKeypair:
+    validate_cluster_id(cluster_config.id)
     path = _secure_cluster_key_dir(config, cluster_config.id) / "node.json"
     raw = json.loads(path.read_text())
+    validate_node_id(raw["node_id"])
     return NodeKeypair(
         node_id=raw["node_id"],
         signing_private_key_b64=raw["signing_private_key_b64"],
@@ -232,6 +240,8 @@ def load_node_keypair(config: Config, cluster_config: ClusterConfig) -> NodeKeyp
 
 
 def write_node_keypair(config: Config, cluster_id: str, keypair: NodeKeypair) -> None:
+    validate_cluster_id(cluster_id)
+    validate_node_id(keypair.node_id)
     path = _secure_cluster_key_dir(config, cluster_id) / "node.json"
     data = {
         "node_id": keypair.node_id,
@@ -243,9 +253,14 @@ def write_node_keypair(config: Config, cluster_id: str, keypair: NodeKeypair) ->
 
 
 def load_cluster_secret(config: Config, cluster_id: str) -> ClusterSecret:
+    validate_cluster_id(cluster_id)
     path = _secure_cluster_key_dir(config, cluster_id) / "cluster.key"
     raw = json.loads(path.read_text())
+    validate_cluster_id(raw["cluster_id"])
     if "data_keys" in raw:
+        validate_key_id(raw["active_key_id"])
+        for key_id in raw["data_keys"]:
+            validate_key_id(key_id)
         return ClusterSecret(
             cluster_id=raw["cluster_id"],
             data_keys=dict(raw["data_keys"]),
@@ -256,6 +271,10 @@ def load_cluster_secret(config: Config, cluster_id: str) -> ClusterSecret:
 
 
 def write_cluster_secret(config: Config, secret: ClusterSecret) -> None:
+    validate_cluster_id(secret.cluster_id)
+    validate_key_id(secret.active_key_id)
+    for key_id in secret.data_keys:
+        validate_key_id(key_id)
     path = _secure_cluster_key_dir(config, secret.cluster_id) / "cluster.key"
     data = {
         "cluster_id": secret.cluster_id,
@@ -291,6 +310,7 @@ def create_invite_token(
         "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
         "invite_id": "invite_" + os.urandom(12).hex(),
     }
+    validate_invite_id(body["invite_id"])
     signature = sign_ed25519(keypair.signing_private_key_b64, canonical_json_bytes(body))
     token = {"body": body, "signature": signature}
     return "omc1:" + b64url_encode(canonical_json_bytes(token))
@@ -308,6 +328,12 @@ def parse_invite_token(token: str) -> InviteToken:
     raw = json.loads(b64url_decode(token.split(":", 1)[1]).decode("utf-8"))
     body = raw["body"]
     signature = raw["signature"]
+    validate_cluster_id(body["cluster_id"])
+    validate_node_id(body["issuer_node_id"])
+    validate_invite_id(body["invite_id"])
+    validate_key_id(body["active_key_id"])
+    for key_id in body.get("data_keys", {}):
+        validate_key_id(key_id)
     if not verify_ed25519(body["issuer_signing_public_key_b64"], canonical_json_bytes(body), signature):
         raise ValueError("Invite token signature is invalid")
     expires_at = _parse_iso_z(body["expires_at"])
@@ -359,6 +385,8 @@ def add_cluster_data_key(
     activate: bool,
     active_key_hlc: str | None = None,
 ) -> ClusterSecret:
+    validate_cluster_id(cluster_id)
+    validate_key_id(key_id)
     secret = load_cluster_secret(config, cluster_id)
     data_keys = dict(secret.data_keys)
     data_keys[key_id] = data_key_b64
@@ -377,6 +405,7 @@ def add_cluster_data_key(
 
 
 def _cluster_key_dir(config: Config, cluster_id: str) -> Path:
+    validate_cluster_id(cluster_id)
     return config.cluster_keys_dir / cluster_id
 
 
@@ -390,6 +419,8 @@ def _secure_cluster_key_dir(config: Config, cluster_id: str) -> Path:
 
 
 def _write_inviter_public_metadata(config: Config, cluster_id: str, invite_body: dict[str, Any]) -> None:
+    validate_cluster_id(cluster_id)
+    validate_node_id(invite_body["issuer_node_id"])
     path = config.clusters_dir / cluster_id / "nodes" / f"{invite_body['issuer_node_id']}.json"
     data = {
         "version": 1,

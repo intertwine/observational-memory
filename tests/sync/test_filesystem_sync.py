@@ -13,6 +13,7 @@ from observational_memory.sync.config import (
 from observational_memory.sync.engine import sync_cluster
 from observational_memory.sync.materialize import materialize_cluster_memory
 from observational_memory.sync.store import ClusterStore, NodeMetadata
+from observational_memory.sync.transports.filesystem import FilesystemTransport
 
 
 def _membership(store, invite=None):
@@ -133,6 +134,45 @@ def test_key_rotation_propagates_active_key_to_peer(tmp_path):
         payload={"format": "markdown", "body": "- post-rotation", "observed_at": "2026-05-08T12:01:00Z"},
     )
     assert observation.data["encryption"]["key_id"] == store_b.secret.active_key_id
+
+
+def test_filesystem_transport_rejects_filename_body_mismatches(tmp_path):
+    shared = tmp_path / "shared"
+    config_a = _node_config(tmp_path, "a")
+    cluster_a = initialize_cluster_config(
+        config_a,
+        name="Cluster",
+        node_alias="node-a",
+        transports=[TransportConfig(type="filesystem", path=str(shared))],
+    )
+    store_a = ClusterStore.from_config(config_a)
+    store_a.ensure_layout()
+    _membership(store_a)
+    record = store_a.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex"},
+        payload={"format": "markdown", "body": "- memory", "observed_at": "2026-05-08T12:00:00Z"},
+    )
+    transport = FilesystemTransport(shared)
+    node_dir = shared / "clusters" / cluster_a.id / "nodes"
+    node_dir.mkdir(parents=True)
+    (node_dir / "node_attacker.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "node_id": store_a.cluster_config.node_id,
+                "alias": "mismatch",
+                "signing_public_key_b64": "abc",
+            }
+        )
+    )
+    record_dir = shared / "clusters" / cluster_a.id / "records" / "node_attacker"
+    record_dir.mkdir(parents=True)
+    (record_dir / f"{record.node_seq:020d}-{record.record_id}.omr.json").write_bytes(record.to_bytes())
+
+    assert transport.fetch_node(cluster_a.id, "node_attacker") is None
+    assert transport.fetch_record(cluster_a.id, "node_attacker", record.record_id) is None
 
 
 def test_cli_init_status_materialize(isolated_om_home):

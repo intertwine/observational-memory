@@ -21,6 +21,7 @@ from .config import (
 )
 from .crypto import ClusterSecret, NodeKeypair, b64url_encode
 from .frontier import frontier_from_records
+from .ids import validate_cluster_id, validate_node_id, validate_record_id
 from .records import RecordEnvelope, create_record, decrypt_record_payload, record_path_name, verify_record_envelope
 
 _MAX_PENDING_NODE_METADATA = 128
@@ -57,6 +58,7 @@ class NodeMetadata:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NodeMetadata:
+        validate_node_id(data["node_id"])
         return cls(
             node_id=data["node_id"],
             alias=data.get("alias", data["node_id"]),
@@ -92,6 +94,7 @@ class ClusterStore:
 
     @property
     def cluster_dir(self) -> Path:
+        validate_cluster_id(self.cluster_config.id)
         return self.config.clusters_dir / self.cluster_config.id
 
     @property
@@ -175,6 +178,8 @@ class ClusterStore:
     def import_record_bytes(self, data: bytes) -> ImportResult:
         try:
             record = RecordEnvelope.from_bytes(data)
+            validate_record_id(record.record_id)
+            validate_node_id(record.node_id)
         except Exception as e:
             self._record_diagnostic("rejected", None, f"invalid JSON: {e}")
             return ImportResult("rejected", reason=f"invalid JSON: {e}")
@@ -202,11 +207,7 @@ class ClusterStore:
 
         try:
             self._write_record(record)
-            self._write_head(
-                record.node_id,
-                max(self.all_heads().get(record.node_id, 0), record.node_seq),
-                record.record_id,
-            )
+            self._update_imported_head(record)
             if record.kind == "node_membership":
                 self._apply_membership_record(record, payload)
             if record.kind == "key_rotation":
@@ -255,7 +256,13 @@ class ClusterStore:
                 continue
             node_id = data.get("node_id") or path.stem
             seq = data.get("seq", 0)
-            if isinstance(node_id, str) and isinstance(seq, int):
+            if node_id != path.stem:
+                continue
+            try:
+                validate_node_id(node_id)
+            except ValueError:
+                continue
+            if isinstance(seq, int):
                 heads[node_id] = max(heads.get(node_id, 0), seq)
         return heads
 
@@ -266,7 +273,9 @@ class ClusterStore:
         for path in self.nodes_dir.glob("*.json"):
             try:
                 node = NodeMetadata.from_dict(json.loads(path.read_text()))
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+            if node.node_id != path.stem:
                 continue
             nodes[node.node_id] = node
         return nodes
@@ -278,7 +287,9 @@ class ClusterStore:
         for path in self.pending_nodes_dir.glob("*.json"):
             try:
                 node = NodeMetadata.from_dict(json.loads(path.read_text()))
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+            if node.node_id != path.stem:
                 continue
             nodes[node.node_id] = node
         return nodes
@@ -332,6 +343,10 @@ class ClusterStore:
         return frontier_from_records(self.list_records(include_tombstoned=True))
 
     def _write_record(self, record: RecordEnvelope) -> None:
+        validate_node_id(record.node_id)
+        validate_record_id(record.record_id)
+        if record.cluster_id != self.cluster_config.id:
+            raise ValueError("Record cluster_id mismatch")
         path = self.records_dir / record.node_id / record_path_name(record)
         if path.exists():
             return
@@ -341,6 +356,9 @@ class ClusterStore:
         atomic_write_bytes(path, record.to_bytes())
 
     def _write_head(self, node_id: str, seq: int, record_id: str | None) -> None:
+        validate_node_id(node_id)
+        if record_id is not None:
+            validate_record_id(record_id)
         data = {
             "version": 1,
             "cluster_id": self.cluster_config.id,
@@ -352,24 +370,40 @@ class ClusterStore:
         atomic_write_text(self.heads_dir / f"{node_id}.json", json.dumps(data, indent=2, sort_keys=True) + "\n")
 
     def _read_head(self, node_id: str) -> dict[str, Any] | None:
+        validate_node_id(node_id)
         path = self.heads_dir / f"{node_id}.json"
         if not path.exists():
             return None
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
+        if data.get("node_id") != node_id:
+            return None
+        return data
 
     @staticmethod
     def _node_metadata_path(directory: Path, node_id: str) -> Path:
-        if not node_id or "/" in node_id or "\\" in node_id or node_id in {".", ".."}:
-            raise ValueError(f"Invalid node_id {node_id!r}")
+        validate_node_id(node_id)
         return directory / f"{node_id}.json"
 
     def _has_record(self, record_id: str) -> bool:
         return self._record_path_by_id(record_id) is not None
 
     def _record_path_by_id(self, record_id: str) -> Path | None:
+        validate_record_id(record_id)
         if not self.records_dir.exists():
             return None
         return next(self.records_dir.glob(f"*/*-{record_id}.omr.json"), None)
+
+    def _update_imported_head(self, record: RecordEnvelope) -> None:
+        current = self._read_head(record.node_id)
+        if current is None:
+            self._write_head(record.node_id, record.node_seq, record.record_id)
+            return
+        current_seq = current.get("seq", 0)
+        current_record_id = current.get("record_id")
+        if not isinstance(current_seq, int) or record.node_seq > current_seq:
+            self._write_head(record.node_id, record.node_seq, record.record_id)
+        elif record.node_seq == current_seq and current_record_id not in {None, record.record_id}:
+            raise ValueError(f"Head conflict for {record.node_id} seq {record.node_seq}")
 
     def _next_hlc(self) -> HybridLogicalTimestamp:
         previous = self._load_clock()
@@ -437,6 +471,9 @@ class ClusterStore:
             signing_public_key = payload.get("signing_public_key")
             if not isinstance(node_id, str) or not isinstance(signing_public_key, str):
                 raise ValueError("Invalid membership add payload")
+            validate_node_id(node_id)
+            if record.node_id != node_id:
+                raise ValueError("Membership payload node_id mismatch")
             self.write_node_metadata(
                 NodeMetadata(
                     node_id=node_id,
@@ -448,6 +485,7 @@ class ClusterStore:
             node_id = payload.get("node_id")
             if not isinstance(node_id, str):
                 raise ValueError("Invalid membership revoke payload")
+            validate_node_id(node_id)
             existing = self.public_nodes().get(node_id)
             if existing is None:
                 return

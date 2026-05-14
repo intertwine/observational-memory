@@ -120,6 +120,53 @@ def test_public_node_metadata_import_is_capped_and_path_safe(tmp_path, monkeypat
     assert not (store.pending_nodes_dir.parent / "escape.json").exists()
 
 
+def test_malformed_record_ids_are_rejected_before_path_use(tmp_path):
+    _config, store = _init_store(tmp_path)
+    record = store.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex"},
+        payload={"format": "markdown", "body": "- safe", "observed_at": "2026-05-08T12:00:00Z"},
+    )
+    raw = json.loads(record.to_bytes())
+    raw["record_id"] = "../escape"
+
+    result = store.import_record_bytes(json.dumps(raw).encode("utf-8"))
+
+    assert result.status == "rejected"
+    assert "Invalid record_id" in (result.reason or "")
+    assert not (store.records_dir.parent / "escape.omr.json").exists()
+
+
+def test_out_of_order_import_does_not_regress_head_record_id(tmp_path):
+    config_a, store_a = _init_store(tmp_path, alias="node-a")
+    invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h")
+    config_b = Config(memory_dir=tmp_path / "node-b" / "memory", env_file=tmp_path / "node-b" / "config" / "env")
+    join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
+    store_b = ClusterStore.from_config(config_b)
+    store_b.ensure_layout()
+    seq2 = store_a.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex"},
+        payload={"format": "markdown", "body": "- second", "observed_at": "2026-05-08T12:00:00Z"},
+    )
+    seq3 = store_a.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex"},
+        payload={"format": "markdown", "body": "- third", "observed_at": "2026-05-08T12:01:00Z"},
+    )
+
+    assert store_b.import_record_bytes(seq3.to_bytes()).imported
+    assert store_b.import_record_bytes(seq2.to_bytes()).imported
+
+    head = store_b._read_head(store_a.cluster_config.node_id)
+    assert head is not None
+    assert head["seq"] == seq3.node_seq
+    assert head["record_id"] == seq3.record_id
+
+
 def test_revoked_node_future_records_are_rejected(tmp_path):
     config_a, store_a = _init_store(tmp_path, alias="node-a")
     invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h")
@@ -244,3 +291,43 @@ def test_tombstoned_reflection_snapshot_is_not_selected(tmp_path):
 
     assert selected is not None
     assert selected.record_id == older.record_id
+
+
+def test_reflection_catchup_uses_observation_frontier_only(tmp_path):
+    _config, store = _init_store(tmp_path)
+    first = store.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex"},
+        payload={"format": "markdown", "body": "- first", "observed_at": "2026-05-08T12:00:00Z"},
+    )
+    second = store.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex"},
+        payload={"format": "markdown", "body": "- second", "observed_at": "2026-05-08T12:01:00Z"},
+    )
+    store.append_record(
+        kind="reflection_snapshot",
+        namespace="personal",
+        source={"agent": "reflector"},
+        payload={
+            "format": "markdown",
+            "body": "# Reflections\n\n## Core Identity\n- First only",
+            "frontier": {store.cluster_config.node_id: first.node_seq},
+            "input_record_ids": [first.record_id],
+            "base_snapshot_ids": [],
+        },
+    )
+    store.append_record(
+        kind="manual_override",
+        namespace="personal",
+        source={"agent": "manual"},
+        payload={"target": "profile", "section": "note", "operation": "upsert", "body": "manual"},
+    )
+
+    selected, catchup = choose_reflection_snapshot(store)
+
+    assert selected is not None
+    assert second.node_seq > first.node_seq
+    assert catchup is True

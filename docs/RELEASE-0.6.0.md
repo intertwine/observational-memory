@@ -10,6 +10,7 @@ This branch is prepared as the `observational-memory` `0.6.0` release candidate.
 - Materializes `observations.md`, `reflections.md`, `profile.md`, and `active.md` locally from records and snapshots.
 - Adds `om cluster init`, `invite`, `join`, `sync`, `status`, `peers`, `materialize`, `provenance`, `redact`, `revoke`, `rotate-key`, and `override`.
 - Preserves existing non-cluster behavior unless cluster config and keys are explicitly initialized and enabled.
+- Frames `rotate-key` honestly as forward-looking key hygiene for trusted nodes. Full compromise recovery, per-node key epochs, and historical rewrap/purge semantics are planned after the preview.
 
 ## Validation
 
@@ -31,6 +32,8 @@ om cluster sync
 ```
 
 The shared transport must contain encrypted `.omr.json` records only, never provider env files, private keys, `.cursor.json`, `.search-index`, `.scheduler-logs`, or generated Markdown as the sync source.
+
+`om cluster rotate-key` in 0.6.0 does not re-encrypt historical transport blobs and cannot by itself protect old records from a device that already had the previous cluster key. For a known compromise, revoke the node, rotate for future writes, inspect transport/backups, and wait for the key-epoch recovery work before treating old ciphertext as recovered.
 
 ## Publish To PyPI
 
@@ -61,6 +64,7 @@ Do not push the tag before PyPI has `0.6.0`, or the Homebrew workflow will fail.
 - Filesystem transport works with common shared-folder tools while treating the transport as untrusted.
 - Markdown files remain local materialized views, so existing inspectable OM workflows stay intact.
 - Cluster mode is opt-in and disabled unless initialized with `om cluster init` or `om cluster join`.
+- Key rotation in this preview is forward-looking; full compromise recovery and historical re-encryption are not included yet.
 
 ## Upgrade
 

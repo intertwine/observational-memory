@@ -12,7 +12,7 @@ from observational_memory.config import Config
 from observational_memory.startup_memory import refresh_startup_memory
 
 from .atomic import DirectoryLock, atomic_write_text
-from .frontier import frontier_covers
+from .frontier import frontier_covers, frontier_from_records
 from .records import RecordEnvelope
 from .store import ClusterStore
 
@@ -82,11 +82,7 @@ def choose_reflection_snapshot(store: ClusterStore) -> tuple[RecordEnvelope | No
         selected_frontier = store.read_payload(selected).get("frontier", {})
     except Exception:
         selected_frontier = {}
-    observations_frontier = {
-        node: seq
-        for node, seq in store.records_frontier().items()
-        if any(r.node_id == node and r.node_seq == seq for r in store.list_records(kind="observation"))
-    }
+    observations_frontier = frontier_from_records(store.list_records(kind="observation"))
     catchup_needed = not frontier_covers(selected_frontier, observations_frontier)
     return selected, catchup_needed
 

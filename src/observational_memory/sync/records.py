@@ -16,6 +16,7 @@ from .crypto import (
     sign_ed25519,
     verify_ed25519,
 )
+from .ids import validate_cluster_id, validate_key_id, validate_node_id, validate_record_id
 
 KNOWN_RECORD_KINDS = {
     "observation",
@@ -88,6 +89,9 @@ def create_record(
     source: dict[str, Any],
     payload: dict[str, Any],
 ) -> RecordEnvelope:
+    validate_cluster_id(cluster_id)
+    validate_node_id(keypair.node_id)
+    validate_key_id(secret.active_key_id)
     if kind not in KNOWN_RECORD_KINDS:
         raise ValueError(f"Unknown record kind: {kind}")
     plaintext = canonical_json_bytes(payload)
@@ -138,6 +142,13 @@ def verify_record_envelope(
     signing_public_key_b64: str,
 ) -> None:
     data = record.data
+    validate_record_id(record.record_id)
+    validate_cluster_id(str(data.get("cluster_id", "")))
+    validate_node_id(str(data.get("node_id", "")))
+    encryption = data.get("encryption")
+    if not isinstance(encryption, dict):
+        raise ValueError("Missing encryption metadata")
+    validate_key_id(str(encryption.get("key_id", "")))
     if data.get("version") != 1:
         raise ValueError("Unsupported record version")
     if data.get("cluster_id") != cluster_id:
@@ -159,6 +170,7 @@ def verify_record_envelope(
 def decrypt_record_payload(record: RecordEnvelope, *, secret: ClusterSecret) -> dict[str, Any]:
     encryption = record.data["encryption"]
     key_id = encryption.get("key_id", secret.active_key_id)
+    validate_key_id(str(key_id))
     data_key = secret.data_keys.get(key_id)
     if data_key is None:
         raise ValueError(f"Missing cluster data key {key_id}")
@@ -177,6 +189,8 @@ def decrypt_record_payload(record: RecordEnvelope, *, secret: ClusterSecret) -> 
 
 
 def record_path_name(record: RecordEnvelope) -> str:
+    validate_node_id(record.node_id)
+    validate_record_id(record.record_id)
     return f"{record.node_seq:020d}-{record.record_id}.omr.json"
 
 
