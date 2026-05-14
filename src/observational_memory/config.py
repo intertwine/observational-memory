@@ -185,6 +185,10 @@ class Config:
     # Reflector settings
     observation_retention_days: int = 7
     reflections_target_lines: int = 400  # aim for 200-600
+    snapshot_ttl_days: int = field(default_factory=lambda: int(os.environ.get("OM_SNAPSHOT_TTL_DAYS", "14")))
+    snapshot_expiry_action: str = field(
+        default_factory=lambda: os.environ.get("OM_SNAPSHOT_EXPIRY_ACTION", "stale-section")
+    )
 
     # Search settings
     search_backend: str = field(

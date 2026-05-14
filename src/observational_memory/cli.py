@@ -178,6 +178,41 @@ def reflect(ctx: click.Context, dry_run: bool) -> None:
         click.echo("No observations to reflect on.")
 
 
+@cli.command()
+@click.option("--dry-run", is_flag=True, help="Print pruned reflections without writing")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.option("--drop-stale", is_flag=True, help="Drop stale snapshot entries instead of moving them")
+@click.option("--namespace", default=None, help="Reserved for cluster namespace-scoped pruning")
+@click.pass_context
+def prune(ctx: click.Context, dry_run: bool, as_json: bool, drop_stale: bool, namespace: str | None) -> None:
+    """Prune or mark stale reflection snapshot entries."""
+    import json as json_mod
+
+    from .reflect import _reindex_if_enabled
+    from .reflection_metadata import ensure_reflection_metadata, prune_stale_snapshots
+    from .startup_memory import refresh_startup_memory
+
+    config = ctx.obj["config"]
+    if not config.reflections_path.exists():
+        raise click.ClickException("reflections.md does not exist.")
+    action = "drop" if drop_stale else config.snapshot_expiry_action
+    text = ensure_reflection_metadata(config.reflections_path.read_text(), node="local")
+    pruned, summary = prune_stale_snapshots(text, ttl_days=config.snapshot_ttl_days, action=action)
+    if as_json:
+        payload = {**summary.to_dict(), "dry_run": dry_run, "namespace": namespace}
+        click.echo(json_mod.dumps(payload, indent=2, sort_keys=True))
+    elif dry_run:
+        click.echo(pruned, nl=not pruned.endswith("\n"))
+    else:
+        config.reflections_path.write_text(pruned)
+        refresh_startup_memory(config)
+        _reindex_if_enabled(config)
+        click.echo(
+            f"Pruned reflections: {summary.pruned} dropped, "
+            f"{summary.stale_sectioned} moved, {summary.annotated} annotated"
+        )
+
+
 def _maybe_run_reflector_catchup(config: Config) -> None:
     """Run the reflector when daily reflections have fallen behind observations."""
     from .reflect import reflector_catchup_needed, run_reflector

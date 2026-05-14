@@ -121,3 +121,42 @@ Known limitations:
 Next milestone:
 
 - Milestone 3: reflection metadata, stale-state pruning, host-memory coexistence, and cluster-aware semantic merge (#41).
+
+## Milestone 3 - Reflection Metadata, Stale-State Pruning, And Coexistence
+
+Goals:
+
+- Add per-entry metadata to generated reflections.
+- Preserve legacy/manual reflection text while assigning stable IDs and kinds.
+- Age out stale snapshot facts without pruning evergreen memory.
+- Document host-agent memory coexistence and cluster semantic merge behavior.
+
+Completed work:
+
+- Added `reflection_metadata.py` for parsing, formatting, kind inference, metadata backfill, and stale snapshot pruning.
+- Reflection generation now post-processes outputs with inline metadata comments containing `id`, `kind`, `last_seen`, `node`, and `scope`.
+- Added `OM_SNAPSHOT_TTL_DAYS` and `OM_SNAPSHOT_EXPIRY_ACTION` config/env settings.
+- Added `om prune` with `--dry-run`, `--json`, `--drop-stale`, and reserved `--namespace`.
+- Added docs for host-memory coexistence and updated cluster docs with metadata-based merge rules.
+
+Tests added:
+
+- Metadata backfill preserves existing IDs and unknown fields.
+- Stale snapshots move to `## Stale snapshots` idempotently while evergreen entries remain.
+- `om prune --json` exercises the command path.
+
+Validation:
+
+- `mise exec -- uv run pytest tests/test_reflection_metadata.py tests/test_reflect.py -q` - 49 passed.
+- `mise exec -- uv run ruff check src/observational_memory/reflection_metadata.py src/observational_memory/reflect.py src/observational_memory/cli.py tests/test_reflection_metadata.py` - passed.
+- `mise exec -- uv run pytest -q` - 347 passed.
+- `mise exec -- uv run ruff check` - passed.
+
+Known limitations:
+
+- Metadata kind inference is heuristic for legacy entries.
+- `--namespace` is accepted for future cluster-scoped pruning but local Markdown pruning is not namespace-filtered yet.
+
+Next milestone:
+
+- Milestone 4: namespace/source policy, override semantics, and record indexing.

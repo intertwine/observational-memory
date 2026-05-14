@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import Config
 from .llm import compress
+from .reflection_metadata import ensure_reflection_metadata, prune_stale_snapshots
 
 REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
 
@@ -94,6 +95,12 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     latest_obs_date = _extract_latest_observation_date(raw_observations)
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     result = _stamp_timestamps(result, now_utc, latest_obs_date or now_utc)
+    result = ensure_reflection_metadata(result, node="local")
+    result, _summary = prune_stale_snapshots(
+        result,
+        ttl_days=config.snapshot_ttl_days,
+        action=config.snapshot_expiry_action,
+    )
 
     if dry_run:
         return result
@@ -542,6 +549,12 @@ def _run_cluster_reflector(config: Config, dry_run: bool = False) -> str | None:
     latest_obs_date = _extract_latest_observation_date(raw_observations)
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     result = _stamp_timestamps(result, now_utc, latest_obs_date or now_utc)
+    result = ensure_reflection_metadata(result, node=store.cluster_config.node_id)
+    result, _summary = prune_stale_snapshots(
+        result,
+        ttl_days=config.snapshot_ttl_days,
+        action=config.snapshot_expiry_action,
+    )
 
     if dry_run:
         return result

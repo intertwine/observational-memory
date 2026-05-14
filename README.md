@@ -248,6 +248,8 @@ A daily background job runs the reflector at 04:00 local machine time, which:
 4. If they're too large (e.g., after a backfill), automatically chunks by date section and folds each chunk into the reflections incrementally
 5. Merges, promotes (🟡→🔴), demotes, and archives entries
 6. Stamps `Last updated` and `Last reflected` timestamps programmatically
+
+Reflection entries include inline `<!--om: ...-->` metadata for stable entry IDs, kind, `last_seen`, node, and scope. This lets OM distinguish evergreen preferences from decaying snapshot facts and coexist more cleanly with host-agent memory systems. See [docs/coexistence.md](docs/coexistence.md).
 7. Writes the updated `reflections.md`
 8. Trims observations older than 7 days
 

@@ -113,7 +113,7 @@ om cluster override add --target profile --section communication_style --body "P
 om cluster redact --record sha256_...
 ```
 
-Reflection conflicts are handled as snapshots with frontiers. Incomparable snapshots are not line-merged; the next cluster-aware reflector run can consolidate them into a new snapshot covering both frontiers.
+Reflection conflicts are handled as snapshots with frontiers and inline entry metadata. Snapshot entries use `last_seen` to prefer newer state; evergreen entries are preserved by union/deduplication until the next reflector pass can reconcile them; entries marked `scope=local` are treated as host-local materialization rather than cluster-shared memory.
 
 ## Redaction Caveat
 
