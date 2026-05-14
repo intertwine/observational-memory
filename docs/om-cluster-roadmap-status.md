@@ -160,3 +160,43 @@ Known limitations:
 Next milestone:
 
 - Milestone 4: namespace/source policy, override semantics, and record indexing.
+
+## Milestone 4 - Namespace/Source Policy, Override Semantics, And Record Indexing
+
+Goals:
+
+- Add operator-facing namespace and source-policy commands.
+- Make manual override materialization deterministic and latest-wins.
+- Add a rebuildable record index for record ID lookup without making it authoritative.
+
+Completed work:
+
+- Added `om cluster namespace list/add/remove`.
+- Added `om cluster source-policy list/add` with agent, git remote hash, path substring, namespace, and local-only fields.
+- Extended `NamespaceRule` persistence with `local_only`.
+- Added `om cluster override set/get/list --json/remove --target --section` while preserving record-ID removal.
+- Changed materialization so manual overrides resolve latest-wins by `(namespace, section)`, and latest remove records suppress previous values.
+- Added `ClusterStore.record_index_path`, incremental index updates on record writes, and `rebuild_record_index()`.
+- `_record_path_by_id()` now consults the local index first and falls back to filesystem glob lookup when the index is absent or stale.
+
+Tests added:
+
+- Record index is written and rebuildable.
+- Manual overrides resolve latest-wins and removal records suppress previous values.
+- CLI namespace/source-policy/override semantics exercise the operator path.
+
+Validation:
+
+- `mise exec -- uv run pytest tests/sync/test_store_and_materialize.py tests/sync/test_filesystem_sync.py -q` - 19 passed.
+- `mise exec -- uv run ruff check src/observational_memory/sync src/observational_memory/cli.py tests/sync/test_store_and_materialize.py tests/sync/test_filesystem_sync.py` - passed.
+- `mise exec -- uv run pytest -q` - 350 passed.
+- `mise exec -- uv run ruff check` - passed.
+
+Known limitations:
+
+- Source-policy privacy modes are still basic; full hashed/minimal presentation policy remains a later polish layer.
+- The record index does not replace encrypted record files as the source of truth and intentionally stores only clear envelope metadata.
+
+Next milestone:
+
+- Milestone 5: key epochs and historical rewrap (#37).

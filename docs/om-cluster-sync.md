@@ -93,6 +93,8 @@ om cluster peers
 om cluster requests
 om cluster approve <request-id>
 om cluster reject <request-id> --reason "..."
+om cluster namespace list
+om cluster source-policy list
 om cluster sync
 om cluster materialize
 om cluster provenance <record-id>
@@ -100,6 +102,8 @@ om cluster redact --record <record-id> --reason "user-redaction"
 om cluster revoke <node-id>
 om cluster rotate-key
 om cluster override add --target profile --section communication_style --body "..."
+om cluster override set --target profile --section communication_style --body "..."
+om cluster override get --target profile --section communication_style
 ```
 
 `om observe`, `om reflect`, and `om context` keep the old direct Markdown behavior unless cluster mode is enabled by local cluster config and keys. Sync failures do not block local memory capture.
@@ -114,6 +118,20 @@ om cluster redact --record sha256_...
 ```
 
 Reflection conflicts are handled as snapshots with frontiers and inline entry metadata. Snapshot entries use `last_seen` to prefer newer state; evergreen entries are preserved by union/deduplication until the next reflector pass can reconcile them; entries marked `scope=local` are treated as host-local materialization rather than cluster-shared memory.
+
+## Namespaces, Source Policies, And Overrides
+
+Namespaces are operator-visible routing labels for records. Source policies route matching source metadata into namespaces without editing TOML manually:
+
+```bash
+om cluster namespace add project:observational-memory
+om cluster source-policy add --agent codex --namespace project:observational-memory
+om cluster source-policy add --path-contains /work/private --namespace local:private --local-only
+```
+
+Manual profile/active overrides are latest-wins by `(target, section, namespace)`. `set` creates a new override record, `get` resolves the latest value, and `remove --target ... --section ...` creates a removal record. Older records remain in the append-only log for provenance.
+
+The local record index at `clusters/<cluster-id>/index/records.json` is rebuildable and non-authoritative. If it is missing or stale, OM falls back to record files and can rebuild the index from encrypted record envelopes.
 
 ## Redaction Caveat
 

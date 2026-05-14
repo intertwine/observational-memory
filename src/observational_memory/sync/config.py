@@ -50,6 +50,7 @@ class NamespaceRule:
     path_contains: str | None = None
     git_remote_hash: str | None = None
     namespace: str = "personal"
+    local_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,7 @@ def load_cluster_config(config: Config) -> ClusterConfig | None:
             path_contains=item.get("path_contains"),
             git_remote_hash=item.get("git_remote_hash"),
             namespace=item.get("namespace", namespaces.get("default", cluster.get("default_namespace", "personal"))),
+            local_only=bool(item.get("local_only", False)),
         )
         for item in raw.get("namespace_rule", [])
     ]
@@ -226,6 +228,8 @@ def write_cluster_config(config: Config, cluster_config: ClusterConfig) -> None:
             lines.append(f'path_contains = "{_toml_escape(rule.path_contains)}"')
         if rule.git_remote_hash:
             lines.append(f'git_remote_hash = "{_toml_escape(rule.git_remote_hash)}"')
+        if rule.local_only:
+            lines.append("local_only = true")
         lines.append(f'namespace = "{_toml_escape(rule.namespace)}"')
         lines.append("")
     atomic_write_text(config.cluster_config_path, "\n".join(lines).rstrip() + "\n", mode=0o600)

@@ -49,10 +49,29 @@ def test_append_read_heads_permissions_and_no_plaintext(tmp_path):
 
     assert store.read_payload(record)["body"] == "- top secret"
     assert store.all_heads()[store.cluster_config.node_id] == 2
-    record_file = next((config.clusters_dir / store.cluster_config.id / "records").glob("*/*.omr.json"))
+    record_file = store._record_path_by_id(record.record_id)
+    assert record_file is not None
     assert b"top secret" not in record_file.read_bytes()
     assert oct((config.cluster_keys_dir / store.cluster_config.id / "node.json").stat().st_mode & 0o777) == "0o600"
     assert oct((config.cluster_keys_dir / store.cluster_config.id / "cluster.key").stat().st_mode & 0o777) == "0o600"
+    assert record.record_id in json.loads(store.record_index_path.read_text())["records"]
+    assert store._record_path_by_id(record.record_id) == record_file
+
+
+def test_record_index_is_rebuildable(tmp_path):
+    _config, store = _init_store(tmp_path)
+    record = store.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex"},
+        payload={"format": "markdown", "body": "- indexed", "observed_at": "2026-05-08T12:00:00Z"},
+    )
+    store.record_index_path.unlink()
+
+    index = store.rebuild_record_index()
+
+    assert record.record_id in index["records"]
+    assert store._record_path_by_id(record.record_id).exists()
 
 
 def test_duplicate_import_is_idempotent_and_tamper_rejected(tmp_path):
@@ -252,6 +271,34 @@ def test_materialize_observations_reflections_redactions_and_overrides(tmp_path)
     materialize_cluster_memory(config, store)
     assert "hello cluster" not in config.observations_path.read_text()
     assert "Be direct." not in config.profile_path.read_text()
+
+
+def test_manual_overrides_are_latest_wins_by_section(tmp_path):
+    config, store = _init_store(tmp_path)
+    store.append_record(
+        kind="manual_override",
+        namespace="personal",
+        source={"agent": "manual"},
+        payload={"target": "profile", "section": "communication_style", "operation": "upsert", "body": "First."},
+    )
+    store.append_record(
+        kind="manual_override",
+        namespace="personal",
+        source={"agent": "manual"},
+        payload={"target": "profile", "section": "communication_style", "operation": "upsert", "body": "Second."},
+    )
+    materialize_cluster_memory(config, store)
+    assert "Second." in config.profile_path.read_text()
+    assert "First." not in config.profile_path.read_text()
+
+    store.append_record(
+        kind="manual_override",
+        namespace="personal",
+        source={"agent": "manual"},
+        payload={"target": "profile", "section": "communication_style", "operation": "remove"},
+    )
+    materialize_cluster_memory(config, store)
+    assert "Second." not in config.profile_path.read_text()
 
 
 def test_tombstoned_reflection_snapshot_is_not_selected(tmp_path):

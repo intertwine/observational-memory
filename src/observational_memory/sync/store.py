@@ -122,6 +122,10 @@ class ClusterStore:
         return self.cluster_dir / "materializer-state.json"
 
     @property
+    def record_index_path(self) -> Path:
+        return self.cluster_dir / "index" / "records.json"
+
+    @property
     def sync_lock_path(self) -> Path:
         return self.cluster_dir / ".locks" / "sync.lock"
 
@@ -132,6 +136,7 @@ class ClusterStore:
             self.nodes_dir,
             self.pending_nodes_dir,
             self.cluster_dir / "tombstones",
+            self.record_index_path.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
         self.write_node_metadata(
@@ -234,6 +239,24 @@ class ClusterStore:
                 continue
             records.append(record)
         return sorted(records, key=lambda r: (r.hlc, r.node_id, r.node_seq, r.record_id))
+
+    def rebuild_record_index(self) -> dict[str, Any]:
+        records: dict[str, Any] = {}
+        if self.records_dir.exists():
+            for path in self.records_dir.glob("*/*.omr.json"):
+                try:
+                    record = RecordEnvelope.from_bytes(path.read_bytes())
+                except Exception:
+                    continue
+                records[record.record_id] = self._index_entry(record, path)
+        index = {
+            "version": 1,
+            "cluster_id": self.cluster_config.id,
+            "records": records,
+            "rebuilt_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        atomic_write_text(self.record_index_path, json.dumps(index, indent=2, sort_keys=True) + "\n")
+        return index
 
     def record_bytes(self, record: RecordEnvelope) -> bytes:
         return record.to_bytes()
@@ -354,6 +377,7 @@ class ClusterStore:
         if seq_conflict and all(record.record_id not in p.name for p in seq_conflict):
             raise ValueError(f"Sequence conflict for {record.node_id} seq {record.node_seq}")
         atomic_write_bytes(path, record.to_bytes())
+        self._update_record_index(record, path)
 
     def _write_head(self, node_id: str, seq: int, record_id: str | None) -> None:
         validate_node_id(node_id)
@@ -391,7 +415,52 @@ class ClusterStore:
         validate_record_id(record_id)
         if not self.records_dir.exists():
             return None
+        path = self._record_path_from_index(record_id)
+        if path is not None:
+            return path
         return next(self.records_dir.glob(f"*/*-{record_id}.omr.json"), None)
+
+    def _record_path_from_index(self, record_id: str) -> Path | None:
+        if not self.record_index_path.exists():
+            return None
+        try:
+            index = json.loads(self.record_index_path.read_text())
+            entry = index.get("records", {}).get(record_id)
+            if not isinstance(entry, dict):
+                return None
+            path = Path(entry["path"])
+        except Exception:
+            return None
+        if path.exists() and path.name.endswith(f"-{record_id}.omr.json"):
+            return path
+        return None
+
+    def _update_record_index(self, record: RecordEnvelope, path: Path) -> None:
+        try:
+            if self.record_index_path.exists():
+                index = json.loads(self.record_index_path.read_text())
+            else:
+                index = {"version": 1, "cluster_id": self.cluster_config.id, "records": {}}
+            if index.get("cluster_id") != self.cluster_config.id or not isinstance(index.get("records"), dict):
+                index = {"version": 1, "cluster_id": self.cluster_config.id, "records": {}}
+            index["records"][record.record_id] = self._index_entry(record, path)
+            index["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            atomic_write_text(self.record_index_path, json.dumps(index, indent=2, sort_keys=True) + "\n")
+        except Exception:
+            return
+
+    def _index_entry(self, record: RecordEnvelope, path: Path) -> dict[str, Any]:
+        return {
+            "record_id": record.record_id,
+            "path": str(path),
+            "node_id": record.node_id,
+            "node_seq": record.node_seq,
+            "hlc": record.hlc,
+            "kind": record.kind,
+            "namespace": record.namespace,
+            "key_id": record.data.get("encryption", {}).get("key_id"),
+            "payload_hash": record.payload_hash,
+        }
 
     def _update_imported_head(self, record: RecordEnvelope) -> None:
         current = self._read_head(record.node_id)

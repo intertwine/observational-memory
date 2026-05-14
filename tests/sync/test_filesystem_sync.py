@@ -225,6 +225,54 @@ def test_cli_init_status_materialize(isolated_om_home):
     assert result.exit_code == 0, result.output
 
 
+def test_cli_namespace_source_policy_and_override_semantics(isolated_om_home):
+    runner = CliRunner()
+    shared = isolated_om_home / "shared"
+    result = runner.invoke(
+        cli,
+        [
+            "cluster",
+            "init",
+            "--name",
+            "CLI Cluster",
+            "--node-alias",
+            "cli-node",
+            "--transport",
+            f"filesystem:{shared}",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(cli, ["cluster", "namespace", "add", "project:om"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        cli,
+        ["cluster", "source-policy", "add", "--agent", "codex", "--namespace", "project:om", "--local-only"],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(cli, ["cluster", "source-policy", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    policies = json.loads(result.stdout)
+    policy = next(item for item in policies if item["source"] == "codex")
+    assert policy["local_only"] is True
+
+    result = runner.invoke(
+        cli,
+        ["cluster", "override", "set", "--target", "profile", "--section", "communication", "--body", "First."],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        cli,
+        ["cluster", "override", "set", "--target", "profile", "--section", "communication", "--body", "Second."],
+    )
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(cli, ["cluster", "override", "get", "--target", "profile", "--section", "communication"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "Second."
+    result = runner.invoke(cli, ["cluster", "override", "remove", "--target", "profile", "--section", "communication"])
+    assert result.exit_code == 0, result.output
+
+
 def test_cli_invite_join_revoke_rotate(tmp_path):
     runner = CliRunner()
     shared = tmp_path / "shared"

@@ -141,27 +141,31 @@ def _render_reflections(store: ClusterStore) -> tuple[str | None, bool]:
 
 
 def _apply_overrides(path: Path, store: ClusterStore, target: str) -> bool:
-    overrides: list[tuple[str, str, RecordEnvelope]] = []
+    latest: dict[tuple[str, str], tuple[str, str, RecordEnvelope]] = {}
     for record in store.list_records(kind="manual_override"):
         payload = store.read_payload(record)
         if payload.get("target") != target:
             continue
         section = str(payload.get("section") or "general")
+        namespace = record.namespace
         body = str(payload.get("body") or "").strip()
-        if body:
-            overrides.append((section, body, record))
+        operation = str(payload.get("operation") or "upsert")
+        key = (namespace, section)
+        current = latest.get(key)
+        if current is None or (record.hlc, record.record_id) > (current[2].hlc, current[2].record_id):
+            latest[key] = (operation, body, record)
+    overrides = [
+        (section, body, record)
+        for (_namespace, section), (operation, body, record) in latest.items()
+        if operation != "remove" and body
+    ]
     if not overrides:
         return False
     existing = path.read_text() if path.exists() else ""
     marker = "\n## Manual Overrides\n"
     base = existing.split(marker, 1)[0].rstrip()
     lines = [base, marker.strip(), ""]
-    seen: set[tuple[str, str]] = set()
     for section, body, record in sorted(overrides, key=lambda row: (row[0], row[2].hlc, row[2].record_id)):
-        key = (section, body)
-        if key in seen:
-            continue
-        seen.add(key)
         lines.extend([f"### {section}", "", body, "", f"<!-- override-record: {record.record_id} -->", ""])
     return _write_if_changed(path, "\n".join(lines).rstrip() + "\n")
 

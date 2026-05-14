@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -927,6 +928,121 @@ def cluster_peers(ctx: click.Context, as_json: bool) -> None:
         click.echo(f"{peer['node_id']} {peer['alias']}{revoked}")
 
 
+@cluster.group("namespace")
+def cluster_namespace() -> None:
+    """Manage cluster namespaces."""
+
+
+@cluster_namespace.command("list")
+@click.pass_context
+def cluster_namespace_list(ctx: click.Context) -> None:
+    from .sync.config import load_cluster_config
+
+    cluster_config = load_cluster_config(ctx.obj["config"])
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    namespaces = {cluster_config.default_namespace}
+    namespaces.update(rule.namespace for rule in cluster_config.namespace_rules)
+    for namespace in sorted(namespaces):
+        default = " (default)" if namespace == cluster_config.default_namespace else ""
+        click.echo(f"{namespace}{default}")
+
+
+@cluster_namespace.command("add")
+@click.argument("namespace")
+@click.pass_context
+def cluster_namespace_add(ctx: click.Context, namespace: str) -> None:
+    from .sync.config import NamespaceRule, load_cluster_config, write_cluster_config
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    if namespace in {cluster_config.default_namespace, *[rule.namespace for rule in cluster_config.namespace_rules]}:
+        click.echo(f"Namespace already exists: {namespace}")
+        return
+    updated = replace(
+        cluster_config,
+        namespace_rules=[*cluster_config.namespace_rules, NamespaceRule(namespace=namespace)],
+    )
+    write_cluster_config(config, updated)
+    click.echo(f"Added namespace {namespace}")
+
+
+@cluster_namespace.command("remove")
+@click.argument("namespace")
+@click.pass_context
+def cluster_namespace_remove(ctx: click.Context, namespace: str) -> None:
+    from .sync.config import load_cluster_config, write_cluster_config
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    if namespace == cluster_config.default_namespace:
+        raise click.ClickException("Cannot remove the default namespace.")
+    rules = [rule for rule in cluster_config.namespace_rules if rule.namespace != namespace]
+    write_cluster_config(config, replace(cluster_config, namespace_rules=rules))
+    click.echo(f"Removed namespace {namespace}")
+
+
+@cluster.group("source-policy")
+def cluster_source_policy() -> None:
+    """Manage source-to-namespace policies."""
+
+
+@cluster_source_policy.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.pass_context
+def cluster_source_policy_list(ctx: click.Context, as_json: bool) -> None:
+    import json as json_mod
+
+    from .sync.config import load_cluster_config
+
+    cluster_config = load_cluster_config(ctx.obj["config"])
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    rules = [rule.__dict__ for rule in cluster_config.namespace_rules]
+    if as_json:
+        click.echo(json_mod.dumps(rules, indent=2, sort_keys=True))
+        return
+    for index, rule in enumerate(rules, 1):
+        filters = ", ".join(f"{key}={value}" for key, value in rule.items() if key != "namespace" and value)
+        click.echo(f"{index}. {rule['namespace']} {filters}".rstrip())
+
+
+@cluster_source_policy.command("add")
+@click.option("--agent", default=None, help="Agent/source name to match")
+@click.option("--git-remote", "git_remote_hash", default=None, help="Hashed git remote/project ID to match")
+@click.option("--path-contains", default=None, help="Local path substring for future local-only routing")
+@click.option("--namespace", required=True, help="Destination namespace")
+@click.option("--local-only", is_flag=True, help="Mark this rule as local-only")
+@click.pass_context
+def cluster_source_policy_add(
+    ctx: click.Context,
+    agent: str | None,
+    git_remote_hash: str | None,
+    path_contains: str | None,
+    namespace: str,
+    local_only: bool,
+) -> None:
+    from .sync.config import NamespaceRule, load_cluster_config, write_cluster_config
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    rule = NamespaceRule(
+        source=agent,
+        path_contains=path_contains,
+        git_remote_hash=git_remote_hash,
+        namespace=namespace,
+        local_only=local_only,
+    )
+    write_cluster_config(config, replace(cluster_config, namespace_rules=[*cluster_config.namespace_rules, rule]))
+    click.echo(f"Added source policy for namespace {namespace}")
+
+
 @cluster.command("sync")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
 @click.option("--no-materialize", is_flag=True, help="Do not rebuild Markdown after pull")
@@ -1076,6 +1192,15 @@ def cluster_override() -> None:
 @click.option("--body", required=True)
 @click.pass_context
 def cluster_override_add(ctx: click.Context, target: str, section: str, body: str) -> None:
+    ctx.invoke(cluster_override_set, target=target, section=section, body=body)
+
+
+@cluster_override.command("set")
+@click.option("--target", type=click.Choice(["profile", "active"]), required=True)
+@click.option("--section", required=True)
+@click.option("--body", required=True)
+@click.pass_context
+def cluster_override_set(ctx: click.Context, target: str, section: str, body: str) -> None:
     from .sync.materialize import materialize_cluster_memory
     from .sync.store import ClusterStore
 
@@ -1088,25 +1213,88 @@ def cluster_override_add(ctx: click.Context, target: str, section: str, body: st
         payload={"target": target, "section": section, "operation": "upsert", "body": body},
     )
     materialize_cluster_memory(config, store)
-    click.echo(f"Added override {record.record_id}")
+    click.echo(f"Set override {target}:{section} with record {record.record_id}")
 
 
 @cluster_override.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
 @click.pass_context
-def cluster_override_list(ctx: click.Context) -> None:
+def cluster_override_list(ctx: click.Context, as_json: bool) -> None:
+    import json as json_mod
+
     from .sync.store import ClusterStore
 
     store = ClusterStore.from_config(ctx.obj["config"])
+    rows = []
     for record in store.list_records(kind="manual_override"):
         payload = store.read_payload(record)
-        click.echo(f"{record.record_id} {payload.get('target')}:{payload.get('section')}")
+        rows.append(
+            {
+                "record_id": record.record_id,
+                "target": payload.get("target"),
+                "section": payload.get("section"),
+                "operation": payload.get("operation", "upsert"),
+                "namespace": record.namespace,
+                "hlc": record.hlc,
+            }
+        )
+    if as_json:
+        click.echo(json_mod.dumps(rows, indent=2, sort_keys=True))
+        return
+    for row in rows:
+        click.echo(f"{row['record_id']} {row['operation']} {row['target']}:{row['section']}")
+
+
+@cluster_override.command("get")
+@click.option("--target", type=click.Choice(["profile", "active"]), required=True)
+@click.option("--section", required=True)
+@click.pass_context
+def cluster_override_get(ctx: click.Context, target: str, section: str) -> None:
+    from .sync.store import ClusterStore
+
+    store = ClusterStore.from_config(ctx.obj["config"])
+    matches = []
+    for record in store.list_records(kind="manual_override"):
+        payload = store.read_payload(record)
+        if payload.get("target") == target and payload.get("section") == section:
+            matches.append((record, payload))
+    if not matches:
+        raise click.ClickException(f"No override found for {target}:{section}")
+    record, payload = max(matches, key=lambda row: (row[0].hlc, row[0].record_id))
+    if payload.get("operation") == "remove":
+        raise click.ClickException(f"Override removed for {target}:{section}")
+    click.echo(str(payload.get("body") or ""))
 
 
 @cluster_override.command("remove")
-@click.argument("override_record_id")
+@click.argument("override_record_id", required=False)
+@click.option("--target", type=click.Choice(["profile", "active"]), default=None)
+@click.option("--section", default=None)
 @click.pass_context
-def cluster_override_remove(ctx: click.Context, override_record_id: str) -> None:
-    ctx.invoke(cluster_redact, record_id=override_record_id, reason="override-removed")
+def cluster_override_remove(
+    ctx: click.Context,
+    override_record_id: str | None,
+    target: str | None,
+    section: str | None,
+) -> None:
+    if override_record_id:
+        ctx.invoke(cluster_redact, record_id=override_record_id, reason="override-removed")
+        return
+    if not target or not section:
+        raise click.ClickException("Pass an override_record_id or --target and --section.")
+    from .sync.materialize import materialize_cluster_memory
+    from .sync.store import ClusterStore
+
+    config = ctx.obj["config"]
+    store = ClusterStore.from_config(config)
+    record = store.append_record(
+        kind="manual_override",
+        namespace=store.cluster_config.default_namespace,
+        source={"agent": "manual", "host_alias": store.cluster_config.node_alias},
+        payload={"target": target, "section": section, "operation": "remove"},
+    )
+    materialize_cluster_memory(config, store)
+    click.echo(f"Removed override {target}:{section} with record {record.record_id}")
 
 
 def _parse_transport_spec(spec: str):
