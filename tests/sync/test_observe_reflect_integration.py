@@ -37,6 +37,7 @@ def _init_cluster(tmp_path):
             "node_id": store.cluster_config.node_id,
             "alias": store.cluster_config.node_alias,
             "signing_public_key": store.keypair.signing_public_key_b64,
+            "encryption_public_key": store.keypair.encryption_public_key_b64,
             "created_at": "2026-05-08T12:00:00Z",
         },
     )

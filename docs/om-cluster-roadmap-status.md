@@ -200,3 +200,42 @@ Known limitations:
 Next milestone:
 
 - Milestone 5: key epochs and historical rewrap (#37).
+
+## Milestone 5 - Key Epochs And Revocation-Aware Rotation
+
+Goals:
+
+- Stop storing new data keys directly inside cluster-wide rotation records.
+- Give each node a stable encryption keypair distinct from its signing keypair.
+- Rotate by publishing a signed key-epoch record with the new data key wrapped separately to currently trusted nodes.
+- Exclude revoked nodes from new epochs so old cluster key material cannot unlock future writes.
+- Keep the historical-rewrite boundary explicit until a dedicated rewrap or purge workflow lands.
+
+Completed work:
+
+- Extended node keypairs with X25519 encryption keys and backfilled missing encryption keys for existing local node key files.
+- Added X25519, HKDF-SHA256, and ChaCha20-Poly1305 key wrapping helpers.
+- Published node encryption public keys in local node metadata, invite bodies, direct membership records, join requests, and approved membership records.
+- Changed `om cluster rotate-key` to write `key_epoch` records whose recipients list contains one wrapped key per non-revoked node with an encryption public key.
+- Added key-epoch import handling that unwraps only the local node recipient and activates the epoch by HLC order.
+- Preserved legacy `key_rotation` import handling for compatibility with older preview records.
+- Fixed `ensure_layout()` so materialization and sync no longer revive a locally known revoked node.
+
+Tests added:
+
+- Key epochs propagate the active key to a trusted peer and future writes use the new active key.
+- A revoked peer remains revoked locally, rejects a post-revocation key epoch that excludes it, and keeps its old active key.
+
+Validation:
+
+- `mise exec -- uv run pytest tests/sync/test_filesystem_sync.py::test_key_rotation_propagates_active_key_to_peer tests/sync/test_filesystem_sync.py::test_key_epoch_excludes_revoked_peer_from_new_active_key -q` - 2 passed.
+- `mise exec -- uv run ruff check src/observational_memory/sync/crypto.py src/observational_memory/sync/config.py src/observational_memory/sync/store.py src/observational_memory/cli.py tests/sync/test_filesystem_sync.py` - passed.
+
+Known limitations:
+
+- Historical rewrap/purge is not automatic yet; old ciphertext remains old ciphertext until a deliberate recovery workflow rewrites or removes it.
+- Nodes that never publish an encryption public key are excluded from new key epochs and must refresh metadata before receiving future keys.
+
+Next milestone:
+
+- Milestone 6: historical rewrap/purge workflow and transport-level recovery guidance.

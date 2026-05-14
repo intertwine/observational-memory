@@ -139,9 +139,9 @@ Redaction creates a tombstone record. Materializers and local search ignore tomb
 
 ## Key Rotation And Revocation
 
-`om cluster revoke <node-id>` marks a node as revoked for future records. `om cluster rotate-key` creates a key-rotation record encrypted to the previous cluster key and uses the new key for future records. When peers import key-rotation records, the rotation with the greatest HLC timestamp becomes the active key, so future writes converge on the latest known rotation.
+`om cluster revoke <node-id>` marks a node as revoked for future records. `om cluster rotate-key` creates a key-epoch record encrypted to the previous cluster key. The new data key inside that record is separately wrapped to each currently trusted node's encryption public key, and revoked nodes are excluded. When peers import key-epoch records, the rotation with the greatest HLC timestamp becomes the active key, so future writes converge on the latest known rotation.
 
-For a known device compromise, revoke the node, rotate the key, and inspect the shared transport. The v1 rotation path is forward-looking key hygiene for currently trusted nodes. It does not provide full compromise recovery if a revoked or compromised node already has the old cluster key and can still read old transport blobs or backups. Full compromise recovery requires per-node key wrapping/key epochs plus historical rewrap or purge semantics, planned after the 0.6.0 preview.
+For a known device compromise, revoke the node, rotate the key, and inspect the shared transport. Key epochs prevent the revoked node from learning new keys, but they do not automatically rewrite old transport blobs or backups that were already encrypted to a key the device had. Full old-ciphertext recovery requires a deliberate historical rewrap or purge pass.
 
 ## Discovery And P2P
 

@@ -19,7 +19,7 @@ from .config import (
     load_cluster_secret,
     load_node_keypair,
 )
-from .crypto import ClusterSecret, NodeKeypair, b64url_encode
+from .crypto import ClusterSecret, NodeKeypair, b64url_encode, unwrap_key_for_node
 from .frontier import frontier_from_records
 from .ids import validate_cluster_id, validate_node_id, validate_record_id
 from .records import RecordEnvelope, create_record, decrypt_record_payload, record_path_name, verify_record_envelope
@@ -43,6 +43,7 @@ class NodeMetadata:
     node_id: str
     alias: str
     signing_public_key_b64: str
+    encryption_public_key_b64: str | None = None
     revoked: bool = False
     revoked_after_hlc: str | None = None
 
@@ -52,6 +53,7 @@ class NodeMetadata:
             "node_id": self.node_id,
             "alias": self.alias,
             "signing_public_key_b64": self.signing_public_key_b64,
+            "encryption_public_key_b64": self.encryption_public_key_b64,
             "revoked": self.revoked,
             "revoked_after_hlc": self.revoked_after_hlc,
         }
@@ -63,6 +65,7 @@ class NodeMetadata:
             node_id=data["node_id"],
             alias=data.get("alias", data["node_id"]),
             signing_public_key_b64=data["signing_public_key_b64"],
+            encryption_public_key_b64=data.get("encryption_public_key_b64"),
             revoked=bool(data.get("revoked", False)),
             revoked_after_hlc=data.get("revoked_after_hlc"),
         )
@@ -139,11 +142,15 @@ class ClusterStore:
             self.record_index_path.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
+        existing = self.public_nodes().get(self.keypair.node_id)
         self.write_node_metadata(
             NodeMetadata(
                 node_id=self.keypair.node_id,
                 alias=self.cluster_config.node_alias,
                 signing_public_key_b64=self.keypair.signing_public_key_b64,
+                encryption_public_key_b64=self.keypair.encryption_public_key_b64,
+                revoked=existing.revoked if existing else False,
+                revoked_after_hlc=existing.revoked_after_hlc if existing else None,
             )
         )
 
@@ -178,6 +185,8 @@ class ClusterStore:
                 self._apply_membership_record(record, payload)
             if kind == "key_rotation":
                 self._apply_key_rotation_payload(record, payload)
+            if kind == "key_epoch":
+                self._apply_key_epoch_payload(record, payload)
             return record
 
     def import_record_bytes(self, data: bytes) -> ImportResult:
@@ -217,6 +226,8 @@ class ClusterStore:
                 self._apply_membership_record(record, payload)
             if record.kind == "key_rotation":
                 self._apply_key_rotation_payload(record, payload)
+            if record.kind == "key_epoch":
+                self._apply_key_epoch_payload(record, payload)
             self._merge_clock(record.hlc)
         except Exception as e:
             self._record_diagnostic("rejected", record.record_id, f"storage error: {e}")
@@ -538,6 +549,7 @@ class ClusterStore:
         if operation == "add":
             node_id = payload.get("node_id")
             signing_public_key = payload.get("signing_public_key")
+            encryption_public_key = payload.get("encryption_public_key")
             if not isinstance(node_id, str) or not isinstance(signing_public_key, str):
                 raise ValueError("Invalid membership add payload")
             validate_node_id(node_id)
@@ -549,6 +561,7 @@ class ClusterStore:
                     node_id=node_id,
                     alias=str(payload.get("alias") or node_id),
                     signing_public_key_b64=signing_public_key,
+                    encryption_public_key_b64=encryption_public_key if isinstance(encryption_public_key, str) else None,
                 )
             )
         elif operation == "revoke":
@@ -564,6 +577,7 @@ class ClusterStore:
                     node_id=existing.node_id,
                     alias=existing.alias,
                     signing_public_key_b64=existing.signing_public_key_b64,
+                    encryption_public_key_b64=existing.encryption_public_key_b64,
                     revoked=True,
                     revoked_after_hlc=record.hlc,
                 )
@@ -582,6 +596,36 @@ class ClusterStore:
                 active_key_hlc=record.hlc,
             )
             self._reload_secret()
+
+    def _apply_key_epoch_payload(self, record: RecordEnvelope, payload: dict[str, Any]) -> None:
+        key_id = payload.get("key_id")
+        recipients = payload.get("recipients", [])
+        if not isinstance(key_id, str) or not isinstance(recipients, list):
+            raise ValueError("Invalid key_epoch payload")
+        if not self.keypair.encryption_private_key_b64:
+            raise ValueError("Local node has no encryption private key")
+        for recipient in recipients:
+            if not isinstance(recipient, dict) or recipient.get("node_id") != self.keypair.node_id:
+                continue
+            wrapped = recipient.get("wrapped_key")
+            if not isinstance(wrapped, dict):
+                continue
+            data_key = unwrap_key_for_node(
+                wrapped,
+                self.keypair.encryption_private_key_b64,
+                aad=f"{self.cluster_config.id}:{key_id}".encode("utf-8"),
+            )
+            add_cluster_data_key(
+                self.config,
+                self.cluster_config.id,
+                key_id,
+                data_key,
+                activate=True,
+                active_key_hlc=record.hlc,
+            )
+            self._reload_secret()
+            return
+        raise ValueError("No key_epoch recipient for local node")
 
     def _reject_if_revoked_future(self, record: RecordEnvelope) -> None:
         metadata = self.public_nodes().get(record.node_id)
@@ -610,6 +654,7 @@ def public_node_metadata_from_keypair(cluster_config: ClusterConfig, keypair: No
         node_id=keypair.node_id,
         alias=cluster_config.node_alias,
         signing_public_key_b64=keypair.signing_public_key_b64,
+        encryption_public_key_b64=keypair.encryption_public_key_b64,
     )
 
 

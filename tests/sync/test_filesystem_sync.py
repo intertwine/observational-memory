@@ -11,9 +11,10 @@ from observational_memory.sync.config import (
     initialize_cluster_config,
     join_cluster_from_invite,
 )
+from observational_memory.sync.crypto import wrap_key_for_node
 from observational_memory.sync.engine import sync_cluster
 from observational_memory.sync.materialize import materialize_cluster_memory
-from observational_memory.sync.store import ClusterStore, NodeMetadata
+from observational_memory.sync.store import ClusterStore, NodeMetadata, new_data_key_b64
 from observational_memory.sync.transports.filesystem import FilesystemTransport
 
 
@@ -23,6 +24,7 @@ def _membership(store, invite=None):
         "node_id": store.cluster_config.node_id,
         "alias": store.cluster_config.node_alias,
         "signing_public_key": store.keypair.signing_public_key_b64,
+        "encryption_public_key": store.keypair.encryption_public_key_b64,
         "created_at": "2026-05-08T12:00:00Z",
     }
     if invite:
@@ -111,13 +113,35 @@ def test_key_rotation_propagates_active_key_to_peer(tmp_path):
     store_b.ensure_layout()
     _membership(store_b, invite=invite)
 
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+    store_a = ClusterStore.from_config(config_a)
+    store_b = ClusterStore.from_config(config_b)
+    assert store_b.cluster_config.node_id in store_a.public_nodes()
+    data_key_b64 = new_data_key_b64()
+    key_id = f"key_{store_a.cluster_config.node_id}_test"
     rotation = store_a.append_record(
-        kind="key_rotation",
+        kind="key_epoch",
         namespace="personal",
         source={"agent": "test"},
         payload={
-            "new_key_id": f"key_{store_a.cluster_config.node_id}_test",
-            "data_key_b64": "W8sHv5Z3Dbe0kX6RiiTy8pquLxC9bpOrQSaUasHQnSU",
+            "epoch": len(store_a.secret.data_keys) + 1,
+            "key_id": key_id,
+            "recipients": [
+                {
+                    "node_id": node.node_id,
+                    "wrapped_key": wrap_key_for_node(
+                        data_key_b64,
+                        node.encryption_public_key_b64,
+                        aad=f"{store_a.cluster_config.id}:{key_id}".encode("utf-8"),
+                    ),
+                }
+                for node in store_a.public_nodes().values()
+                if node.encryption_public_key_b64
+            ],
+            "excluded_nodes": [],
             "created_at": "2026-05-08T12:00:00Z",
         },
     )
@@ -125,7 +149,7 @@ def test_key_rotation_propagates_active_key_to_peer(tmp_path):
     sync_cluster(config_b)
 
     store_b = ClusterStore.from_config(config_b)
-    assert store_b.secret.active_key_id == f"key_{store_a.cluster_config.node_id}_test"
+    assert store_b.secret.active_key_id == key_id
     assert store_b.secret.active_key_hlc == rotation.hlc
 
     observation = store_b.append_record(
@@ -135,6 +159,88 @@ def test_key_rotation_propagates_active_key_to_peer(tmp_path):
         payload={"format": "markdown", "body": "- post-rotation", "observed_at": "2026-05-08T12:01:00Z"},
     )
     assert observation.data["encryption"]["key_id"] == store_b.secret.active_key_id
+
+
+def test_key_epoch_excludes_revoked_peer_from_new_active_key(tmp_path):
+    shared = tmp_path / "shared"
+    config_a = _node_config(tmp_path, "a")
+    cluster_a = initialize_cluster_config(
+        config_a,
+        name="Cluster",
+        node_alias="node-a",
+        transports=[TransportConfig(type="filesystem", path=str(shared))],
+    )
+    store_a = ClusterStore.from_config(config_a)
+    store_a.ensure_layout()
+    _membership(store_a)
+    invite_token = create_invite_token(config_a, cluster_a, expires="1h", mode="trusted-direct")
+
+    config_b = _node_config(tmp_path, "b")
+    _cluster_b, invite = join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
+    store_b = ClusterStore.from_config(config_b)
+    store_b.ensure_layout()
+    _membership(store_b, invite=invite)
+
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+    store_a = ClusterStore.from_config(config_a)
+    store_b = ClusterStore.from_config(config_b)
+    assert store_b.cluster_config.node_id in store_a.public_nodes()
+    old_key_id = store_b.secret.active_key_id
+    revoked_node_id = store_b.cluster_config.node_id
+    revoke_record = store_a.append_record(
+        kind="node_membership",
+        namespace="personal",
+        source={"agent": "test"},
+        payload={
+            "operation": "revoke",
+            "node_id": revoked_node_id,
+            "created_at": "2026-05-08T12:00:00Z",
+        },
+    )
+
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+    store_b = ClusterStore.from_config(config_b)
+    assert store_b.public_nodes()[revoked_node_id].revoked is True
+    assert store_b.public_nodes()[revoked_node_id].revoked_after_hlc == revoke_record.hlc
+
+    store_a = ClusterStore.from_config(config_a)
+    data_key_b64 = new_data_key_b64()
+    key_id = f"key_{store_a.cluster_config.node_id}_post_revoke"
+    rotation = store_a.append_record(
+        kind="key_epoch",
+        namespace="personal",
+        source={"agent": "test"},
+        payload={
+            "epoch": len(store_a.secret.data_keys) + 1,
+            "key_id": key_id,
+            "recipients": [
+                {
+                    "node_id": node.node_id,
+                    "wrapped_key": wrap_key_for_node(
+                        data_key_b64,
+                        node.encryption_public_key_b64,
+                        aad=f"{store_a.cluster_config.id}:{key_id}".encode("utf-8"),
+                    ),
+                }
+                for node in store_a.public_nodes().values()
+                if not node.revoked and node.encryption_public_key_b64
+            ],
+            "excluded_nodes": [revoked_node_id],
+            "created_at": "2026-05-08T12:01:00Z",
+        },
+    )
+    assert store_a.secret.active_key_id == key_id
+
+    sync_cluster(config_a)
+    summary = sync_cluster(config_b)
+    store_b = ClusterStore.from_config(config_b)
+    assert summary.rejected >= 1
+    assert store_b.secret.active_key_id == old_key_id
+    assert store_b.secret.active_key_hlc != rotation.hlc
 
 
 def test_filesystem_transport_rejects_filename_body_mismatches(tmp_path):

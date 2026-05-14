@@ -585,6 +585,7 @@ def cluster_init(
             "node_id": cluster_config.node_id,
             "alias": cluster_config.node_alias,
             "signing_public_key": store.keypair.signing_public_key_b64,
+            "encryption_public_key": store.keypair.encryption_public_key_b64,
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         },
     )
@@ -672,6 +673,7 @@ def cluster_join(ctx: click.Context, invite_token: str, node_alias: str | None, 
             "node_id": cluster_config.node_id,
             "alias": cluster_config.node_alias,
             "signing_public_key": store.keypair.signing_public_key_b64,
+            "encryption_public_key": store.keypair.encryption_public_key_b64,
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "invite": invite,
         },
@@ -883,6 +885,7 @@ def _complete_join_request(ctx: click.Context, request_id: str, *, approve: bool
                 "node_id": node["node_id"],
                 "alias": node.get("alias", node["node_id"]),
                 "signing_public_key": node["signing_public_key_b64"],
+                "encryption_public_key": node.get("encryption_public_key_b64"),
                 "approved_by_node_id": store.cluster_config.node_id,
                 "request_id": request_id,
                 "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1164,17 +1167,42 @@ def cluster_rotate_key(ctx: click.Context) -> None:
     """Rotate the cluster data key for future records."""
     import secrets
 
+    from .sync.crypto import wrap_key_for_node
     from .sync.store import ClusterStore, new_data_key_b64
 
     store = ClusterStore.from_config(ctx.obj["config"])
     key_id = f"key_{store.cluster_config.node_id}_{secrets.token_hex(8)}"
+    data_key_b64 = new_data_key_b64()
+    recipients = []
+    excluded = []
+    for node in store.public_nodes().values():
+        if node.revoked:
+            excluded.append(node.node_id)
+            continue
+        if not node.encryption_public_key_b64:
+            excluded.append(node.node_id)
+            continue
+        recipients.append(
+            {
+                "node_id": node.node_id,
+                "wrapped_key": wrap_key_for_node(
+                    data_key_b64,
+                    node.encryption_public_key_b64,
+                    aad=f"{store.cluster_config.id}:{key_id}".encode("utf-8"),
+                ),
+            }
+        )
+    if not any(recipient["node_id"] == store.cluster_config.node_id for recipient in recipients):
+        raise click.ClickException("Local node has no encryption public key for key epoch rotation.")
     record = store.append_record(
-        kind="key_rotation",
+        kind="key_epoch",
         namespace=store.cluster_config.default_namespace,
         source={"agent": "manual", "host_alias": store.cluster_config.node_alias},
         payload={
-            "new_key_id": key_id,
-            "data_key_b64": new_data_key_b64(),
+            "epoch": len(store.secret.data_keys) + 1,
+            "key_id": key_id,
+            "recipients": recipients,
+            "excluded_nodes": excluded,
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         },
     )

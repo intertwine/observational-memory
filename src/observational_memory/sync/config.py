@@ -269,10 +269,17 @@ def load_node_keypair(config: Config, cluster_config: ClusterConfig) -> NodeKeyp
     path = _secure_cluster_key_dir(config, cluster_config.id) / "node.json"
     raw = json.loads(path.read_text())
     validate_node_id(raw["node_id"])
+    if "encryption_private_key_b64" not in raw or "encryption_public_key_b64" not in raw:
+        replacement = generate_node_keypair(alias=raw.get("alias"))
+        raw["encryption_private_key_b64"] = replacement.encryption_private_key_b64
+        raw["encryption_public_key_b64"] = replacement.encryption_public_key_b64
+        atomic_write_text(path, json.dumps(raw, indent=2, sort_keys=True) + "\n", mode=0o600)
     return NodeKeypair(
         node_id=raw["node_id"],
         signing_private_key_b64=raw["signing_private_key_b64"],
         signing_public_key_b64=raw["signing_public_key_b64"],
+        encryption_private_key_b64=raw.get("encryption_private_key_b64"),
+        encryption_public_key_b64=raw.get("encryption_public_key_b64"),
         alias=raw.get("alias"),
     )
 
@@ -286,6 +293,8 @@ def write_node_keypair(config: Config, cluster_id: str, keypair: NodeKeypair) ->
         "alias": keypair.alias,
         "signing_private_key_b64": keypair.signing_private_key_b64,
         "signing_public_key_b64": keypair.signing_public_key_b64,
+        "encryption_private_key_b64": keypair.encryption_private_key_b64,
+        "encryption_public_key_b64": keypair.encryption_public_key_b64,
     }
     atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n", mode=0o600)
 
@@ -345,6 +354,7 @@ def create_invite_token(
         "issuer_node_id": cluster_config.node_id,
         "issuer_alias": cluster_config.node_alias,
         "issuer_signing_public_key_b64": keypair.signing_public_key_b64,
+        "issuer_encryption_public_key_b64": keypair.encryption_public_key_b64,
         "transports": [transport.to_dict() for transport in cluster_config.transports],
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
@@ -466,6 +476,7 @@ def join_cluster_from_invite(
             "node_id": keypair.node_id,
             "alias": cluster_config.node_alias,
             "signing_public_key_b64": keypair.signing_public_key_b64,
+            "encryption_public_key_b64": keypair.encryption_public_key_b64,
         },
         "requested_namespaces": [cluster_config.default_namespace],
     }
@@ -688,6 +699,7 @@ def _write_inviter_public_metadata(config: Config, cluster_id: str, invite_body:
         "node_id": invite_body["issuer_node_id"],
         "alias": invite_body["issuer_alias"],
         "signing_public_key_b64": invite_body["issuer_signing_public_key_b64"],
+        "encryption_public_key_b64": invite_body.get("issuer_encryption_public_key_b64"),
         "revoked": False,
         "revoked_after_hlc": None,
     }

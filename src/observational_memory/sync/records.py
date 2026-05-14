@@ -25,6 +25,8 @@ KNOWN_RECORD_KINDS = {
     "tombstone",
     "node_membership",
     "key_rotation",
+    "key_epoch",
+    "payload_rewrap",
 }
 
 

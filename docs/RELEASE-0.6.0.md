@@ -11,7 +11,7 @@ This branch is prepared as the `observational-memory` `0.6.0` release candidate.
 - Adds `om cluster init`, `invite`, `join`, `sync`, `status`, `peers`, `materialize`, `provenance`, `redact`, `revoke`, `rotate-key`, and `override`.
 - Adds request-mode join approval commands: `om cluster requests`, `approve`, and `reject`. Trusted-direct invites remain available with `--mode trusted-direct`.
 - Preserves existing non-cluster behavior unless cluster config and keys are explicitly initialized and enabled.
-- Frames `rotate-key` honestly as forward-looking key hygiene for trusted nodes. Full compromise recovery, per-node key epochs, and historical rewrap/purge semantics are planned after the preview.
+- Frames `rotate-key` honestly as key-epoch hygiene for trusted nodes. Revoked nodes are excluded from new wrapped data keys; historical rewrap/purge semantics remain a separate recovery step.
 
 ## Validation
 
@@ -38,7 +38,7 @@ om cluster sync
 
 The shared transport must contain encrypted `.omr.json` records only, never provider env files, private keys, `.cursor.json`, `.search-index`, `.scheduler-logs`, or generated Markdown as the sync source.
 
-`om cluster rotate-key` in 0.6.0 does not re-encrypt historical transport blobs and cannot by itself protect old records from a device that already had the previous cluster key. For a known compromise, revoke the node, rotate for future writes, inspect transport/backups, and wait for the key-epoch recovery work before treating old ciphertext as recovered.
+`om cluster rotate-key` in 0.6.0 creates a per-node wrapped key epoch for future records, but it does not re-encrypt historical transport blobs and cannot by itself protect old records from a device that already had the previous cluster key. For a known compromise, revoke the node, rotate for future writes, inspect transport/backups, and run a future historical rewrap or purge workflow before treating old ciphertext as recovered.
 
 ## Publish To PyPI
 

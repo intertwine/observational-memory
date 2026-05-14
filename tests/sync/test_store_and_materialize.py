@@ -31,6 +31,7 @@ def _init_store(tmp_path, name="Test", alias="node-a"):
             "node_id": cluster_config.node_id,
             "alias": cluster_config.node_alias,
             "signing_public_key": store.keypair.signing_public_key_b64,
+            "encryption_public_key": store.keypair.encryption_public_key_b64,
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         },
     )
