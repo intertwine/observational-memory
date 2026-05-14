@@ -57,7 +57,7 @@ def test_append_read_heads_permissions_and_no_plaintext(tmp_path):
 
 def test_duplicate_import_is_idempotent_and_tamper_rejected(tmp_path):
     config_a, store_a = _init_store(tmp_path, alias="node-a")
-    invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h")
+    invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h", mode="trusted-direct")
     config_b = Config(memory_dir=tmp_path / "node-b" / "memory", env_file=tmp_path / "node-b" / "config" / "env")
     join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
     store_b = ClusterStore.from_config(config_b)
@@ -140,7 +140,7 @@ def test_malformed_record_ids_are_rejected_before_path_use(tmp_path):
 
 def test_out_of_order_import_does_not_regress_head_record_id(tmp_path):
     config_a, store_a = _init_store(tmp_path, alias="node-a")
-    invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h")
+    invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h", mode="trusted-direct")
     config_b = Config(memory_dir=tmp_path / "node-b" / "memory", env_file=tmp_path / "node-b" / "config" / "env")
     join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
     store_b = ClusterStore.from_config(config_b)
@@ -169,7 +169,7 @@ def test_out_of_order_import_does_not_regress_head_record_id(tmp_path):
 
 def test_revoked_node_future_records_are_rejected(tmp_path):
     config_a, store_a = _init_store(tmp_path, alias="node-a")
-    invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h")
+    invite_token = create_invite_token(config_a, store_a.cluster_config, expires="1h", mode="trusted-direct")
     config_b = Config(memory_dir=tmp_path / "node-b" / "memory", env_file=tmp_path / "node-b" / "config" / "env")
     join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
     store_b = ClusterStore.from_config(config_b)

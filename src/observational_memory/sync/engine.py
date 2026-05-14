@@ -9,7 +9,7 @@ from pathlib import Path
 
 from observational_memory.config import Config
 
-from .config import TransportConfig, load_cluster_config
+from .config import TransportConfig, apply_join_approval, load_cluster_config, load_pending_join_state
 from .materialize import materialize_cluster_memory
 from .store import ClusterStore
 from .transports import SyncTransport
@@ -56,7 +56,13 @@ def sync_cluster(
     cluster_config = load_cluster_config(config)
     if cluster_config is None:
         raise RuntimeError("OM Cluster is not initialized")
-    store = ClusterStore.from_config(config)
+    try:
+        store = ClusterStore.from_config(config)
+    except FileNotFoundError as e:
+        join_status = _complete_pending_join(config, cluster_config)
+        if join_status != "approved":
+            raise RuntimeError("OM Cluster join request is pending approval") from e
+        store = ClusterStore.from_config(config)
     store.ensure_layout()
     deadline = time.monotonic() + (deadline_ms / 1000) if deadline_ms is not None else None
 
@@ -139,6 +145,37 @@ def _sync_transport(
     except Exception as e:
         return TransportSummary(transport.name, pulled, pushed, skipped, rejected, error=str(e))
     return TransportSummary(transport.name, pulled, pushed, skipped, rejected)
+
+
+def _complete_pending_join(config: Config, cluster_config) -> str | None:
+    state = load_pending_join_state(config, cluster_config.id)
+    if not state:
+        return None
+    request = state.get("join_request")
+    request_id = state.get("request_id")
+    if not isinstance(request, dict) or not isinstance(request_id, str):
+        return None
+    status = None
+    for transport_config in cluster_config.transports:
+        transport = build_transport(transport_config)
+        try:
+            transport.publish_join_request(
+                cluster_config.id,
+                request_id,
+                (json.dumps(request, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            )
+            approval_bytes = transport.fetch_join_approval(cluster_config.id, request_id)
+        except Exception:
+            continue
+        if approval_bytes is None:
+            continue
+        try:
+            status = apply_join_approval(config, json.loads(approval_bytes.decode("utf-8")))
+        except Exception:
+            continue
+        if status in {"approved", "rejected"}:
+            return status
+    return status
 
 
 def _publish_known_nodes(store: ClusterStore, transport: SyncTransport) -> None:

@@ -9,6 +9,7 @@ This branch is prepared as the `observational-memory` `0.6.0` release candidate.
 - Implements filesystem transport for Syncthing, Dropbox, iCloud Drive, NAS mounts, rsync, USB drives, and other shared directories.
 - Materializes `observations.md`, `reflections.md`, `profile.md`, and `active.md` locally from records and snapshots.
 - Adds `om cluster init`, `invite`, `join`, `sync`, `status`, `peers`, `materialize`, `provenance`, `redact`, `revoke`, `rotate-key`, and `override`.
+- Adds request-mode join approval commands: `om cluster requests`, `approve`, and `reject`. Trusted-direct invites remain available with `--mode trusted-direct`.
 - Preserves existing non-cluster behavior unless cluster config and keys are explicitly initialized and enabled.
 - Frames `rotate-key` honestly as forward-looking key hygiene for trusted nodes. Full compromise recovery, per-node key epochs, and historical rewrap/purge semantics are planned after the preview.
 
@@ -28,6 +29,10 @@ om cluster init --name "Personal Memory" --transport filesystem:/tmp/om-cluster 
 om cluster invite --expires 10m
 # On a second install:
 om cluster join "omc1:..."
+# Back on a trusted install:
+om cluster requests
+om cluster approve join_...
+# On the second install:
 om cluster sync
 ```
 
@@ -87,6 +92,8 @@ om install
 ```bash
 om cluster init --name "Personal Memory" --transport filesystem:~/Sync/om-cluster --import-existing
 om cluster invite --expires 10m
+om cluster requests
+om cluster approve join_...
 om cluster sync
 ```
 ```

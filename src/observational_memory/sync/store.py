@@ -472,7 +472,8 @@ class ClusterStore:
             if not isinstance(node_id, str) or not isinstance(signing_public_key, str):
                 raise ValueError("Invalid membership add payload")
             validate_node_id(node_id)
-            if record.node_id != node_id:
+            approved_by = payload.get("approved_by_node_id")
+            if record.node_id != node_id and approved_by != record.node_id:
                 raise ValueError("Membership payload node_id mismatch")
             self.write_node_metadata(
                 NodeMetadata(

@@ -15,6 +15,19 @@ Second machine:
 
 ```bash
 om cluster join "omc1:..."
+om cluster status
+```
+
+Back on a trusted machine:
+
+```bash
+om cluster requests
+om cluster approve join_...
+```
+
+Then on the second machine:
+
+```bash
 om cluster sync
 om cluster status
 ```
@@ -54,11 +67,17 @@ OM Cluster never syncs:
 
 The filesystem transport is treated as untrusted. Record payloads are encrypted with ChaCha20-Poly1305 and signed with Ed25519 node keys before they leave the local machine. The clear envelope contains routing metadata such as cluster ID, record kind, namespace, node ID, sequence, HLC timestamp, parents, and privacy-preserving source hints.
 
-Unknown nodes are rejected by default. `om cluster join` creates an invite-backed membership record; existing nodes accept that membership only when the invite was signed by a trusted node and has not expired.
+Unknown nodes are rejected by default. The default `om cluster invite` mode creates a request-mode invite. `om cluster join` uses that token to publish a signed pending join request, and an already trusted node must approve it with `om cluster approve <request-id>` before the new node receives encrypted cluster key material. Transport visibility still does not imply trust.
 
 Public metadata from unknown nodes may be cached as pending peers for diagnostics, but it does not authorize those nodes or their records. `om cluster status --json` reports pending peers so operators can inspect unexpected shared-folder activity.
 
-Invite tokens are sensitive. The current filesystem v1 invite is a trusted direct invite and includes cluster key material so the second machine can decrypt existing records. Copy it only over a trusted channel and keep the expiration short.
+Trusted direct invites remain available for offline/bootstrap setups:
+
+```bash
+om cluster invite --mode trusted-direct --expires 10m
+```
+
+Trusted direct invite tokens are sensitive because they include cluster key material so the second machine can decrypt existing records immediately. Copy them only over a trusted channel and keep the expiration short. Request-mode invite tokens do not contain cluster data keys, but they still contain a local approval secret for the requester and should be kept private until the request is approved or expires.
 
 Private keys and provider credentials are stored only under the local config directory. Cluster key directories are owner-only (`0700`) and key files are owner-only (`0600`).
 
@@ -71,6 +90,9 @@ Useful commands:
 ```bash
 om cluster status
 om cluster peers
+om cluster requests
+om cluster approve <request-id>
+om cluster reject <request-id> --reason "..."
 om cluster sync
 om cluster materialize
 om cluster provenance <record-id>

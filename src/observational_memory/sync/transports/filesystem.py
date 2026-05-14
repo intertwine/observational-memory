@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from ..atomic import atomic_write_bytes, atomic_write_text
-from ..ids import validate_cluster_id, validate_node_id, validate_record_id
+from ..ids import validate_cluster_id, validate_join_request_id, validate_node_id, validate_record_id
 
 
 class FilesystemTransport:
@@ -85,6 +85,64 @@ class FilesystemTransport:
         except json.JSONDecodeError:
             return None
         if raw.get("node_id") != node_id:
+            return None
+        return data
+
+    def publish_join_request(self, cluster_id: str, request_id: str, data: bytes) -> None:
+        validate_cluster_id(cluster_id)
+        validate_join_request_id(request_id)
+        raw = json.loads(data.decode("utf-8"))
+        if raw.get("cluster_id") != cluster_id or raw.get("request_id") != request_id:
+            raise ValueError("Join request path metadata mismatch")
+        path = self._cluster_dir(cluster_id) / "join-requests" / f"{request_id}.json"
+        atomic_write_bytes(path, data)
+
+    def list_join_requests(self, cluster_id: str) -> set[str]:
+        validate_cluster_id(cluster_id)
+        requests = set()
+        for path in (self._cluster_dir(cluster_id) / "join-requests").glob("*.json"):
+            try:
+                requests.add(validate_join_request_id(path.stem))
+            except ValueError:
+                continue
+        return requests
+
+    def fetch_join_request(self, cluster_id: str, request_id: str) -> bytes | None:
+        validate_cluster_id(cluster_id)
+        validate_join_request_id(request_id)
+        path = self._cluster_dir(cluster_id) / "join-requests" / f"{request_id}.json"
+        if not path.exists():
+            return None
+        data = path.read_bytes()
+        try:
+            raw = json.loads(data.decode("utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if raw.get("cluster_id") != cluster_id or raw.get("request_id") != request_id:
+            return None
+        return data
+
+    def publish_join_approval(self, cluster_id: str, request_id: str, data: bytes) -> None:
+        validate_cluster_id(cluster_id)
+        validate_join_request_id(request_id)
+        raw = json.loads(data.decode("utf-8"))
+        if raw.get("cluster_id") != cluster_id or raw.get("request_id") != request_id:
+            raise ValueError("Join approval path metadata mismatch")
+        path = self._cluster_dir(cluster_id) / "join-approvals" / f"{request_id}.json"
+        atomic_write_bytes(path, data)
+
+    def fetch_join_approval(self, cluster_id: str, request_id: str) -> bytes | None:
+        validate_cluster_id(cluster_id)
+        validate_join_request_id(request_id)
+        path = self._cluster_dir(cluster_id) / "join-approvals" / f"{request_id}.json"
+        if not path.exists():
+            return None
+        data = path.read_bytes()
+        try:
+            raw = json.loads(data.decode("utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if raw.get("cluster_id") != cluster_id or raw.get("request_id") != request_id:
             return None
         return data
 

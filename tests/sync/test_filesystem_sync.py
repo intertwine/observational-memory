@@ -1,3 +1,4 @@
+import base64
 import json
 
 from click.testing import CliRunner
@@ -50,7 +51,7 @@ def test_two_nodes_converge_over_filesystem_transport(tmp_path):
     store_a = ClusterStore.from_config(config_a)
     store_a.ensure_layout()
     _membership(store_a)
-    invite_token = create_invite_token(config_a, cluster_a, expires="1h")
+    invite_token = create_invite_token(config_a, cluster_a, expires="1h", mode="trusted-direct")
 
     config_b = _node_config(tmp_path, "b")
     _cluster_b, invite = join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
@@ -102,7 +103,7 @@ def test_key_rotation_propagates_active_key_to_peer(tmp_path):
     store_a = ClusterStore.from_config(config_a)
     store_a.ensure_layout()
     _membership(store_a)
-    invite_token = create_invite_token(config_a, cluster_a, expires="1h")
+    invite_token = create_invite_token(config_a, cluster_a, expires="1h", mode="trusted-direct")
 
     config_b = _node_config(tmp_path, "b")
     _cluster_b, invite = join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
@@ -248,7 +249,7 @@ def test_cli_invite_join_revoke_rotate(tmp_path):
     )
     assert result.exit_code == 0, result.output
 
-    result = runner.invoke(cli, ["cluster", "invite", "--expires", "1h"], env=env_a)
+    result = runner.invoke(cli, ["cluster", "invite", "--mode", "trusted-direct", "--expires", "1h"], env=env_a)
     assert result.exit_code == 0, result.output
     assert "carries cluster key material" in result.stderr
     token = result.stdout.strip()
@@ -268,3 +269,70 @@ def test_cli_invite_join_revoke_rotate(tmp_path):
     result = runner.invoke(cli, ["cluster", "rotate-key"], env=env_a)
     assert result.exit_code == 0, result.output
     assert "Rotated cluster data key" in result.output
+
+
+def test_cli_request_invite_approval_flow(tmp_path):
+    runner = CliRunner()
+    shared = tmp_path / "shared"
+
+    env_a = {
+        "HOME": str(tmp_path / "a-home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "a-config"),
+        "XDG_DATA_HOME": str(tmp_path / "a-data"),
+        "CODEX_HOME": str(tmp_path / "a-codex"),
+    }
+    env_b = {
+        "HOME": str(tmp_path / "b-home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "b-config"),
+        "XDG_DATA_HOME": str(tmp_path / "b-data"),
+        "CODEX_HOME": str(tmp_path / "b-codex"),
+    }
+
+    result = runner.invoke(
+        cli,
+        ["cluster", "init", "--name", "CLI Cluster", "--node-alias", "node-a", "--transport", f"filesystem:{shared}"],
+        env=env_a,
+    )
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(cli, ["cluster", "invite", "--expires", "1h"], env=env_a)
+    assert result.exit_code == 0, result.output
+    assert "does not carry cluster data keys" in result.stderr
+    token = result.stdout.strip()
+    token_body = token.split(":", 1)[1]
+    decoded = json.loads(base64.urlsafe_b64decode(token_body + "=" * (-len(token_body) % 4)))
+    assert "data_keys" not in decoded["body"]
+
+    result = runner.invoke(cli, ["cluster", "join", token, "--node-alias", "node-b"], env=env_b)
+    assert result.exit_code == 0, result.output
+    assert "Created pending OM Cluster join request" in result.output
+    request_id = [part for part in result.output.split() if part.startswith("join_")][0]
+
+    result = runner.invoke(cli, ["cluster", "sync"], env=env_b)
+    assert result.exit_code != 0
+    assert not list(shared.glob("clusters/*/records/node_*/*.omr.json"))
+
+    result = runner.invoke(cli, ["cluster", "requests", "--json"], env=env_a)
+    assert result.exit_code == 0, result.output
+    requests = json.loads(result.stdout)
+    assert requests[0]["request_id"] == request_id
+    assert requests[0]["status"] == "pending"
+
+    result = runner.invoke(cli, ["cluster", "approve", request_id], env=env_a)
+    assert result.exit_code == 0, result.output
+    assert "Approved" in result.output
+    shared_bytes = b"".join(path.read_bytes() for path in shared.glob("clusters/**/*") if path.is_file())
+    assert b"request_secret_b64" not in shared_bytes
+    assert b"data_keys" not in shared_bytes
+
+    result = runner.invoke(cli, ["cluster", "sync", "--json"], env=env_b)
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.stdout)
+    assert summary["pulled"] >= 1
+
+    result = runner.invoke(cli, ["cluster", "status", "--json"], env=env_b)
+    assert result.exit_code == 0, result.output
+    status = json.loads(result.stdout)
+    assert status["enabled"] is True
+    assert status["join_request"]["status"] == "approved"
+    assert any(peer["alias"] == "node-b" for peer in status["peers"].values())

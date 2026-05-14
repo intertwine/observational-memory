@@ -43,3 +43,42 @@ Known limitations:
 Next milestone:
 
 - Milestone 1: interactive approval for invite/join (#34).
+
+## Milestone 1 - Interactive Approval For Invite/Join
+
+Goals:
+
+- Make the recommended invite path request/approval based rather than trusted direct by default.
+- Keep trusted-direct invite compatibility for offline/bootstrap setups.
+- Ensure unapproved requesters do not receive cluster data keys or write accepted records.
+- Let trusted nodes inspect, approve, and reject pending requests through filesystem transport.
+
+Completed work:
+
+- Added request-mode invite tokens as the default `om cluster invite` behavior. Request-mode token bodies omit cluster `data_keys`; trusted-direct tokens remain available via `--mode trusted-direct`.
+- Added local issued-invite secrets on the trusted issuing node and local pending join state on the requester.
+- Added transport-visible `join-requests` and `join-approvals` areas to the filesystem transport. Both enforce filename/body ID agreement.
+- Added `om cluster requests`, `om cluster approve <request-id>`, and `om cluster reject <request-id>`.
+- Added pending join status output and pending approval completion in `om cluster sync`.
+- Approval creates a trusted-node-signed membership record, encrypts current cluster key material to the requester's local approval secret, and publishes the encrypted approval without plaintext keys in transport.
+- Existing trusted-direct invite clusters and tests remain compatible when `--mode trusted-direct` is explicit.
+
+Tests added:
+
+- CLI request invite/approval flow proves request-mode tokens omit `data_keys`, pending joiners cannot sync before approval, trusted nodes can list and approve requests, approved nodes complete sync, and shared transport does not contain `request_secret_b64` or plaintext `data_keys`.
+
+Validation:
+
+- `mise exec -- uv run pytest tests/sync -q` - 28 passed.
+- `mise exec -- uv run ruff check src/observational_memory/sync src/observational_memory/cli.py tests/sync` - passed.
+- `mise exec -- uv run pytest -q` - 340 passed.
+- `mise exec -- uv run ruff check` - passed.
+
+Known limitations:
+
+- Request-mode approval currently depends on the issuing trusted node retaining the local issued-invite secret. A different already trusted node can see the request but cannot approve that specific invite unless it has the issuer's local approval secret.
+- Approval uses a per-invite symmetric approval secret rather than the future per-node encryption-public-key model planned under key epochs.
+
+Next milestone:
+
+- Milestone 2: Windows cluster hardening (#40) and feature-flag caching (#38).

@@ -58,7 +58,7 @@ def test_cluster_key_directories_are_owner_only(isolated_om_home):
 def test_invite_expiration_is_enforced(isolated_om_home):
     config = Config()
     cluster_config = initialize_cluster_config(config, name="Test", node_alias="node-a")
-    token = create_invite_token(config, cluster_config, expires="-1")
+    token = create_invite_token(config, cluster_config, expires="-1", mode="trusted-direct")
 
     with pytest.raises(ValueError, match="expired"):
         parse_invite_token(token)

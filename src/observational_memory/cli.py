@@ -563,17 +563,27 @@ def cluster_init(
 
 @cluster.command("invite")
 @click.option("--expires", default="10m", show_default=True, help="Invite lifetime, e.g. 10m, 2h, 1d")
+@click.option(
+    "--mode",
+    type=click.Choice(["request", "trusted-direct"]),
+    default="request",
+    show_default=True,
+    help="Invite mode",
+)
 @click.pass_context
-def cluster_invite(ctx: click.Context, expires: str) -> None:
-    """Create a trusted invite token for another machine."""
+def cluster_invite(ctx: click.Context, expires: str, mode: str) -> None:
+    """Create an invite token for another machine."""
     from .sync.config import create_invite_token, load_cluster_config
 
     config = ctx.obj["config"]
     cluster_config = load_cluster_config(config)
     if cluster_config is None:
         raise click.ClickException("OM Cluster is not initialized.")
-    click.echo("Warning: this invite token carries cluster key material. Treat it like a private key.", err=True)
-    click.echo(create_invite_token(config, cluster_config, expires=expires))
+    if mode == "trusted-direct":
+        click.echo("Warning: this invite token carries cluster key material. Treat it like a private key.", err=True)
+    else:
+        click.echo("Created request-mode invite. The token does not carry cluster data keys.", err=True)
+    click.echo(create_invite_token(config, cluster_config, expires=expires, mode=mode))
 
 
 @cluster.command("join")
@@ -584,6 +594,7 @@ def cluster_invite(ctx: click.Context, expires: str) -> None:
 def cluster_join(ctx: click.Context, invite_token: str, node_alias: str | None, force: bool) -> None:
     """Join an OM Cluster using an invite token."""
     from .sync.config import join_cluster_from_invite
+    from .sync.engine import build_transport
     from .sync.store import ClusterStore, NodeMetadata
 
     config = ctx.obj["config"]
@@ -591,9 +602,24 @@ def cluster_join(ctx: click.Context, invite_token: str, node_alias: str | None, 
         cluster_config, invite = join_cluster_from_invite(config, invite_token, node_alias=node_alias, force=force)
     except (FileExistsError, ValueError) as e:
         raise click.ClickException(str(e)) from e
+    issuer = invite["body"]
+    join_request = invite.get("join_request")
+    if join_request:
+        for transport_config in cluster_config.transports:
+            transport = build_transport(transport_config)
+            transport.publish_join_request(
+                cluster_config.id,
+                join_request["request_id"],
+                (json_like(join_request) + "\n").encode("utf-8"),
+            )
+        click.echo(f"Created pending OM Cluster join request {join_request['request_id']}")
+        click.echo(f"Cluster: {cluster_config.name} ({cluster_config.id})")
+        click.echo(f"Node: {cluster_config.node_alias} ({cluster_config.node_id})")
+        click.echo("Run `om cluster requests` on a trusted node, then approve this request.")
+        return
+
     store = ClusterStore.from_config(config)
     store.ensure_layout()
-    issuer = invite["body"]
     store.write_node_metadata(
         NodeMetadata(
             node_id=issuer["issuer_node_id"],
@@ -625,7 +651,7 @@ def cluster_status(ctx: click.Context, as_json: bool) -> None:
     """Show cluster status."""
     import json as json_mod
 
-    from .sync.config import cluster_feature_enabled, load_cluster_config
+    from .sync.config import cluster_feature_enabled, load_cluster_config, load_pending_join_state
     from .sync.store import ClusterStore
 
     config = ctx.obj["config"]
@@ -633,7 +659,31 @@ def cluster_status(ctx: click.Context, as_json: bool) -> None:
     if cluster_config is None:
         data = {"initialized": False, "enabled": False}
     else:
-        store = ClusterStore.from_config(config)
+        pending_state = load_pending_join_state(config, cluster_config.id)
+        try:
+            store = ClusterStore.from_config(config)
+        except FileNotFoundError:
+            data = {
+                "initialized": True,
+                "enabled": False,
+                "cluster": {"id": cluster_config.id, "name": cluster_config.name},
+                "node": {"id": cluster_config.node_id, "alias": cluster_config.node_alias},
+                "join_request": {
+                    "status": (pending_state or {}).get("status", "pending"),
+                    "request_id": (pending_state or {}).get("request_id"),
+                    "reason": (pending_state or {}).get("reason"),
+                },
+                "transports": [transport.to_dict() for transport in cluster_config.transports],
+            }
+            if as_json:
+                click.echo(json_mod.dumps(data, indent=2, sort_keys=True))
+                return
+            click.echo(f"Cluster: {data['cluster']['name']} ({data['cluster']['id']})")
+            click.echo(f"Node: {data['node']['alias']} ({data['node']['id']})")
+            click.echo(f"Join request: {data['join_request']['status']} ({data['join_request']['request_id']})")
+            if data["join_request"].get("reason"):
+                click.echo(f"Reason: {data['join_request']['reason']}")
+            return
         records = store.list_records(include_tombstoned=True)
         data = {
             "initialized": True,
@@ -658,6 +708,12 @@ def cluster_status(ctx: click.Context, as_json: bool) -> None:
                 "active": config.active_path.exists(),
             },
         }
+        if pending_state:
+            data["join_request"] = {
+                "status": pending_state.get("status"),
+                "request_id": pending_state.get("request_id"),
+                "reason": pending_state.get("reason"),
+            }
     if as_json:
         click.echo(json_mod.dumps(data, indent=2, sort_keys=True))
         return
@@ -676,6 +732,145 @@ def cluster_status(ctx: click.Context, as_json: bool) -> None:
         click.echo("Pending peers:")
         for node_id, peer in data["pending_peers"].items():
             click.echo(f"  {node_id} {peer.get('alias', node_id)}")
+    if data.get("join_request"):
+        click.echo(f"Join request: {data['join_request']['status']} ({data['join_request']['request_id']})")
+
+
+@cluster.command("requests")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.pass_context
+def cluster_requests(ctx: click.Context, as_json: bool) -> None:
+    """List pending request-mode join requests visible in configured transports."""
+    import json as json_mod
+
+    from .sync.config import load_cluster_config, verify_join_request
+    from .sync.engine import build_transport
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    requests: dict[str, dict] = {}
+    for transport_config in cluster_config.transports:
+        transport = build_transport(transport_config)
+        for request_id in transport.list_join_requests(cluster_config.id):
+            data = transport.fetch_join_request(cluster_config.id, request_id)
+            if data is None:
+                continue
+            try:
+                request = verify_join_request(json_mod.loads(data.decode("utf-8")), cluster_id=cluster_config.id)
+            except Exception as e:
+                requests[request_id] = {"request_id": request_id, "status": "invalid", "error": str(e)}
+                continue
+            node = request["node"]
+            requests[request_id] = {
+                "request_id": request_id,
+                "status": "pending",
+                "node_id": node["node_id"],
+                "alias": node.get("alias", node["node_id"]),
+                "invite_id": request.get("invite_id"),
+                "requested_at": request.get("requested_at"),
+                "expires_at": request.get("expires_at"),
+            }
+    if as_json:
+        click.echo(json_mod.dumps(list(requests.values()), indent=2, sort_keys=True))
+        return
+    if not requests:
+        click.echo("No join requests.")
+        return
+    for request in requests.values():
+        if request["status"] == "invalid":
+            click.echo(f"{request['request_id']} invalid: {request['error']}")
+        else:
+            click.echo(
+                f"{request['request_id']} pending {request['alias']} ({request['node_id']}) "
+                f"expires={request['expires_at']}"
+            )
+
+
+@cluster.command("approve")
+@click.argument("request_id")
+@click.pass_context
+def cluster_approve(ctx: click.Context, request_id: str) -> None:
+    """Approve a request-mode join request."""
+    _complete_join_request(ctx, request_id, approve=True, reason="")
+
+
+@cluster.command("reject")
+@click.argument("request_id")
+@click.option("--reason", default="manual-reject", show_default=True, help="Rejection reason")
+@click.pass_context
+def cluster_reject(ctx: click.Context, request_id: str, reason: str) -> None:
+    """Reject a request-mode join request."""
+    _complete_join_request(ctx, request_id, approve=False, reason=reason)
+
+
+def _complete_join_request(ctx: click.Context, request_id: str, *, approve: bool, reason: str) -> None:
+    import json as json_mod
+
+    from .sync.config import (
+        create_join_approval,
+        create_join_rejection,
+        load_cluster_config,
+        verify_join_request,
+    )
+    from .sync.engine import build_transport, sync_cluster
+    from .sync.store import ClusterStore
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    store = ClusterStore.from_config(config)
+    request = None
+    transports = [build_transport(transport_config) for transport_config in cluster_config.transports]
+    for transport in transports:
+        data = transport.fetch_join_request(cluster_config.id, request_id)
+        if data is None:
+            continue
+        try:
+            request = verify_join_request(json_mod.loads(data.decode("utf-8")), cluster_id=cluster_config.id)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
+        break
+    if request is None:
+        raise click.ClickException(f"No join request found for {request_id}")
+
+    if approve:
+        node = request["node"]
+        record = store.append_record(
+            kind="node_membership",
+            namespace=store.cluster_config.default_namespace,
+            source={"agent": "cluster-approve", "host_alias": store.cluster_config.node_alias},
+            payload={
+                "operation": "add",
+                "node_id": node["node_id"],
+                "alias": node.get("alias", node["node_id"]),
+                "signing_public_key": node["signing_public_key_b64"],
+                "approved_by_node_id": store.cluster_config.node_id,
+                "request_id": request_id,
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+        )
+        approval = create_join_approval(
+            config,
+            cluster_config,
+            request=request,
+            membership_record_id=record.record_id,
+            approved_by_node_id=store.cluster_config.node_id,
+        )
+        sync_cluster(config, materialize=False)
+    else:
+        record = None
+        approval = create_join_rejection(config, cluster_config, request=request, reason=reason)
+
+    payload = (json_mod.dumps(approval, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    for transport in transports:
+        transport.publish_join_approval(cluster_config.id, request_id, payload)
+    if approve and record is not None:
+        click.echo(f"Approved {request_id} with membership record {record.record_id}")
+    else:
+        click.echo(f"Rejected {request_id}")
 
 
 @cluster.command("peers")
