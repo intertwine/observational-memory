@@ -281,3 +281,38 @@ Known limitations:
 Next milestone:
 
 - Milestone 7: optional direct P2P evaluation and transport (#36).
+
+## Milestone 7 - Optional Direct P2P Transport
+
+Goals:
+
+- Add a low-dependency direct peer transport after key epochs and relay are stable.
+- Keep discovery and reachability separate from OM Cluster membership.
+- Preserve base install behavior without P2P-only dependencies.
+- Document the transport choice before implementation.
+
+Completed work:
+
+- Added `docs/om-cluster-p2p-evaluation.md` selecting explicit HTTP peer endpoints over heavyweight NAT traversal dependencies for the first P2P implementation.
+- Added `P2PTransport`, an explicit-peer adapter that reuses the relay opaque artifact contract against one or more peer URLs.
+- Added `p2p:http://...[,http://...]` transport parsing for `om cluster init`.
+- Added `om cluster p2p status` and `om cluster p2p peers` inspection commands that state reachability is not trust.
+- Documented LAN/Tailscale/operator-tunnel scope and current non-goals such as mDNS and NAT traversal.
+
+Tests added:
+
+- Two loopback peer endpoints converge without a shared filesystem or hosted relay, while peer endpoint storage does not contain plaintext memory.
+
+Validation:
+
+- `mise exec -- uv run pytest tests/sync/test_p2p_transport.py -q` - 1 passed.
+- `mise exec -- uv run ruff check src/observational_memory/sync/transports/p2p.py src/observational_memory/sync/engine.py src/observational_memory/cli.py tests/sync/test_p2p_transport.py docs/om-cluster-p2p-evaluation.md` - passed.
+
+Known limitations:
+
+- No automatic discovery or NAT traversal.
+- No packaged long-running peer server yet; the first implementation validates the direct transport protocol with loopback HTTP endpoints.
+
+Next milestone:
+
+- Milestone 8: final stabilization, dogfood validation, release packaging, and docs consolidation.

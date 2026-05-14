@@ -8,6 +8,7 @@ This branch is prepared as the `observational-memory` `0.6.0` release candidate.
 - Stores memory as signed, encrypted, append-only records before transport.
 - Implements filesystem transport for Syncthing, Dropbox, iCloud Drive, NAS mounts, rsync, USB drives, and other shared directories.
 - Adds an optional stdlib HTTP relay client for untrusted relay services that move opaque records and metadata without receiving plaintext or private keys.
+- Adds optional explicit-peer P2P transport over the same opaque HTTP artifact contract, with no base dependency changes.
 - Materializes `observations.md`, `reflections.md`, `profile.md`, and `active.md` locally from records and snapshots.
 - Adds `om cluster init`, `invite`, `join`, `sync`, `status`, `peers`, `materialize`, `provenance`, `redact`, `revoke`, `rotate-key`, and `override`.
 - Adds request-mode join approval commands: `om cluster requests`, `approve`, and `reject`. Trusted-direct invites remain available with `--mode trusted-direct`.

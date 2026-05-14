@@ -1282,6 +1282,54 @@ def cluster_purge_old_ciphertext(ctx: click.Context, key_id: str, yes: bool) -> 
         )
 
 
+@cluster.group("p2p")
+def cluster_p2p() -> None:
+    """Inspect optional direct peer transport configuration."""
+
+
+@cluster_p2p.command("peers")
+@click.pass_context
+def cluster_p2p_peers(ctx: click.Context) -> None:
+    """List configured direct peer endpoints."""
+    from .sync.config import load_cluster_config
+
+    cluster_config = load_cluster_config(ctx.obj["config"])
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    peers = []
+    for transport in cluster_config.transports:
+        if transport.type == "p2p" and transport.path:
+            peers.extend([peer for peer in transport.path.split(",") if peer])
+    click.echo(json.dumps({"peers": peers}, indent=2, sort_keys=True))
+
+
+@cluster_p2p.command("status")
+@click.pass_context
+def cluster_p2p_status(ctx: click.Context) -> None:
+    """Show direct peer transport status without authorizing peers."""
+    from .sync.config import load_cluster_config
+
+    cluster_config = load_cluster_config(ctx.obj["config"])
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    peer_count = sum(
+        len([peer for peer in transport.path.split(",") if peer])
+        for transport in cluster_config.transports
+        if transport.type == "p2p" and transport.path
+    )
+    click.echo(
+        json.dumps(
+            {
+                "configured": peer_count > 0,
+                "peer_count": peer_count,
+                "trust_note": "Direct peer reachability does not grant OM Cluster membership.",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 @cluster.group("override")
 def cluster_override() -> None:
     """Manage profile/active manual override records."""
@@ -1402,13 +1450,14 @@ def _parse_transport_spec(spec: str):
     from .sync.config import TransportConfig
 
     kind, sep, value = spec.partition(":")
-    if not sep or kind not in {"filesystem", "relay"} or not value:
-        raise click.ClickException("Use filesystem:PATH or relay:URL.")
+    if not sep or kind not in {"filesystem", "relay", "p2p"} or not value:
+        raise click.ClickException("Use filesystem:PATH, relay:URL, or p2p:URL[,URL...].")
     if kind == "filesystem":
         return TransportConfig(type="filesystem", path=_expand_transport_path(value))
-    if not value.startswith(("http://", "https://")):
-        raise click.ClickException("Relay transports must use relay:http://... or relay:https://...")
-    return TransportConfig(type="relay", path=value)
+    urls = [url.strip() for url in value.split(",") if url.strip()]
+    if not urls or any(not url.startswith(("http://", "https://")) for url in urls):
+        raise click.ClickException(f"{kind} transports must use HTTP(S) peer URLs.")
+    return TransportConfig(type=kind, path=",".join(urls))
 
 
 def _expand_transport_path(value: str) -> str:

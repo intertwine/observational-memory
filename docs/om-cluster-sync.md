@@ -159,7 +159,15 @@ The relay stores signed/encrypted records, heads, public node metadata, join req
 
 The base install uses the stdlib relay client and does not require a relay server dependency. Relay operator responsibilities include retention, availability, metadata exposure, and backup cleanup during compromise recovery.
 
-Direct P2P is not enabled yet. Discovery must never imply trust; future discovered peers will still need membership authorization.
+Direct P2P uses explicit peer URLs:
+
+```bash
+om cluster init --name "Personal Memory" --transport p2p:http://peer.local:8765
+om cluster p2p status
+om cluster p2p peers
+```
+
+The first P2P implementation uses the same opaque HTTP artifact contract as relay and is meant for LAN, Tailscale, or operator-managed tunnels. It does not do automatic NAT traversal or discovery yet. Discovery must never imply trust; future discovered peers will still need membership authorization.
 
 ## Recovery
 
