@@ -82,3 +82,42 @@ Known limitations:
 Next milestone:
 
 - Milestone 2: Windows cluster hardening (#40) and feature-flag caching (#38).
+
+## Milestone 2 - Windows Hardening And Feature-Flag Caching
+
+Goals:
+
+- Preserve the merged #39 Windows baseline while adding cluster-specific Windows path and key diagnostics.
+- Add a small cache for cluster feature-gate checks without stale env/config/key behavior.
+
+Completed work:
+
+- Added `clear_cluster_feature_cache()` and a process-local cache for `cluster_feature_enabled(config)`.
+- Cache reuse is gated by config path identity, config file existence/mtime/size, relevant `OM_CLUSTER_*` env overrides, and known node/cluster key file existence/mtime/size.
+- Added tests proving unchanged calls reuse loaded key state, env override changes are observed in-process, and deleted key files invalidate the cache.
+- Added platform-aware private-path permission helpers for OM Cluster.
+- On POSIX, cluster key directories continue to be hardened/verified with `0700` and key files with `0600`.
+- On Windows, `om doctor` reports an honest warning when portable ACL owner-only verification is unavailable instead of claiming POSIX mode safety.
+- Added Windows CLI coverage for `%LOCALAPPDATA%` filesystem transport expansion and simulated Windows cluster doctor diagnostics.
+
+Tests added:
+
+- Cluster feature cache reuse and key-file invalidation tests.
+- Windows `om cluster init` with `%LOCALAPPDATA%` transport path expansion.
+- Windows `om doctor --json` warning for OM Cluster key ACL verification.
+
+Validation:
+
+- `mise exec -- uv run pytest tests/sync/test_config_feature_flag.py tests/test_windows.py -q` - 36 passed.
+- `mise exec -- uv run ruff check src/observational_memory/sync src/observational_memory/cli.py tests/sync/test_config_feature_flag.py tests/test_windows.py` - passed.
+- `mise exec -- uv run pytest -q` - 344 passed.
+- `mise exec -- uv run ruff check` - passed.
+
+Known limitations:
+
+- Real NTFS ACL introspection is not implemented yet; Windows diagnostics are deliberately conservative.
+- A real Windows two-install filesystem smoke should still be attached before broad release messaging.
+
+Next milestone:
+
+- Milestone 3: reflection metadata, stale-state pruning, host-memory coexistence, and cluster-aware semantic merge (#41).

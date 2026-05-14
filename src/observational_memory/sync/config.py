@@ -28,6 +28,7 @@ from .crypto import (
     verify_ed25519,
 )
 from .ids import validate_cluster_id, validate_invite_id, validate_join_request_id, validate_key_id, validate_node_id
+from .permissions import harden_private_path
 from .records import canonical_json_bytes
 
 
@@ -75,25 +76,54 @@ class InviteToken:
     request_secret_b64: str | None = None
 
 
+_FEATURE_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+
 def cluster_feature_enabled(config: Config) -> bool:
     """Return True only when a valid initialized cluster exists and is enabled."""
+    cache_key = (
+        str(config.cluster_config_path),
+        str(config.cluster_keys_dir),
+        str(config.clusters_dir),
+    )
+    env_signature = _feature_env_signature()
+    config_signature = _path_signature(config.cluster_config_path)
+    cached = _FEATURE_CACHE.get(cache_key)
+    if (
+        cached
+        and cached.get("env_signature") == env_signature
+        and cached.get("config_signature") == config_signature
+        and cached.get("key_signatures") == _cached_key_signatures(cached)
+    ):
+        return bool(cached["enabled"])
+
+    key_paths: list[Path] = []
+    enabled = False
     cluster_config = load_cluster_config(config)
     if cluster_config is None:
+        _store_feature_cache(cache_key, env_signature, config_signature, key_paths, False)
         return False
 
-    override = os.environ.get("OM_CLUSTER_ENABLED")
-    enabled = cluster_config.enabled
-    if override is not None:
-        enabled = override.strip().lower() in {"1", "true", "yes", "on"}
-    if not enabled:
-        return False
-
+    key_dir = _cluster_key_dir(config, cluster_config.id)
+    key_paths = [key_dir / "node.json", key_dir / "cluster.key"]
     try:
-        load_node_keypair(config, cluster_config)
-        load_cluster_secret(config, cluster_config.id)
+        enabled = cluster_config.enabled
+        override = os.environ.get("OM_CLUSTER_ENABLED")
+        if override is not None:
+            enabled = override.strip().lower() in {"1", "true", "yes", "on"}
+        if enabled:
+            load_node_keypair(config, cluster_config)
+            load_cluster_secret(config, cluster_config.id)
+            enabled = True
     except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
-        return False
-    return True
+        enabled = False
+    _store_feature_cache(cache_key, env_signature, config_signature, key_paths, enabled)
+    return enabled
+
+
+def clear_cluster_feature_cache() -> None:
+    """Clear the cluster feature-gate cache for tests and config-mutating commands."""
+    _FEATURE_CACHE.clear()
 
 
 def load_cluster_config(config: Config) -> ClusterConfig | None:
@@ -638,10 +668,10 @@ def _cluster_key_dir(config: Config, cluster_id: str) -> Path:
 
 def _secure_cluster_key_dir(config: Config, cluster_id: str) -> Path:
     config.cluster_keys_dir.mkdir(parents=True, exist_ok=True)
-    config.cluster_keys_dir.chmod(0o700)
+    harden_private_path(config.cluster_keys_dir, directory=True)
     key_dir = _cluster_key_dir(config, cluster_id)
     key_dir.mkdir(parents=True, exist_ok=True)
-    key_dir.chmod(0o700)
+    harden_private_path(key_dir, directory=True)
     return key_dir
 
 
@@ -730,6 +760,47 @@ def _decrypt_join_secret(request_secret_b64: str, request_id: str, encrypted: di
         f"om-join-approval:{request_id}".encode("utf-8"),
     )
     return json.loads(plaintext.decode("utf-8"))
+
+
+def _feature_env_signature() -> tuple[tuple[str, str | None], ...]:
+    names = (
+        "OM_CLUSTER_ENABLED",
+        "OM_CLUSTER_ID",
+        "OM_CLUSTER_DEFAULT_NAMESPACE",
+        "OM_CLUSTER_SYNC_ON_OBSERVE",
+        "OM_CLUSTER_SYNC_ON_REFLECT",
+        "OM_CLUSTER_SYNC_BEFORE_CONTEXT",
+        "OM_CLUSTER_STARTUP_PULL_DEADLINE_MS",
+    )
+    return tuple((name, os.environ.get(name)) for name in names)
+
+
+def _path_signature(path: Path) -> tuple[bool, int | None, int | None]:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return (False, None, None)
+    return (True, stat.st_mtime_ns, stat.st_size)
+
+
+def _cached_key_signatures(cached: dict[str, Any]) -> tuple[tuple[str, tuple[bool, int | None, int | None]], ...]:
+    return tuple((path, _path_signature(Path(path))) for path in cached.get("key_paths", ()))
+
+
+def _store_feature_cache(
+    cache_key: tuple[str, str, str],
+    env_signature: tuple[tuple[str, str | None], ...],
+    config_signature: tuple[bool, int | None, int | None],
+    key_paths: list[Path],
+    enabled: bool,
+) -> None:
+    _FEATURE_CACHE[cache_key] = {
+        "env_signature": env_signature,
+        "config_signature": config_signature,
+        "key_paths": tuple(str(path) for path in key_paths),
+        "key_signatures": tuple((str(path), _path_signature(path)) for path in key_paths),
+        "enabled": enabled,
+    }
 
 
 def _env_or_bool(name: str, default: bool) -> bool:

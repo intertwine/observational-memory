@@ -1080,7 +1080,15 @@ def _parse_transport_spec(spec: str):
     kind, sep, value = spec.partition(":")
     if not sep or kind != "filesystem" or not value:
         raise click.ClickException("Only filesystem transports are supported in 0.6.0. Use filesystem:PATH.")
-    return TransportConfig(type="filesystem", path=value)
+    return TransportConfig(type="filesystem", path=_expand_transport_path(value))
+
+
+def _expand_transport_path(value: str) -> str:
+    if sys.platform == "win32":
+        import re
+
+        value = re.sub(r"%([^%]+)%", lambda match: os.environ.get(match.group(1), match.group(0)), value)
+    return os.path.expandvars(os.path.expanduser(value))
 
 
 def _backup_existing_memory(config: Config) -> Path:
@@ -2498,6 +2506,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     # 14. Cluster sync diagnostics
     try:
         from .sync.config import cluster_feature_enabled, load_cluster_config
+        from .sync.permissions import verify_private_path_owner_only
         from .sync.store import ClusterStore
 
         cluster_config = load_cluster_config(config)
@@ -2507,19 +2516,29 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
             enabled = cluster_feature_enabled(config)
             _check("OM Cluster", "PASS" if enabled else "WARN", "enabled" if enabled else "configured but disabled")
             key_dir = config.cluster_keys_dir / cluster_config.id
-            unsafe = []
-            for key_file in (key_dir / "node.json", key_dir / "cluster.key"):
-                if key_file.exists() and (key_file.stat().st_mode & 0o777) != 0o600:
-                    unsafe.append(str(key_file))
-            if unsafe:
+            permission_results = [
+                verify_private_path_owner_only(config.cluster_keys_dir, directory=True),
+                verify_private_path_owner_only(key_dir, directory=True),
+                verify_private_path_owner_only(key_dir / "node.json", directory=False),
+                verify_private_path_owner_only(key_dir / "cluster.key", directory=False),
+            ]
+            failures = [result for result in permission_results if result.status == "FAIL"]
+            warnings = [result for result in permission_results if result.status == "WARN"]
+            if failures:
                 _check(
                     "OM Cluster key permissions",
                     "FAIL",
-                    ", ".join(unsafe),
-                    fix="Run: chmod 600 on cluster key files",
+                    "; ".join(result.detail for result in failures),
+                    fix=failures[0].fix,
+                )
+            elif warnings:
+                _check(
+                    "OM Cluster key permissions",
+                    "WARN",
+                    "; ".join(result.detail for result in warnings),
                 )
             else:
-                _check("OM Cluster key permissions", "PASS", "private key files are owner-only")
+                _check("OM Cluster key permissions", "PASS", "private key paths are owner-only")
             store = ClusterStore.from_config(config)
             records = store.list_records(include_tombstoned=True)
             _check("OM Cluster local records", "PASS", f"{len(records)} record(s), heads: {store.all_heads()}")

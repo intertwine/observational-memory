@@ -145,3 +145,18 @@ enabled = false
 ```
 
 Existing materialized Markdown remains readable. `om cluster init --import-existing` backs up current Markdown files under `~/.local/share/observational-memory/backups/cluster-init-<timestamp>/` before materialization.
+
+## Windows Notes
+
+On Windows, OM uses `%APPDATA%\observational-memory\cluster.toml` for cluster config and `%APPDATA%\observational-memory\cluster-keys` for local key material, with cluster records under `%LOCALAPPDATA%\observational-memory\clusters` unless XDG paths are explicitly set.
+
+Filesystem transport paths may use drive-letter paths or environment variables:
+
+```powershell
+om cluster init --transport filesystem:C:\Users\Bryan\Sync\om-cluster
+om cluster init --transport filesystem:%LOCALAPPDATA%\OM\cluster
+```
+
+`om doctor` does not claim POSIX `0600`/`0700` bits prove NTFS owner-only ACLs. On Windows it reports a warning when portable ACL verification is not available, so users know to validate key directories on the actual machine.
+
+Feature-gate checks for cluster mode are cached within a process, but the cache includes the cluster config file signature, local key file signatures, relevant `OM_CLUSTER_*` environment overrides, and config root paths. Local config or key changes are reflected without restarting normal CLI commands.
