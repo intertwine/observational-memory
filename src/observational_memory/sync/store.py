@@ -327,7 +327,7 @@ class ClusterStore:
         active_key_id = self.secret.active_key_id
         candidates: list[RecordEnvelope] = []
         for record in self.list_records(include_tombstoned=False):
-            if record.kind in {"key_epoch", "key_rotation", "node_membership", "payload_rewrap", "tombstone"}:
+            if record.kind in {"key_epoch", "key_rotation", "node_membership", "payload_rewrap"}:
                 continue
             record_key_id = str(record.data.get("encryption", {}).get("key_id") or "")
             if record_key_id == active_key_id:

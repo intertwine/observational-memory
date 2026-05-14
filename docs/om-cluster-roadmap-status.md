@@ -316,3 +316,39 @@ Known limitations:
 Next milestone:
 
 - Milestone 8: final stabilization, dogfood validation, release packaging, and docs consolidation.
+
+## Milestone 8 - Final Stabilization And Release Readiness
+
+Goals:
+
+- Consolidate user-facing docs so setup, transports, approval, key epochs, rewrap, redaction, and recovery match actual behavior.
+- Add a repeatable dogfood validation path that exercises the highest-risk multi-node flows.
+- Preserve full test/lint cleanliness before release packaging.
+
+Completed work:
+
+- Updated README sync guidance for request approval, filesystem, relay, P2P, key epochs, historical rewrap, and transport secrecy.
+- Added `scripts/validate_om_cluster_roadmap.py`, an isolated two-node filesystem dogfood smoke that validates request approval, convergence, redaction, key epoch rotation, historical rewrap after old-key removal, and transport secrecy.
+- Adjusted rewrap candidate handling so tombstone records can be rewrapped too; this prevents tombstoned content from reappearing after an operator removes inactive local data keys.
+
+Tests added:
+
+- The dogfood script runs against temporary HOME/XDG roots and a temporary filesystem transport.
+
+Validation:
+
+- `mise exec -- uv run python scripts/validate_om_cluster_roadmap.py` - passed.
+- `mise exec -- uv run pytest tests/sync/test_filesystem_sync.py::test_historical_rewrap_materializes_after_old_key_removed -q` - 1 passed.
+- `mise exec -- uv run ruff check scripts/validate_om_cluster_roadmap.py src/observational_memory/sync/store.py` - passed.
+- `mise exec -- uv run pytest -q` - 355 passed.
+- `mise exec -- uv run ruff check` - passed.
+- `mise exec -- make build` - built `observational_memory-0.6.0.tar.gz` and `observational_memory-0.6.0-py3-none-any.whl`.
+- `mise exec -- uv tool run --isolated --from ./dist/observational_memory-0.6.0-py3-none-any.whl om --version` - `om, version 0.6.0`.
+
+Known limitations:
+
+- Publishing to PyPI and triggering Homebrew should only happen after the branch is merged or explicitly selected as the release commit, and after maintainer credentials/state are confirmed.
+
+Next milestone:
+
+- Release packaging and publication decision.
