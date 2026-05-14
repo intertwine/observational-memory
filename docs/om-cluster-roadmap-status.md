@@ -209,7 +209,7 @@ Goals:
 - Give each node a stable encryption keypair distinct from its signing keypair.
 - Rotate by publishing a signed key-epoch record with the new data key wrapped separately to currently trusted nodes.
 - Exclude revoked nodes from new epochs so old cluster key material cannot unlock future writes.
-- Keep the historical-rewrite boundary explicit until a dedicated rewrap or purge workflow lands.
+- Add an append-only historical rewrap workflow without deleting old ciphertext by default.
 
 Completed work:
 
@@ -218,6 +218,9 @@ Completed work:
 - Published node encryption public keys in local node metadata, invite bodies, direct membership records, join requests, and approved membership records.
 - Changed `om cluster rotate-key` to write `key_epoch` records whose recipients list contains one wrapped key per non-revoked node with an encryption public key.
 - Added key-epoch import handling that unwraps only the local node recipient and activates the epoch by HLC order.
+- Added `payload_rewrap` helpers and `om cluster reencrypt` so historical payloads can be copied into new-key ciphertext while preserving original record provenance.
+- Materializers now prefer valid latest rewrap payloads for target records, allowing active nodes to materialize old memories after old local data keys are removed.
+- Added `om cluster purge-old-ciphertext --key-id ...` as a guarded readiness report that warns operators to inspect shared transports and backups rather than deleting append-only records automatically.
 - Preserved legacy `key_rotation` import handling for compatibility with older preview records.
 - Fixed `ensure_layout()` so materialization and sync no longer revive a locally known revoked node.
 
@@ -225,17 +228,20 @@ Tests added:
 
 - Key epochs propagate the active key to a trusted peer and future writes use the new active key.
 - A revoked peer remains revoked locally, rejects a post-revocation key epoch that excludes it, and keeps its old active key.
+- Historical rewrap lets an active peer materialize an old observation after its old data key is removed locally.
+- A revoked peer rejects new-key rewrap records and does not activate the new key.
 
 Validation:
 
 - `mise exec -- uv run pytest tests/sync/test_filesystem_sync.py::test_key_rotation_propagates_active_key_to_peer tests/sync/test_filesystem_sync.py::test_key_epoch_excludes_revoked_peer_from_new_active_key -q` - 2 passed.
+- `mise exec -- uv run pytest tests/sync/test_filesystem_sync.py::test_historical_rewrap_materializes_after_old_key_removed tests/sync/test_filesystem_sync.py::test_revoked_peer_cannot_import_new_key_rewrap -q` - 2 passed.
 - `mise exec -- uv run ruff check src/observational_memory/sync/crypto.py src/observational_memory/sync/config.py src/observational_memory/sync/store.py src/observational_memory/cli.py tests/sync/test_filesystem_sync.py` - passed.
 
 Known limitations:
 
-- Historical rewrap/purge is not automatic yet; old ciphertext remains old ciphertext until a deliberate recovery workflow rewrites or removes it.
+- Rewrap is append-only and does not delete old ciphertext; transport and backup cleanup remains an explicit operator recovery step.
 - Nodes that never publish an encryption public key are excluded from new key epochs and must refresh metadata before receiving future keys.
 
 Next milestone:
 
-- Milestone 6: historical rewrap/purge workflow and transport-level recovery guidance.
+- Milestone 6: hosted relay transport (#35).

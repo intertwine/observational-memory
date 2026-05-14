@@ -143,6 +143,10 @@ Redaction creates a tombstone record. Materializers and local search ignore tomb
 
 For a known device compromise, revoke the node, rotate the key, and inspect the shared transport. Key epochs prevent the revoked node from learning new keys, but they do not automatically rewrite old transport blobs or backups that were already encrypted to a key the device had. Full old-ciphertext recovery requires a deliberate historical rewrap or purge pass.
 
+`om cluster reencrypt` appends `payload_rewrap` records for historical observation, reflection, and override payloads that are still encrypted under older data keys. Materializers prefer a valid latest rewrap while preserving the original record ID, node, HLC, namespace, and source as provenance. Use `om cluster reencrypt --dry-run` or `--from-key <key-id>` to inspect the scope before writing rewrap records.
+
+`om cluster purge-old-ciphertext --key-id <key-id>` is a readiness report, not an automatic deletion command. True old-ciphertext recovery requires removing old encrypted blobs from every shared transport and backup that a revoked device could still access, so OM does not delete append-only records automatically.
+
 ## Discovery And P2P
 
 The core sync engine is transport-agnostic. Filesystem transport is implemented first. LAN discovery and direct P2P/relay transports are currently extension seams, not required dependencies. Discovery must never imply trust; future discovered peers will still need membership authorization.

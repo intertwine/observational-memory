@@ -190,6 +190,52 @@ def decrypt_record_payload(record: RecordEnvelope, *, secret: ClusterSecret) -> 
     return json.loads(plaintext.decode("utf-8"))
 
 
+def create_rewrapped_payload(
+    target: RecordEnvelope,
+    payload: dict[str, Any],
+    *,
+    data_key_b64: str,
+    key_id: str,
+) -> dict[str, str]:
+    validate_key_id(key_id)
+    plaintext = canonical_json_bytes(payload)
+    encrypted = encrypt_payload(data_key_b64, plaintext, _rewrap_aad(target, key_id), key_id=key_id)
+    return {
+        "alg": encrypted.alg,
+        "nonce": encrypted.nonce,
+        "key_id": encrypted.key_id,
+        "aad_hash": encrypted.aad_hash,
+        "ciphertext": encrypted.ciphertext,
+    }
+
+
+def decrypt_rewrapped_payload(
+    rewrap_payload: dict[str, Any],
+    *,
+    target: RecordEnvelope,
+    secret: ClusterSecret,
+) -> dict[str, Any]:
+    key_id = str(rewrap_payload.get("new_key_id") or rewrap_payload.get("key_id") or "")
+    validate_key_id(key_id)
+    data_key = secret.data_keys.get(key_id)
+    if data_key is None:
+        raise ValueError(f"Missing cluster data key {key_id}")
+    encrypted_data = rewrap_payload.get("rewrapped_payload")
+    if not isinstance(encrypted_data, dict):
+        raise ValueError("Missing rewrapped payload")
+    encrypted = EncryptedPayload(
+        alg=str(encrypted_data["alg"]),
+        nonce=str(encrypted_data["nonce"]),
+        key_id=key_id,
+        aad_hash=str(encrypted_data["aad_hash"]),
+        ciphertext=str(encrypted_data["ciphertext"]),
+    )
+    plaintext = decrypt_payload(data_key, encrypted, _rewrap_aad(target, key_id))
+    if sha256_id(plaintext) != target.payload_hash:
+        raise ValueError("Rewrapped payload hash mismatch")
+    return json.loads(plaintext.decode("utf-8"))
+
+
 def record_path_name(record: RecordEnvelope) -> str:
     validate_node_id(record.node_id)
     validate_record_id(record.record_id)
@@ -207,5 +253,16 @@ def _aad_for_record(record: RecordEnvelope) -> bytes:
             "hlc": record.hlc,
             "parents": record.data.get("parents", {}),
             "source": record.data.get("source", {}),
+        }
+    )
+
+
+def _rewrap_aad(target: RecordEnvelope, key_id: str) -> bytes:
+    return canonical_json_bytes(
+        {
+            "cluster_id": target.cluster_id,
+            "target_record_id": target.record_id,
+            "target_payload_hash": target.payload_hash,
+            "new_key_id": key_id,
         }
     )

@@ -22,7 +22,16 @@ from .config import (
 from .crypto import ClusterSecret, NodeKeypair, b64url_encode, unwrap_key_for_node
 from .frontier import frontier_from_records
 from .ids import validate_cluster_id, validate_node_id, validate_record_id
-from .records import RecordEnvelope, create_record, decrypt_record_payload, record_path_name, verify_record_envelope
+from .records import (
+    RecordEnvelope,
+    create_record,
+    create_rewrapped_payload,
+    decrypt_record_payload,
+    decrypt_rewrapped_payload,
+    record_path_name,
+    sha256_id,
+    verify_record_envelope,
+)
 
 _MAX_PENDING_NODE_METADATA = 128
 
@@ -274,7 +283,61 @@ class ClusterStore:
 
     def read_payload(self, record: RecordEnvelope) -> dict[str, Any]:
         self._reload_secret()
+        if record.kind != "payload_rewrap":
+            rewrapped = self._latest_rewrap_for(record)
+            if rewrapped is not None:
+                return decrypt_rewrapped_payload(rewrapped, target=record, secret=self.secret)
         return decrypt_record_payload(record, secret=self.secret)
+
+    def append_payload_rewrap(
+        self,
+        target: RecordEnvelope,
+        *,
+        reason: str = "historical-key-rotation",
+    ) -> RecordEnvelope:
+        payload = decrypt_record_payload(target, secret=self.secret)
+        rewrapped_payload = create_rewrapped_payload(
+            target,
+            payload,
+            data_key_b64=self.secret.data_key_b64,
+            key_id=self.secret.active_key_id,
+        )
+        return self.append_record(
+            kind="payload_rewrap",
+            namespace=target.namespace,
+            source={"agent": "manual", "host_alias": self.cluster_config.node_alias},
+            payload={
+                "target_record_id": target.record_id,
+                "target_envelope_hash": sha256_id(target.to_bytes().strip()),
+                "target_payload_hash": target.payload_hash,
+                "target_kind": target.kind,
+                "target_node_id": target.node_id,
+                "target_node_seq": target.node_seq,
+                "target_hlc": target.hlc,
+                "new_key_id": self.secret.active_key_id,
+                "rewrapped_payload": rewrapped_payload,
+                "rewrapped_by": self.cluster_config.node_id,
+                "reason": reason,
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    def rewrap_candidates(self, *, from_key_id: str | None = None) -> list[RecordEnvelope]:
+        self._reload_secret()
+        active_key_id = self.secret.active_key_id
+        candidates: list[RecordEnvelope] = []
+        for record in self.list_records(include_tombstoned=False):
+            if record.kind in {"key_epoch", "key_rotation", "node_membership", "payload_rewrap", "tombstone"}:
+                continue
+            record_key_id = str(record.data.get("encryption", {}).get("key_id") or "")
+            if record_key_id == active_key_id:
+                continue
+            if from_key_id is not None and record_key_id != from_key_id:
+                continue
+            if self._latest_rewrap_for(record, key_id=active_key_id) is not None:
+                continue
+            candidates.append(record)
+        return candidates
 
     def local_head(self) -> dict[str, Any]:
         return self._read_head(self.keypair.node_id) or {"node_id": self.keypair.node_id, "seq": 0}
@@ -484,6 +547,31 @@ class ClusterStore:
             self._write_head(record.node_id, record.node_seq, record.record_id)
         elif record.node_seq == current_seq and current_record_id not in {None, record.record_id}:
             raise ValueError(f"Head conflict for {record.node_id} seq {record.node_seq}")
+
+    def _latest_rewrap_for(self, target: RecordEnvelope, *, key_id: str | None = None) -> dict[str, Any] | None:
+        matches: list[tuple[str, str, dict[str, Any]]] = []
+        target_hash = sha256_id(target.to_bytes().strip())
+        for rewrap in self.list_records(kind="payload_rewrap", include_tombstoned=True):
+            try:
+                payload = decrypt_record_payload(rewrap, secret=self.secret)
+            except Exception:
+                continue
+            if payload.get("target_record_id") != target.record_id:
+                continue
+            if payload.get("target_payload_hash") != target.payload_hash:
+                continue
+            if payload.get("target_envelope_hash") != target_hash:
+                continue
+            if key_id is not None and payload.get("new_key_id") != key_id:
+                continue
+            try:
+                decrypt_rewrapped_payload(payload, target=target, secret=self.secret)
+            except Exception:
+                continue
+            matches.append((rewrap.hlc, rewrap.record_id, payload))
+        if not matches:
+            return None
+        return max(matches, key=lambda row: (row[0], row[1]))[2]
 
     def _next_hlc(self) -> HybridLogicalTimestamp:
         previous = self._load_clock()

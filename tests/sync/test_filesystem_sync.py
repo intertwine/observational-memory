@@ -10,8 +10,10 @@ from observational_memory.sync.config import (
     create_invite_token,
     initialize_cluster_config,
     join_cluster_from_invite,
+    load_cluster_secret,
+    write_cluster_secret,
 )
-from observational_memory.sync.crypto import wrap_key_for_node
+from observational_memory.sync.crypto import ClusterSecret, wrap_key_for_node
 from observational_memory.sync.engine import sync_cluster
 from observational_memory.sync.materialize import materialize_cluster_memory
 from observational_memory.sync.store import ClusterStore, NodeMetadata, new_data_key_b64
@@ -243,6 +245,171 @@ def test_key_epoch_excludes_revoked_peer_from_new_active_key(tmp_path):
     assert store_b.secret.active_key_hlc != rotation.hlc
 
 
+def test_historical_rewrap_materializes_after_old_key_removed(tmp_path):
+    shared = tmp_path / "shared"
+    config_a = _node_config(tmp_path, "a")
+    cluster_a = initialize_cluster_config(
+        config_a,
+        name="Cluster",
+        node_alias="node-a",
+        transports=[TransportConfig(type="filesystem", path=str(shared))],
+    )
+    store_a = ClusterStore.from_config(config_a)
+    store_a.ensure_layout()
+    _membership(store_a)
+    invite_token = create_invite_token(config_a, cluster_a, expires="1h", mode="trusted-direct")
+
+    config_b = _node_config(tmp_path, "b")
+    _cluster_b, invite = join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
+    store_b = ClusterStore.from_config(config_b)
+    store_b.ensure_layout()
+    _membership(store_b, invite=invite)
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+
+    store_a = ClusterStore.from_config(config_a)
+    old_observation = store_a.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex", "host_alias": "node-a"},
+        payload={"format": "markdown", "body": "- old-key memory", "observed_at": "2026-05-08T12:00:00Z"},
+    )
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+
+    store_a = ClusterStore.from_config(config_a)
+    data_key_b64 = new_data_key_b64()
+    key_id = f"key_{store_a.cluster_config.node_id}_rewrap"
+    store_a.append_record(
+        kind="key_epoch",
+        namespace="personal",
+        source={"agent": "test"},
+        payload={
+            "epoch": len(store_a.secret.data_keys) + 1,
+            "key_id": key_id,
+            "recipients": [
+                {
+                    "node_id": node.node_id,
+                    "wrapped_key": wrap_key_for_node(
+                        data_key_b64,
+                        node.encryption_public_key_b64,
+                        aad=f"{store_a.cluster_config.id}:{key_id}".encode("utf-8"),
+                    ),
+                }
+                for node in store_a.public_nodes().values()
+                if node.encryption_public_key_b64
+            ],
+            "excluded_nodes": [],
+            "created_at": "2026-05-08T12:01:00Z",
+        },
+    )
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+
+    store_a = ClusterStore.from_config(config_a)
+    rewrap = store_a.append_payload_rewrap(old_observation)
+    assert rewrap.data["encryption"]["key_id"] == key_id
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+
+    secret = load_cluster_secret(config_b, cluster_a.id)
+    write_cluster_secret(
+        config_b,
+        ClusterSecret(
+            cluster_id=secret.cluster_id,
+            data_keys={secret.active_key_id: secret.data_keys[secret.active_key_id]},
+            active_key_id=secret.active_key_id,
+            active_key_hlc=secret.active_key_hlc,
+        ),
+    )
+    materialize_cluster_memory(config_b, ClusterStore.from_config(config_b))
+    assert "old-key memory" in config_b.observations_path.read_text()
+
+
+def test_revoked_peer_cannot_import_new_key_rewrap(tmp_path):
+    shared = tmp_path / "shared"
+    config_a = _node_config(tmp_path, "a")
+    cluster_a = initialize_cluster_config(
+        config_a,
+        name="Cluster",
+        node_alias="node-a",
+        transports=[TransportConfig(type="filesystem", path=str(shared))],
+    )
+    store_a = ClusterStore.from_config(config_a)
+    store_a.ensure_layout()
+    _membership(store_a)
+    invite_token = create_invite_token(config_a, cluster_a, expires="1h", mode="trusted-direct")
+
+    config_b = _node_config(tmp_path, "b")
+    _cluster_b, invite = join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
+    store_b = ClusterStore.from_config(config_b)
+    store_b.ensure_layout()
+    _membership(store_b, invite=invite)
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+
+    store_a = ClusterStore.from_config(config_a)
+    old_observation = store_a.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex", "host_alias": "node-a"},
+        payload={"format": "markdown", "body": "- revoked-peer-old-memory", "observed_at": "2026-05-08T12:00:00Z"},
+    )
+    revoked_node_id = store_b.cluster_config.node_id
+    store_a.append_record(
+        kind="node_membership",
+        namespace="personal",
+        source={"agent": "test"},
+        payload={
+            "operation": "revoke",
+            "node_id": revoked_node_id,
+            "created_at": "2026-05-08T12:01:00Z",
+        },
+    )
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+
+    store_a = ClusterStore.from_config(config_a)
+    data_key_b64 = new_data_key_b64()
+    key_id = f"key_{store_a.cluster_config.node_id}_rewrap_after_revoke"
+    store_a.append_record(
+        kind="key_epoch",
+        namespace="personal",
+        source={"agent": "test"},
+        payload={
+            "epoch": len(store_a.secret.data_keys) + 1,
+            "key_id": key_id,
+            "recipients": [
+                {
+                    "node_id": node.node_id,
+                    "wrapped_key": wrap_key_for_node(
+                        data_key_b64,
+                        node.encryption_public_key_b64,
+                        aad=f"{store_a.cluster_config.id}:{key_id}".encode("utf-8"),
+                    ),
+                }
+                for node in store_a.public_nodes().values()
+                if not node.revoked and node.encryption_public_key_b64
+            ],
+            "excluded_nodes": [revoked_node_id],
+            "created_at": "2026-05-08T12:02:00Z",
+        },
+    )
+    store_a = ClusterStore.from_config(config_a)
+    store_a.append_payload_rewrap(old_observation)
+
+    sync_cluster(config_a)
+    summary = sync_cluster(config_b)
+    store_b = ClusterStore.from_config(config_b)
+    assert summary.rejected >= 1
+    assert not store_b.list_records(kind="payload_rewrap")
+    assert store_b.secret.active_key_id != key_id
+
+
 def test_filesystem_transport_rejects_filename_body_mismatches(tmp_path):
     shared = tmp_path / "shared"
     config_a = _node_config(tmp_path, "a")
@@ -423,6 +590,15 @@ def test_cli_invite_join_revoke_rotate(tmp_path):
     result = runner.invoke(cli, ["cluster", "rotate-key"], env=env_a)
     assert result.exit_code == 0, result.output
     assert "Rotated cluster data key" in result.output
+    key_id = result.output.split(" to ", 1)[1].split(" with record ", 1)[0]
+
+    result = runner.invoke(cli, ["cluster", "reencrypt", "--dry-run"], env=env_a)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["candidate_count"] == 0
+
+    result = runner.invoke(cli, ["cluster", "purge-old-ciphertext", "--key-id", key_id], env=env_a)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["unrewrapped_count"] == 0
 
 
 def test_cli_request_invite_approval_flow(tmp_path):

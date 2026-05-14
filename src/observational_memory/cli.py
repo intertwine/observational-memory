@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -1207,6 +1208,78 @@ def cluster_rotate_key(ctx: click.Context) -> None:
         },
     )
     click.echo(f"Rotated cluster data key to {key_id} with record {record.record_id}")
+
+
+@cluster.command("reencrypt")
+@click.option("--from-key", "from_key_id", default=None, help="Only rewrap records encrypted with this key ID.")
+@click.option("--limit", type=int, default=None, help="Maximum records to rewrap in this run.")
+@click.option("--dry-run", is_flag=True, help="Report records that would be rewrapped without writing records.")
+@click.pass_context
+def cluster_reencrypt(ctx: click.Context, from_key_id: str | None, limit: int | None, dry_run: bool) -> None:
+    """Append rewrap records for historical payloads under the active key."""
+    from .sync.ids import validate_key_id
+    from .sync.store import ClusterStore
+
+    if from_key_id is not None:
+        validate_key_id(from_key_id)
+    if limit is not None and limit < 1:
+        raise click.ClickException("--limit must be greater than zero.")
+    store = ClusterStore.from_config(ctx.obj["config"])
+    candidates = store.rewrap_candidates(from_key_id=from_key_id)
+    if limit is not None:
+        candidates = candidates[:limit]
+    if dry_run:
+        click.echo(
+            json.dumps(
+                {
+                    "active_key_id": store.secret.active_key_id,
+                    "candidate_count": len(candidates),
+                    "records": [
+                        {
+                            "record_id": record.record_id,
+                            "kind": record.kind,
+                            "namespace": record.namespace,
+                            "node_id": record.node_id,
+                            "key_id": record.data.get("encryption", {}).get("key_id"),
+                        }
+                        for record in candidates
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    written = [store.append_payload_rewrap(record) for record in candidates]
+    click.echo(f"Rewrapped {len(written)} historical payload(s) under {store.secret.active_key_id}")
+
+
+@cluster.command("purge-old-ciphertext")
+@click.option("--key-id", required=True, help="Old key ID to inspect for purge readiness.")
+@click.option("--yes", is_flag=True, help="Acknowledge destructive purge intent.")
+@click.pass_context
+def cluster_purge_old_ciphertext(ctx: click.Context, key_id: str, yes: bool) -> None:
+    """Report old-ciphertext records that have active-key rewrap coverage."""
+    from .sync.ids import validate_key_id
+    from .sync.store import ClusterStore
+
+    validate_key_id(key_id)
+    store = ClusterStore.from_config(ctx.obj["config"])
+    candidates = store.rewrap_candidates(from_key_id=key_id)
+    report = {
+        "key_id": key_id,
+        "active_key_id": store.secret.active_key_id,
+        "unrewrapped_count": len(candidates),
+        "warning": (
+            "Purging old ciphertext is destructive and must include shared transports and backups. "
+            "This command reports readiness only; it does not delete record files."
+        ),
+    }
+    click.echo(json.dumps(report, indent=2, sort_keys=True))
+    if yes:
+        raise click.ClickException(
+            "Automatic old-ciphertext deletion is not implemented; inspect transports/backups manually."
+        )
 
 
 @cluster.group("override")
