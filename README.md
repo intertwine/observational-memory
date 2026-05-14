@@ -11,7 +11,7 @@
 
 Observational Memory gives Claude Code, Codex, Claude Cowork, and Hermes a shared memory that survives session boundaries. It captures what your agents learn, distills it into local markdown, restores the right context at startup, and now exports reviewed seed bundles for hosted platform memory.
 
-Version `0.5.7` adds Windows 10/11 compatibility: `om install` now uses Windows-native paths, Claude hooks, and Task Scheduler integration while preserving the same local markdown memory model across macOS, Linux, and Windows.
+Version `0.6.0` adds OM Cluster: an opt-in sync layer that moves signed, encrypted memory records across machines through untrusted filesystem, relay, or explicit-peer transports while keeping local Markdown views inspectable. It builds on the `0.5.7` Windows compatibility release, which added Windows-native paths, Claude hooks, and Task Scheduler integration.
 
 ```bash
 brew install intertwine/tap/observational-memory
@@ -108,6 +108,35 @@ om doctor
 
 That's it. Your agents now share persistent memory across sessions: plain markdown you can search, inspect, export, and carry into the next platform.
 If it saves you repeated onboarding time, a GitHub star helps more people discover it.
+
+### Sync across machines
+
+OM Cluster is an opt-in sync layer for moving memory between machines without syncing the whole OM data directory. It replicates signed, encrypted, append-only records through untrusted transports, then rebuilds local `observations.md`, `reflections.md`, `profile.md`, and `active.md` on each machine.
+
+```bash
+# First machine, using a shared-folder transport
+om cluster init --name "Personal Memory" --transport filesystem:~/Sync/om-cluster --import-existing
+om cluster invite --expires 10m
+
+# Second machine
+om cluster join "omc1:..."
+
+# Back on an already trusted machine
+om cluster requests
+om cluster approve join_...
+
+# Second machine completes approval and syncs
+om cluster sync
+
+# Anytime
+om cluster status
+```
+
+Do **not** point Syncthing, Dropbox, iCloud Drive, rsync, or a NAS at `~/.local/share/observational-memory/`. Use the filesystem transport directory from `om cluster init` instead. Relay and P2P transports use `relay:https://...` and `p2p:http://peer:port[,http://peer2:port]`. OM Cluster never syncs provider env files, private keys, `.cursor.json`, `.search-index`, `.scheduler-logs`, `.qmd-docs`, or plaintext memory.
+
+Cluster key rotation uses per-node wrapped key epochs, and `om cluster reencrypt` can append new-key historical payload rewrap records after a rotation. Old transport blobs and backups are not deleted automatically.
+
+Cluster sync is disabled until `om cluster init` or `om cluster join` creates local config and keys. See [docs/om-cluster-sync.md](docs/om-cluster-sync.md) for setup, operation, security, redaction caveats, and recovery guidance.
 
 ### Export to platform-native memory
 
@@ -227,6 +256,8 @@ A daily background job runs the reflector at 04:00 local machine time, which:
 4. If they're too large (e.g., after a backfill), automatically chunks by date section and folds each chunk into the reflections incrementally
 5. Merges, promotes (🟡→🔴), demotes, and archives entries
 6. Stamps `Last updated` and `Last reflected` timestamps programmatically
+
+Reflection entries include inline `<!--om: ...-->` metadata for stable entry IDs, kind, `last_seen`, node, and scope. This lets OM distinguish evergreen preferences from decaying snapshot facts and coexist more cleanly with host-agent memory systems. See [docs/coexistence.md](docs/coexistence.md).
 7. Writes the updated `reflections.md`
 8. Trims observations older than 7 days
 

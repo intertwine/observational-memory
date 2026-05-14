@@ -23,6 +23,7 @@ from observational_memory.cli import (
     cli,
 )
 from observational_memory.config import Config
+from observational_memory.sync.config import load_cluster_config
 
 
 @pytest.fixture
@@ -106,6 +107,57 @@ def test_ensure_env_file_skips_chmod_on_windows(windows_env):
     assert config.env_file.exists()
     # No assertion on permission bits — chmod 600 is a no-op on Windows and
     # the file should exist regardless of mode.
+
+
+def test_cluster_init_expands_windows_transport_env_path(windows_env):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "cluster",
+            "init",
+            "--name",
+            "Win Cluster",
+            "--node-alias",
+            "win-node",
+            "--transport",
+            r"filesystem:%LOCALAPPDATA%\OM\cluster",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    cluster_config = load_cluster_config(Config())
+    assert cluster_config is not None
+    assert cluster_config.transports[0].path == str(windows_env["local_appdata"]) + r"\OM\cluster"
+
+
+def test_doctor_warns_for_windows_cluster_key_acl_verification(windows_env, monkeypatch):
+    monkeypatch.setattr(
+        "observational_memory.cli.shutil.which",
+        lambda name: "C:/tools/om.exe" if name == "om" else None,
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "cluster",
+            "init",
+            "--name",
+            "Win Cluster",
+            "--node-alias",
+            "win-node",
+            "--transport",
+            r"filesystem:C:\Users\Bryan\Sync\om-cluster",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    checks = json.loads(result.stdout)
+    key_check = next(item for item in checks if item["name"] == "OM Cluster key permissions")
+    assert key_check["status"] == "WARN"
+    assert "Windows ACL owner-only verification" in key_check["detail"]
 
 
 # --- Scheduler resolution ---

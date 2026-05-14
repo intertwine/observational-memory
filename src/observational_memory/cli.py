@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -176,6 +178,41 @@ def reflect(ctx: click.Context, dry_run: bool) -> None:
             click.echo(result)
     else:
         click.echo("No observations to reflect on.")
+
+
+@cli.command()
+@click.option("--dry-run", is_flag=True, help="Print pruned reflections without writing")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.option("--drop-stale", is_flag=True, help="Drop stale snapshot entries instead of moving them")
+@click.option("--namespace", default=None, help="Reserved for cluster namespace-scoped pruning")
+@click.pass_context
+def prune(ctx: click.Context, dry_run: bool, as_json: bool, drop_stale: bool, namespace: str | None) -> None:
+    """Prune or mark stale reflection snapshot entries."""
+    import json as json_mod
+
+    from .reflect import _reindex_if_enabled
+    from .reflection_metadata import ensure_reflection_metadata, prune_stale_snapshots
+    from .startup_memory import refresh_startup_memory
+
+    config = ctx.obj["config"]
+    if not config.reflections_path.exists():
+        raise click.ClickException("reflections.md does not exist.")
+    action = "drop" if drop_stale else config.snapshot_expiry_action
+    text = ensure_reflection_metadata(config.reflections_path.read_text(), node="local")
+    pruned, summary = prune_stale_snapshots(text, ttl_days=config.snapshot_ttl_days, action=action)
+    if as_json:
+        payload = {**summary.to_dict(), "dry_run": dry_run, "namespace": namespace}
+        click.echo(json_mod.dumps(payload, indent=2, sort_keys=True))
+    elif dry_run:
+        click.echo(pruned, nl=not pruned.endswith("\n"))
+    else:
+        config.reflections_path.write_text(pruned)
+        refresh_startup_memory(config)
+        _reindex_if_enabled(config)
+        click.echo(
+            f"Pruned reflections: {summary.pruned} dropped, "
+            f"{summary.stale_sectioned} moved, {summary.annotated} annotated"
+        )
 
 
 def _maybe_run_reflector_catchup(config: Config) -> None:
@@ -445,6 +482,16 @@ def context(ctx: click.Context) -> None:
     from .startup_memory import ensure_startup_memory
 
     config = ctx.obj["config"]
+    try:
+        from .sync.config import cluster_feature_enabled, load_cluster_config
+        from .sync.engine import sync_cluster
+
+        cluster_config = load_cluster_config(config)
+        if cluster_config and cluster_feature_enabled(config) and cluster_config.sync_before_context:
+            sync_cluster(config, deadline_ms=cluster_config.startup_pull_deadline_ms, pull_only=True)
+    except Exception:
+        pass
+
     ensure_startup_memory(config)
     parts = []
 
@@ -485,6 +532,987 @@ def context(ctx: click.Context) -> None:
             }
         }
         click.echo(json_mod.dumps(output))
+
+
+@cli.group()
+def cluster() -> None:
+    """Manage OM Cluster sync."""
+
+
+@cluster.command("init")
+@click.option("--name", default="Personal Memory", show_default=True, help="Cluster display name")
+@click.option("--node-alias", default=None, help="Local node alias")
+@click.option("--default-namespace", default="personal", show_default=True, help="Default memory namespace")
+@click.option("--transport", multiple=True, help="Transport spec, e.g. filesystem:~/Sync/om-cluster")
+@click.option("--import-existing/--no-import-existing", default=False, help="Import existing Markdown into records")
+@click.option("--force", is_flag=True, help="Overwrite existing cluster config")
+@click.pass_context
+def cluster_init(
+    ctx: click.Context,
+    name: str,
+    node_alias: str | None,
+    default_namespace: str,
+    transport: tuple[str, ...],
+    import_existing: bool,
+    force: bool,
+) -> None:
+    """Initialize a local OM Cluster."""
+    from .sync.config import initialize_cluster_config
+    from .sync.materialize import materialize_cluster_memory
+    from .sync.store import ClusterStore
+
+    config = ctx.obj["config"]
+    transports = [_parse_transport_spec(spec) for spec in transport]
+    try:
+        cluster_config = initialize_cluster_config(
+            config,
+            name=name,
+            node_alias=node_alias,
+            default_namespace=default_namespace,
+            transports=transports,
+            force=force,
+        )
+    except FileExistsError as e:
+        raise click.ClickException(str(e)) from e
+
+    store = ClusterStore.from_config(config)
+    store.ensure_layout()
+    store.append_record(
+        kind="node_membership",
+        namespace=cluster_config.default_namespace,
+        source={"agent": "cluster-init", "host_alias": cluster_config.node_alias},
+        payload={
+            "operation": "add",
+            "node_id": cluster_config.node_id,
+            "alias": cluster_config.node_alias,
+            "signing_public_key": store.keypair.signing_public_key_b64,
+            "encryption_public_key": store.keypair.encryption_public_key_b64,
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    if import_existing:
+        backup = _backup_existing_memory(config)
+        _import_existing_memory(store)
+        materialize_cluster_memory(config, store)
+        click.echo(f"Backed up existing Markdown to {backup}")
+    click.echo(f"Initialized OM Cluster {cluster_config.name} ({cluster_config.id})")
+    click.echo(f"Node: {cluster_config.node_alias} ({cluster_config.node_id})")
+
+
+@cluster.command("invite")
+@click.option("--expires", default="10m", show_default=True, help="Invite lifetime, e.g. 10m, 2h, 1d")
+@click.option(
+    "--mode",
+    type=click.Choice(["request", "trusted-direct"]),
+    default="request",
+    show_default=True,
+    help="Invite mode",
+)
+@click.pass_context
+def cluster_invite(ctx: click.Context, expires: str, mode: str) -> None:
+    """Create an invite token for another machine."""
+    from .sync.config import create_invite_token, load_cluster_config
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    if mode == "trusted-direct":
+        click.echo("Warning: this invite token carries cluster key material. Treat it like a private key.", err=True)
+    else:
+        click.echo("Created request-mode invite. The token does not carry cluster data keys.", err=True)
+    click.echo(create_invite_token(config, cluster_config, expires=expires, mode=mode))
+
+
+@cluster.command("join")
+@click.argument("invite_token")
+@click.option("--node-alias", default=None, help="Local node alias")
+@click.option("--force", is_flag=True, help="Overwrite existing cluster config")
+@click.pass_context
+def cluster_join(ctx: click.Context, invite_token: str, node_alias: str | None, force: bool) -> None:
+    """Join an OM Cluster using an invite token."""
+    from .sync.config import join_cluster_from_invite
+    from .sync.engine import build_transport
+    from .sync.store import ClusterStore, NodeMetadata
+
+    config = ctx.obj["config"]
+    try:
+        cluster_config, invite = join_cluster_from_invite(config, invite_token, node_alias=node_alias, force=force)
+    except (FileExistsError, ValueError) as e:
+        raise click.ClickException(str(e)) from e
+    issuer = invite["body"]
+    join_request = invite.get("join_request")
+    if join_request:
+        for transport_config in cluster_config.transports:
+            transport = build_transport(transport_config)
+            transport.publish_join_request(
+                cluster_config.id,
+                join_request["request_id"],
+                (json_like(join_request) + "\n").encode("utf-8"),
+            )
+        click.echo(f"Created pending OM Cluster join request {join_request['request_id']}")
+        click.echo(f"Cluster: {cluster_config.name} ({cluster_config.id})")
+        click.echo(f"Node: {cluster_config.node_alias} ({cluster_config.node_id})")
+        click.echo("Run `om cluster requests` on a trusted node, then approve this request.")
+        return
+
+    store = ClusterStore.from_config(config)
+    store.ensure_layout()
+    store.write_node_metadata(
+        NodeMetadata(
+            node_id=issuer["issuer_node_id"],
+            alias=issuer["issuer_alias"],
+            signing_public_key_b64=issuer["issuer_signing_public_key_b64"],
+        )
+    )
+    store.append_record(
+        kind="node_membership",
+        namespace=cluster_config.default_namespace,
+        source={"agent": "cluster-join", "host_alias": cluster_config.node_alias},
+        payload={
+            "operation": "add",
+            "node_id": cluster_config.node_id,
+            "alias": cluster_config.node_alias,
+            "signing_public_key": store.keypair.signing_public_key_b64,
+            "encryption_public_key": store.keypair.encryption_public_key_b64,
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "invite": invite,
+        },
+    )
+    click.echo(f"Joined OM Cluster {cluster_config.name} ({cluster_config.id})")
+    click.echo(f"Node: {cluster_config.node_alias} ({cluster_config.node_id})")
+
+
+@cluster.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.pass_context
+def cluster_status(ctx: click.Context, as_json: bool) -> None:
+    """Show cluster status."""
+    import json as json_mod
+
+    from .sync.config import cluster_feature_enabled, load_cluster_config, load_pending_join_state
+    from .sync.store import ClusterStore
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        data = {"initialized": False, "enabled": False}
+    else:
+        pending_state = load_pending_join_state(config, cluster_config.id)
+        try:
+            store = ClusterStore.from_config(config)
+        except FileNotFoundError:
+            data = {
+                "initialized": True,
+                "enabled": False,
+                "cluster": {"id": cluster_config.id, "name": cluster_config.name},
+                "node": {"id": cluster_config.node_id, "alias": cluster_config.node_alias},
+                "join_request": {
+                    "status": (pending_state or {}).get("status", "pending"),
+                    "request_id": (pending_state or {}).get("request_id"),
+                    "reason": (pending_state or {}).get("reason"),
+                },
+                "transports": [transport.to_dict() for transport in cluster_config.transports],
+            }
+            if as_json:
+                click.echo(json_mod.dumps(data, indent=2, sort_keys=True))
+                return
+            click.echo(f"Cluster: {data['cluster']['name']} ({data['cluster']['id']})")
+            click.echo(f"Node: {data['node']['alias']} ({data['node']['id']})")
+            click.echo(f"Join request: {data['join_request']['status']} ({data['join_request']['request_id']})")
+            if data["join_request"].get("reason"):
+                click.echo(f"Reason: {data['join_request']['reason']}")
+            return
+        records = store.list_records(include_tombstoned=True)
+        data = {
+            "initialized": True,
+            "enabled": cluster_feature_enabled(config),
+            "cluster": {"id": cluster_config.id, "name": cluster_config.name},
+            "node": {"id": cluster_config.node_id, "alias": cluster_config.node_alias},
+            "transports": [transport.to_dict() for transport in cluster_config.transports],
+            "heads": store.all_heads(),
+            "peers": {node_id: node.to_dict() for node_id, node in store.public_nodes().items()},
+            "pending_peers": {node_id: node.to_dict() for node_id, node in store.pending_nodes().items()},
+            "records": {
+                "total": len(records),
+                "observations": len([r for r in records if r.kind == "observation"]),
+                "reflection_snapshots": len([r for r in records if r.kind == "reflection_snapshot"]),
+                "manual_overrides": len([r for r in records if r.kind == "manual_override"]),
+                "tombstones": len([r for r in records if r.kind == "tombstone"]),
+            },
+            "materialized": {
+                "observations": config.observations_path.exists(),
+                "reflections": config.reflections_path.exists(),
+                "profile": config.profile_path.exists(),
+                "active": config.active_path.exists(),
+            },
+        }
+        if pending_state:
+            data["join_request"] = {
+                "status": pending_state.get("status"),
+                "request_id": pending_state.get("request_id"),
+                "reason": pending_state.get("reason"),
+            }
+    if as_json:
+        click.echo(json_mod.dumps(data, indent=2, sort_keys=True))
+        return
+    if not data["initialized"]:
+        click.echo("OM Cluster: not initialized")
+        return
+    click.echo(f"Cluster: {data['cluster']['name']} ({data['cluster']['id']})")
+    click.echo(f"Node: {data['node']['alias']} ({data['node']['id']})")
+    click.echo(f"Enabled: {str(data['enabled']).lower()}")
+    click.echo(f"Local records: {data['records']['total']}")
+    click.echo("Heads:")
+    for node_id, seq in data["heads"].items():
+        alias = data["peers"].get(node_id, {}).get("alias", node_id)
+        click.echo(f"  {node_id} {alias} seq={seq}")
+    if data.get("pending_peers"):
+        click.echo("Pending peers:")
+        for node_id, peer in data["pending_peers"].items():
+            click.echo(f"  {node_id} {peer.get('alias', node_id)}")
+    if data.get("join_request"):
+        click.echo(f"Join request: {data['join_request']['status']} ({data['join_request']['request_id']})")
+
+
+@cluster.command("requests")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.pass_context
+def cluster_requests(ctx: click.Context, as_json: bool) -> None:
+    """List pending request-mode join requests visible in configured transports."""
+    import json as json_mod
+
+    from .sync.config import load_cluster_config, verify_join_request
+    from .sync.engine import build_transport
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    requests: dict[str, dict] = {}
+    for transport_config in cluster_config.transports:
+        transport = build_transport(transport_config)
+        for request_id in transport.list_join_requests(cluster_config.id):
+            data = transport.fetch_join_request(cluster_config.id, request_id)
+            if data is None:
+                continue
+            try:
+                request = verify_join_request(json_mod.loads(data.decode("utf-8")), cluster_id=cluster_config.id)
+            except Exception as e:
+                requests[request_id] = {"request_id": request_id, "status": "invalid", "error": str(e)}
+                continue
+            node = request["node"]
+            requests[request_id] = {
+                "request_id": request_id,
+                "status": "pending",
+                "node_id": node["node_id"],
+                "alias": node.get("alias", node["node_id"]),
+                "invite_id": request.get("invite_id"),
+                "requested_at": request.get("requested_at"),
+                "expires_at": request.get("expires_at"),
+            }
+    if as_json:
+        click.echo(json_mod.dumps(list(requests.values()), indent=2, sort_keys=True))
+        return
+    if not requests:
+        click.echo("No join requests.")
+        return
+    for request in requests.values():
+        if request["status"] == "invalid":
+            click.echo(f"{request['request_id']} invalid: {request['error']}")
+        else:
+            click.echo(
+                f"{request['request_id']} pending {request['alias']} ({request['node_id']}) "
+                f"expires={request['expires_at']}"
+            )
+
+
+@cluster.command("approve")
+@click.argument("request_id")
+@click.pass_context
+def cluster_approve(ctx: click.Context, request_id: str) -> None:
+    """Approve a request-mode join request."""
+    _complete_join_request(ctx, request_id, approve=True, reason="")
+
+
+@cluster.command("reject")
+@click.argument("request_id")
+@click.option("--reason", default="manual-reject", show_default=True, help="Rejection reason")
+@click.pass_context
+def cluster_reject(ctx: click.Context, request_id: str, reason: str) -> None:
+    """Reject a request-mode join request."""
+    _complete_join_request(ctx, request_id, approve=False, reason=reason)
+
+
+def _complete_join_request(ctx: click.Context, request_id: str, *, approve: bool, reason: str) -> None:
+    import json as json_mod
+
+    from .sync.config import (
+        create_join_approval,
+        create_join_rejection,
+        load_cluster_config,
+        verify_join_request,
+    )
+    from .sync.engine import build_transport, sync_cluster
+    from .sync.store import ClusterStore
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    store = ClusterStore.from_config(config)
+    request = None
+    transports = [build_transport(transport_config) for transport_config in cluster_config.transports]
+    for transport in transports:
+        data = transport.fetch_join_request(cluster_config.id, request_id)
+        if data is None:
+            continue
+        try:
+            request = verify_join_request(json_mod.loads(data.decode("utf-8")), cluster_id=cluster_config.id)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
+        break
+    if request is None:
+        raise click.ClickException(f"No join request found for {request_id}")
+
+    if approve:
+        node = request["node"]
+        record = store.append_record(
+            kind="node_membership",
+            namespace=store.cluster_config.default_namespace,
+            source={"agent": "cluster-approve", "host_alias": store.cluster_config.node_alias},
+            payload={
+                "operation": "add",
+                "node_id": node["node_id"],
+                "alias": node.get("alias", node["node_id"]),
+                "signing_public_key": node["signing_public_key_b64"],
+                "encryption_public_key": node.get("encryption_public_key_b64"),
+                "approved_by_node_id": store.cluster_config.node_id,
+                "request_id": request_id,
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+        )
+        approval = create_join_approval(
+            config,
+            cluster_config,
+            request=request,
+            membership_record_id=record.record_id,
+            approved_by_node_id=store.cluster_config.node_id,
+        )
+        sync_cluster(config, materialize=False)
+    else:
+        record = None
+        approval = create_join_rejection(config, cluster_config, request=request, reason=reason)
+
+    payload = (json_mod.dumps(approval, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    for transport in transports:
+        transport.publish_join_approval(cluster_config.id, request_id, payload)
+    if approve and record is not None:
+        click.echo(f"Approved {request_id} with membership record {record.record_id}")
+    else:
+        click.echo(f"Rejected {request_id}")
+
+
+@cluster.command("peers")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.pass_context
+def cluster_peers(ctx: click.Context, as_json: bool) -> None:
+    """List trusted cluster peers."""
+    import json as json_mod
+
+    from .sync.store import ClusterStore
+
+    store = ClusterStore.from_config(ctx.obj["config"])
+    peers = [node.to_dict() for node in store.public_nodes().values()]
+    if as_json:
+        click.echo(json_mod.dumps(peers, indent=2, sort_keys=True))
+        return
+    for peer in peers:
+        revoked = " revoked" if peer.get("revoked") else ""
+        click.echo(f"{peer['node_id']} {peer['alias']}{revoked}")
+
+
+@cluster.group("namespace")
+def cluster_namespace() -> None:
+    """Manage cluster namespaces."""
+
+
+@cluster_namespace.command("list")
+@click.pass_context
+def cluster_namespace_list(ctx: click.Context) -> None:
+    from .sync.config import load_cluster_config
+
+    cluster_config = load_cluster_config(ctx.obj["config"])
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    namespaces = {cluster_config.default_namespace}
+    namespaces.update(rule.namespace for rule in cluster_config.namespace_rules)
+    for namespace in sorted(namespaces):
+        default = " (default)" if namespace == cluster_config.default_namespace else ""
+        click.echo(f"{namespace}{default}")
+
+
+@cluster_namespace.command("add")
+@click.argument("namespace")
+@click.pass_context
+def cluster_namespace_add(ctx: click.Context, namespace: str) -> None:
+    from .sync.config import NamespaceRule, load_cluster_config, write_cluster_config
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    if namespace in {cluster_config.default_namespace, *[rule.namespace for rule in cluster_config.namespace_rules]}:
+        click.echo(f"Namespace already exists: {namespace}")
+        return
+    updated = replace(
+        cluster_config,
+        namespace_rules=[*cluster_config.namespace_rules, NamespaceRule(namespace=namespace)],
+    )
+    write_cluster_config(config, updated)
+    click.echo(f"Added namespace {namespace}")
+
+
+@cluster_namespace.command("remove")
+@click.argument("namespace")
+@click.pass_context
+def cluster_namespace_remove(ctx: click.Context, namespace: str) -> None:
+    from .sync.config import load_cluster_config, write_cluster_config
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    if namespace == cluster_config.default_namespace:
+        raise click.ClickException("Cannot remove the default namespace.")
+    rules = [rule for rule in cluster_config.namespace_rules if rule.namespace != namespace]
+    write_cluster_config(config, replace(cluster_config, namespace_rules=rules))
+    click.echo(f"Removed namespace {namespace}")
+
+
+@cluster.group("source-policy")
+def cluster_source_policy() -> None:
+    """Manage source-to-namespace policies."""
+
+
+@cluster_source_policy.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.pass_context
+def cluster_source_policy_list(ctx: click.Context, as_json: bool) -> None:
+    import json as json_mod
+
+    from .sync.config import load_cluster_config
+
+    cluster_config = load_cluster_config(ctx.obj["config"])
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    rules = [rule.__dict__ for rule in cluster_config.namespace_rules]
+    if as_json:
+        click.echo(json_mod.dumps(rules, indent=2, sort_keys=True))
+        return
+    for index, rule in enumerate(rules, 1):
+        filters = ", ".join(f"{key}={value}" for key, value in rule.items() if key != "namespace" and value)
+        click.echo(f"{index}. {rule['namespace']} {filters}".rstrip())
+
+
+@cluster_source_policy.command("add")
+@click.option("--agent", default=None, help="Agent/source name to match")
+@click.option("--git-remote", "git_remote_hash", default=None, help="Hashed git remote/project ID to match")
+@click.option("--path-contains", default=None, help="Local path substring for future local-only routing")
+@click.option("--namespace", required=True, help="Destination namespace")
+@click.option("--local-only", is_flag=True, help="Mark this rule as local-only")
+@click.pass_context
+def cluster_source_policy_add(
+    ctx: click.Context,
+    agent: str | None,
+    git_remote_hash: str | None,
+    path_contains: str | None,
+    namespace: str,
+    local_only: bool,
+) -> None:
+    from .sync.config import NamespaceRule, load_cluster_config, write_cluster_config
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    rule = NamespaceRule(
+        source=agent,
+        path_contains=path_contains,
+        git_remote_hash=git_remote_hash,
+        namespace=namespace,
+        local_only=local_only,
+    )
+    write_cluster_config(config, replace(cluster_config, namespace_rules=[*cluster_config.namespace_rules, rule]))
+    click.echo(f"Added source policy for namespace {namespace}")
+
+
+@cluster.command("sync")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.option("--no-materialize", is_flag=True, help="Do not rebuild Markdown after pull")
+@click.pass_context
+def cluster_sync(ctx: click.Context, as_json: bool, no_materialize: bool) -> None:
+    """Sync records through configured transports."""
+    import json as json_mod
+
+    from .sync.engine import sync_cluster
+
+    summary = sync_cluster(ctx.obj["config"], materialize=not no_materialize)
+    if as_json:
+        click.echo(json_mod.dumps(summary.to_dict(), indent=2, sort_keys=True))
+        return
+    click.echo(f"Pulled {summary.pulled} record(s)")
+    click.echo(f"Pushed {summary.pushed} record(s)")
+    if summary.rejected:
+        click.echo(f"Rejected {summary.rejected} record(s)")
+    if summary.materialized:
+        click.echo("Materialized observations.md, reflections.md, profile.md, active.md")
+
+
+@cluster.command("materialize")
+@click.option("--no-reindex", is_flag=True, help="Skip search reindex")
+@click.pass_context
+def cluster_materialize(ctx: click.Context, no_reindex: bool) -> None:
+    """Rebuild local Markdown views from records."""
+    from .sync.materialize import materialize_cluster_memory
+    from .sync.store import ClusterStore
+
+    config = ctx.obj["config"]
+    summary = materialize_cluster_memory(config, ClusterStore.from_config(config), reindex=not no_reindex)
+    click.echo("Materialized cluster memory" if summary.any_written else "Materialized files already current")
+
+
+@cluster.command("provenance")
+@click.argument("query_or_record_id")
+@click.pass_context
+def cluster_provenance(ctx: click.Context, query_or_record_id: str) -> None:
+    """Inspect record provenance by ID or plaintext query over local records."""
+    from .sync.store import ClusterStore
+
+    store = ClusterStore.from_config(ctx.obj["config"])
+    matches = []
+    for record in store.list_records(include_tombstoned=True):
+        payload = store.read_payload(record)
+        if query_or_record_id == record.record_id or query_or_record_id.lower() in json_like(payload).lower():
+            matches.append((record, payload))
+    if not matches:
+        click.echo("No matching records.")
+        return
+    for record, payload in matches:
+        source = record.data.get("source", {})
+        click.echo(f"Record: {record.record_id}")
+        click.echo(f"Kind: {record.kind}")
+        click.echo(f"Namespace: {record.namespace}")
+        click.echo(f"Node: {source.get('host_alias', record.node_id)} ({record.node_id})")
+        click.echo(f"Agent: {source.get('agent', 'unknown')}")
+        if source.get("project"):
+            click.echo(f"Project: {source['project']}")
+        if source.get("transcript_id"):
+            click.echo(f"Transcript: {source['transcript_id']}")
+        click.echo(f"Payload hash: {record.payload_hash}")
+        if len(matches) > 1:
+            click.echo("")
+
+
+@cluster.command("redact")
+@click.option("--record", "record_id", required=True, help="Record ID to tombstone")
+@click.option("--reason", default="user-redaction", show_default=True, help="Redaction reason")
+@click.pass_context
+def cluster_redact(ctx: click.Context, record_id: str, reason: str) -> None:
+    """Create a tombstone for a record."""
+    from .sync.materialize import materialize_cluster_memory
+    from .sync.store import ClusterStore
+
+    config = ctx.obj["config"]
+    store = ClusterStore.from_config(config)
+    tombstone = store.append_record(
+        kind="tombstone",
+        namespace=store.cluster_config.default_namespace,
+        source={"agent": "manual", "host_alias": store.cluster_config.node_alias},
+        payload={
+            "target_record_id": record_id,
+            "reason": reason,
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    materialize_cluster_memory(config, store)
+    click.echo(f"Created tombstone {tombstone.record_id}")
+
+
+@cluster.command("revoke")
+@click.argument("node_id")
+@click.option("--reason", default="manual-revoke", show_default=True, help="Revocation reason")
+@click.pass_context
+def cluster_revoke(ctx: click.Context, node_id: str, reason: str) -> None:
+    """Revoke a peer for future records."""
+    from .sync.store import ClusterStore
+
+    store = ClusterStore.from_config(ctx.obj["config"])
+    record = store.append_record(
+        kind="node_membership",
+        namespace=store.cluster_config.default_namespace,
+        source={"agent": "manual", "host_alias": store.cluster_config.node_alias},
+        payload={
+            "operation": "revoke",
+            "node_id": node_id,
+            "reason": reason,
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    click.echo(f"Revoked {node_id} with record {record.record_id}")
+
+
+@cluster.command("rotate-key")
+@click.pass_context
+def cluster_rotate_key(ctx: click.Context) -> None:
+    """Rotate the cluster data key for future records."""
+    import secrets
+
+    from .sync.crypto import wrap_key_for_node
+    from .sync.store import ClusterStore, new_data_key_b64
+
+    store = ClusterStore.from_config(ctx.obj["config"])
+    key_id = f"key_{store.cluster_config.node_id}_{secrets.token_hex(8)}"
+    data_key_b64 = new_data_key_b64()
+    recipients = []
+    excluded = []
+    for node in store.public_nodes().values():
+        if node.revoked:
+            excluded.append(node.node_id)
+            continue
+        if not node.encryption_public_key_b64:
+            excluded.append(node.node_id)
+            continue
+        recipients.append(
+            {
+                "node_id": node.node_id,
+                "wrapped_key": wrap_key_for_node(
+                    data_key_b64,
+                    node.encryption_public_key_b64,
+                    aad=f"{store.cluster_config.id}:{key_id}".encode("utf-8"),
+                ),
+            }
+        )
+    if not any(recipient["node_id"] == store.cluster_config.node_id for recipient in recipients):
+        raise click.ClickException("Local node has no encryption public key for key epoch rotation.")
+    record = store.append_record(
+        kind="key_epoch",
+        namespace=store.cluster_config.default_namespace,
+        source={"agent": "manual", "host_alias": store.cluster_config.node_alias},
+        payload={
+            "epoch": len(store.secret.data_keys) + 1,
+            "key_id": key_id,
+            "recipients": recipients,
+            "excluded_nodes": excluded,
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    click.echo(f"Rotated cluster data key to {key_id} with record {record.record_id}")
+
+
+@cluster.command("reencrypt")
+@click.option("--from-key", "from_key_id", default=None, help="Only rewrap records encrypted with this key ID.")
+@click.option("--limit", type=int, default=None, help="Maximum records to rewrap in this run.")
+@click.option("--dry-run", is_flag=True, help="Report records that would be rewrapped without writing records.")
+@click.pass_context
+def cluster_reencrypt(ctx: click.Context, from_key_id: str | None, limit: int | None, dry_run: bool) -> None:
+    """Append rewrap records for historical payloads under the active key."""
+    from .sync.ids import validate_key_id
+    from .sync.store import ClusterStore
+
+    if from_key_id is not None:
+        validate_key_id(from_key_id)
+    if limit is not None and limit < 1:
+        raise click.ClickException("--limit must be greater than zero.")
+    store = ClusterStore.from_config(ctx.obj["config"])
+    candidates = store.rewrap_candidates(from_key_id=from_key_id)
+    if limit is not None:
+        candidates = candidates[:limit]
+    if dry_run:
+        click.echo(
+            json.dumps(
+                {
+                    "active_key_id": store.secret.active_key_id,
+                    "candidate_count": len(candidates),
+                    "records": [
+                        {
+                            "record_id": record.record_id,
+                            "kind": record.kind,
+                            "namespace": record.namespace,
+                            "node_id": record.node_id,
+                            "key_id": record.data.get("encryption", {}).get("key_id"),
+                        }
+                        for record in candidates
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    written = [store.append_payload_rewrap(record) for record in candidates]
+    click.echo(f"Rewrapped {len(written)} historical payload(s) under {store.secret.active_key_id}")
+
+
+@cluster.command("purge-old-ciphertext")
+@click.option("--key-id", required=True, help="Old key ID to inspect for purge readiness.")
+@click.option("--yes", is_flag=True, help="Acknowledge destructive purge intent.")
+@click.pass_context
+def cluster_purge_old_ciphertext(ctx: click.Context, key_id: str, yes: bool) -> None:
+    """Report old-ciphertext records that have active-key rewrap coverage."""
+    from .sync.ids import validate_key_id
+    from .sync.store import ClusterStore
+
+    validate_key_id(key_id)
+    store = ClusterStore.from_config(ctx.obj["config"])
+    candidates = store.rewrap_candidates(from_key_id=key_id)
+    report = {
+        "key_id": key_id,
+        "active_key_id": store.secret.active_key_id,
+        "unrewrapped_count": len(candidates),
+        "warning": (
+            "Purging old ciphertext is destructive and must include shared transports and backups. "
+            "This command reports readiness only; it does not delete record files."
+        ),
+    }
+    click.echo(json.dumps(report, indent=2, sort_keys=True))
+    if yes:
+        raise click.ClickException(
+            "Automatic old-ciphertext deletion is not implemented; inspect transports/backups manually."
+        )
+
+
+@cluster.group("p2p")
+def cluster_p2p() -> None:
+    """Inspect optional direct peer transport configuration."""
+
+
+@cluster_p2p.command("peers")
+@click.pass_context
+def cluster_p2p_peers(ctx: click.Context) -> None:
+    """List configured direct peer endpoints."""
+    from .sync.config import load_cluster_config
+
+    cluster_config = load_cluster_config(ctx.obj["config"])
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    peers = []
+    for transport in cluster_config.transports:
+        if transport.type == "p2p" and transport.path:
+            peers.extend([peer for peer in transport.path.split(",") if peer])
+    click.echo(json.dumps({"peers": peers}, indent=2, sort_keys=True))
+
+
+@cluster_p2p.command("status")
+@click.pass_context
+def cluster_p2p_status(ctx: click.Context) -> None:
+    """Show direct peer transport status without authorizing peers."""
+    from .sync.config import load_cluster_config
+
+    cluster_config = load_cluster_config(ctx.obj["config"])
+    if cluster_config is None:
+        raise click.ClickException("OM Cluster is not initialized.")
+    peer_count = sum(
+        len([peer for peer in transport.path.split(",") if peer])
+        for transport in cluster_config.transports
+        if transport.type == "p2p" and transport.path
+    )
+    click.echo(
+        json.dumps(
+            {
+                "configured": peer_count > 0,
+                "peer_count": peer_count,
+                "trust_note": "Direct peer reachability does not grant OM Cluster membership.",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@cluster.group("override")
+def cluster_override() -> None:
+    """Manage profile/active manual override records."""
+
+
+@cluster_override.command("add")
+@click.option("--target", type=click.Choice(["profile", "active"]), required=True)
+@click.option("--section", required=True)
+@click.option("--body", required=True)
+@click.pass_context
+def cluster_override_add(ctx: click.Context, target: str, section: str, body: str) -> None:
+    ctx.invoke(cluster_override_set, target=target, section=section, body=body)
+
+
+@cluster_override.command("set")
+@click.option("--target", type=click.Choice(["profile", "active"]), required=True)
+@click.option("--section", required=True)
+@click.option("--body", required=True)
+@click.pass_context
+def cluster_override_set(ctx: click.Context, target: str, section: str, body: str) -> None:
+    from .sync.materialize import materialize_cluster_memory
+    from .sync.store import ClusterStore
+
+    config = ctx.obj["config"]
+    store = ClusterStore.from_config(config)
+    record = store.append_record(
+        kind="manual_override",
+        namespace=store.cluster_config.default_namespace,
+        source={"agent": "manual", "host_alias": store.cluster_config.node_alias},
+        payload={"target": target, "section": section, "operation": "upsert", "body": body},
+    )
+    materialize_cluster_memory(config, store)
+    click.echo(f"Set override {target}:{section} with record {record.record_id}")
+
+
+@cluster_override.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.pass_context
+def cluster_override_list(ctx: click.Context, as_json: bool) -> None:
+    import json as json_mod
+
+    from .sync.store import ClusterStore
+
+    store = ClusterStore.from_config(ctx.obj["config"])
+    rows = []
+    for record in store.list_records(kind="manual_override"):
+        payload = store.read_payload(record)
+        rows.append(
+            {
+                "record_id": record.record_id,
+                "target": payload.get("target"),
+                "section": payload.get("section"),
+                "operation": payload.get("operation", "upsert"),
+                "namespace": record.namespace,
+                "hlc": record.hlc,
+            }
+        )
+    if as_json:
+        click.echo(json_mod.dumps(rows, indent=2, sort_keys=True))
+        return
+    for row in rows:
+        click.echo(f"{row['record_id']} {row['operation']} {row['target']}:{row['section']}")
+
+
+@cluster_override.command("get")
+@click.option("--target", type=click.Choice(["profile", "active"]), required=True)
+@click.option("--section", required=True)
+@click.pass_context
+def cluster_override_get(ctx: click.Context, target: str, section: str) -> None:
+    from .sync.store import ClusterStore
+
+    store = ClusterStore.from_config(ctx.obj["config"])
+    matches = []
+    for record in store.list_records(kind="manual_override"):
+        payload = store.read_payload(record)
+        if payload.get("target") == target and payload.get("section") == section:
+            matches.append((record, payload))
+    if not matches:
+        raise click.ClickException(f"No override found for {target}:{section}")
+    record, payload = max(matches, key=lambda row: (row[0].hlc, row[0].record_id))
+    if payload.get("operation") == "remove":
+        raise click.ClickException(f"Override removed for {target}:{section}")
+    click.echo(str(payload.get("body") or ""))
+
+
+@cluster_override.command("remove")
+@click.argument("override_record_id", required=False)
+@click.option("--target", type=click.Choice(["profile", "active"]), default=None)
+@click.option("--section", default=None)
+@click.pass_context
+def cluster_override_remove(
+    ctx: click.Context,
+    override_record_id: str | None,
+    target: str | None,
+    section: str | None,
+) -> None:
+    if override_record_id:
+        ctx.invoke(cluster_redact, record_id=override_record_id, reason="override-removed")
+        return
+    if not target or not section:
+        raise click.ClickException("Pass an override_record_id or --target and --section.")
+    from .sync.materialize import materialize_cluster_memory
+    from .sync.store import ClusterStore
+
+    config = ctx.obj["config"]
+    store = ClusterStore.from_config(config)
+    record = store.append_record(
+        kind="manual_override",
+        namespace=store.cluster_config.default_namespace,
+        source={"agent": "manual", "host_alias": store.cluster_config.node_alias},
+        payload={"target": target, "section": section, "operation": "remove"},
+    )
+    materialize_cluster_memory(config, store)
+    click.echo(f"Removed override {target}:{section} with record {record.record_id}")
+
+
+def _parse_transport_spec(spec: str):
+    from .sync.config import TransportConfig
+
+    kind, sep, value = spec.partition(":")
+    if not sep or kind not in {"filesystem", "relay", "p2p"} or not value:
+        raise click.ClickException("Use filesystem:PATH, relay:URL, or p2p:URL[,URL...].")
+    if kind == "filesystem":
+        return TransportConfig(type="filesystem", path=_expand_transport_path(value))
+    urls = [url.strip() for url in value.split(",") if url.strip()]
+    if not urls or any(not url.startswith(("http://", "https://")) for url in urls):
+        raise click.ClickException(f"{kind} transports must use HTTP(S) peer URLs.")
+    return TransportConfig(type=kind, path=",".join(urls))
+
+
+def _expand_transport_path(value: str) -> str:
+    if sys.platform == "win32":
+        import re
+
+        value = re.sub(r"%([^%]+)%", lambda match: os.environ.get(match.group(1), match.group(0)), value)
+    return os.path.expandvars(os.path.expanduser(value))
+
+
+def _backup_existing_memory(config: Config) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = config.memory_dir / "backups" / f"cluster-init-{timestamp}"
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    for path in (config.observations_path, config.reflections_path, config.profile_path, config.active_path):
+        if path.exists():
+            shutil.copy2(path, backup_dir / path.name)
+    return backup_dir
+
+
+def _import_existing_memory(store) -> None:
+    config = store.config
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    if config.observations_path.exists() and config.observations_path.read_text().strip():
+        store.append_record(
+            kind="observation",
+            namespace=store.cluster_config.default_namespace,
+            source={"agent": "legacy-local-import", "host_alias": store.cluster_config.node_alias},
+            payload={
+                "format": "markdown",
+                "body": config.observations_path.read_text(),
+                "observed_at": now,
+                "message_count": 0,
+                "retention": "recent",
+            },
+        )
+    if config.reflections_path.exists() and config.reflections_path.read_text().strip():
+        store.append_record(
+            kind="reflection_snapshot",
+            namespace=store.cluster_config.default_namespace,
+            source={"agent": "legacy-local-import", "host_alias": store.cluster_config.node_alias},
+            payload={
+                "format": "markdown",
+                "body": config.reflections_path.read_text(),
+                "frontier": store.records_frontier(),
+                "input_record_ids": [record.record_id for record in store.list_records(kind="observation")],
+                "base_snapshot_ids": [],
+            },
+        )
+
+
+def json_like(value) -> str:
+    import json as json_mod
+
+    return json_mod.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
 @cli.command(name="export")
@@ -1852,7 +2880,58 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         else:
             _check("Cron jobs", "WARN", "no observational-memory background jobs found", fix="Run: om install")
 
-    # 14. Platform
+    # 14. Cluster sync diagnostics
+    try:
+        from .sync.config import cluster_feature_enabled, load_cluster_config
+        from .sync.permissions import verify_private_path_owner_only
+        from .sync.store import ClusterStore
+
+        cluster_config = load_cluster_config(config)
+        if cluster_config is None:
+            _check("OM Cluster", "WARN", "not initialized", fix="Run: om cluster init")
+        else:
+            enabled = cluster_feature_enabled(config)
+            _check("OM Cluster", "PASS" if enabled else "WARN", "enabled" if enabled else "configured but disabled")
+            key_dir = config.cluster_keys_dir / cluster_config.id
+            permission_results = [
+                verify_private_path_owner_only(config.cluster_keys_dir, directory=True),
+                verify_private_path_owner_only(key_dir, directory=True),
+                verify_private_path_owner_only(key_dir / "node.json", directory=False),
+                verify_private_path_owner_only(key_dir / "cluster.key", directory=False),
+            ]
+            failures = [result for result in permission_results if result.status == "FAIL"]
+            warnings = [result for result in permission_results if result.status == "WARN"]
+            if failures:
+                _check(
+                    "OM Cluster key permissions",
+                    "FAIL",
+                    "; ".join(result.detail for result in failures),
+                    fix=failures[0].fix,
+                )
+            elif warnings:
+                _check(
+                    "OM Cluster key permissions",
+                    "WARN",
+                    "; ".join(result.detail for result in warnings),
+                )
+            else:
+                _check("OM Cluster key permissions", "PASS", "private key paths are owner-only")
+            store = ClusterStore.from_config(config)
+            records = store.list_records(include_tombstoned=True)
+            _check("OM Cluster local records", "PASS", f"{len(records)} record(s), heads: {store.all_heads()}")
+            for transport in cluster_config.transports:
+                if transport.type == "filesystem" and transport.path:
+                    path = Path(transport.path).expanduser()
+                    _check(
+                        f"OM Cluster transport {transport.type}",
+                        "PASS" if path.exists() else "WARN",
+                        str(path),
+                        fix=f"Create transport directory: {path}",
+                    )
+    except Exception as e:
+        _check("OM Cluster", "WARN", f"diagnostics failed: {e}")
+
+    # 15. Platform
     _check("Platform", "PASS", sys.platform)
 
     # Output

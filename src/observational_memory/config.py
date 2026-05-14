@@ -185,6 +185,10 @@ class Config:
     # Reflector settings
     observation_retention_days: int = 7
     reflections_target_lines: int = 400  # aim for 200-600
+    snapshot_ttl_days: int = field(default_factory=lambda: int(os.environ.get("OM_SNAPSHOT_TTL_DAYS", "14")))
+    snapshot_expiry_action: str = field(
+        default_factory=lambda: os.environ.get("OM_SNAPSHOT_EXPIRY_ACTION", "stale-section")
+    )
 
     # Search settings
     search_backend: str = field(
@@ -219,6 +223,18 @@ class Config:
     @property
     def search_index_dir(self) -> Path:
         return self.memory_dir / ".search-index"
+
+    @property
+    def cluster_config_path(self) -> Path:
+        return self.env_file.parent / "cluster.toml"
+
+    @property
+    def cluster_keys_dir(self) -> Path:
+        return self.env_file.parent / "cluster-keys"
+
+    @property
+    def clusters_dir(self) -> Path:
+        return self.memory_dir / "clusters"
 
     @property
     def codex_agents_md(self) -> Path:
