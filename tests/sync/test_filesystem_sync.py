@@ -475,6 +475,9 @@ def test_cli_init_status_materialize(isolated_om_home):
     assert status["initialized"] is True
     assert status["node"]["alias"] == "cli-node"
     assert status["pending_peers"] == {}
+    assert status["transport_diagnostics"][0]["type"] == "filesystem"
+    assert status["review_artifacts"]["reflection_conflicts"]["count"] == 0
+    assert "Transport filesystem is unreachable" in status["remediation"][0]
 
     store = ClusterStore.from_config(Config())
     pending = NodeMetadata(
@@ -496,6 +499,36 @@ def test_cli_init_status_materialize(isolated_om_home):
 
     result = runner.invoke(cli, ["cluster", "materialize", "--no-reindex"])
     assert result.exit_code == 0, result.output
+
+
+def test_pending_peer_metadata_is_removed_after_filesystem_approval(tmp_path):
+    shared = tmp_path / "shared"
+    config_a = _node_config(tmp_path, "a")
+    cluster_a = initialize_cluster_config(
+        config_a,
+        name="Cluster",
+        node_alias="node-a",
+        transports=[TransportConfig(type="filesystem", path=str(shared))],
+    )
+    store_a = ClusterStore.from_config(config_a)
+    store_a.ensure_layout()
+    _membership(store_a)
+    invite_token = create_invite_token(config_a, cluster_a, expires="1h", mode="trusted-direct")
+
+    config_b = _node_config(tmp_path, "b")
+    _cluster_b, invite = join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
+    store_b = ClusterStore.from_config(config_b)
+    store_b.ensure_layout()
+    _membership(store_b, invite=invite)
+
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+    sync_cluster(config_b)
+    sync_cluster(config_a)
+
+    store_a = ClusterStore.from_config(config_a)
+    assert store_b.cluster_config.node_id in store_a.public_nodes()
+    assert store_b.cluster_config.node_id not in store_a.pending_nodes()
 
 
 def test_cli_namespace_source_policy_and_override_semantics(isolated_om_home):

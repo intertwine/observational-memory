@@ -1,6 +1,6 @@
 # OM Cluster Post-0.6 Hardening Plan
 
-Status: follow-up plan after the 0.6.0 release and dogfood validation.
+Status: implemented hardening plan for issues #44-#47 after the 0.6.0 release and dogfood validation.
 
 ## Context
 
@@ -29,10 +29,20 @@ Resolved in 0.6.0:
 
 Remaining from #41 and the agent comments:
 
-- Legacy metadata migration stamps missing `last_seen` with the current time, not source file mtime, so it loses some historical age signal.
-- Host-memory coexistence lacks executable controls such as disabling or narrowing generated profile/identity sections.
-- Cluster reflection merge still chooses a best snapshot and passes competing snapshots to the reflector; it does not yet surface entry-level conflicts as first-class review artifacts.
-- Metadata does not yet model actionability, sensitivity, provenance type, confidence, `last_verified`, `expires`, reinforcement count, or a distinct working-mode temporal class.
+- Workstream 6 remains future work: write-side review/feedback loops for end-of-session memory deltas.
+
+Implemented in this hardening pass:
+
+- `om context` now emits a deterministic, budgeted startup payload with cwd/task/agent routing metadata, overflow handles, and recall hints.
+- `om recall` expands startup handles and exposes search-backed mid-session retrieval for CLI and plugin use.
+- Reflection metadata now supports richer fields (`source_type`, `confidence`, `sensitivity`, `actionability`, `last_verified`, `expires`, `seen_count`) and a `mode` kind while preserving unknown fields.
+- Legacy metadata migration can use source file mtime as a better `last_seen` signal when invoked from file-based pruning.
+- Generated profile sections can be narrowed with `OM_PROFILE_INCLUDE_IDENTITY=0` or `OM_PROFILE_SECTIONS=...`.
+- `scope=local` reflection entries are stripped from shared cluster reflection snapshots and hidden when remote host-local entries are encountered.
+- Non-snapshot conflicts are written to `clusters/<cluster-id>/review/reflection-conflicts.{json,md}` and surfaced by `om cluster status --json`.
+- A supported stdlib relay server is packaged as `om-relay` and `om cluster relay serve`, with `om cluster relay health` and artifact secrecy scanning.
+- `om cluster status --json` now includes transport diagnostics, review artifacts, remediation text, and pending-peer cleanup for approved peers.
+- Public-safe repeatable validation guidance lives in `docs/om-cluster-validation.md`.
 
 ## Workstream 1 - Startup Context Budgeting And Recall
 
@@ -49,10 +59,10 @@ Goals:
 
 Acceptance criteria:
 
-- `om context` never emits unbounded startup text by default.
-- Tests cover budget boundaries, overflow summaries, and generated expansion handles.
-- Search/retrieval remains available for deeper memory without loading everything at session start.
-- Documentation explains compact startup, expansion, and recall behavior for Codex, Claude Code, Cowork, and Hermes.
+- Done: `om context` never emits unbounded startup text by default.
+- Done: Tests cover budget boundaries, overflow summaries, and generated expansion handles.
+- Done: `om recall` keeps search/retrieval available for deeper memory without loading everything at session start.
+- Done: Documentation explains compact startup, expansion, and recall behavior for Codex, Claude Code, Cowork, and Hermes.
 
 ## Workstream 2 - Richer Memory Metadata And Conflict Surfacing
 
@@ -69,10 +79,10 @@ Goals:
 
 Acceptance criteria:
 
-- Metadata round-trip tests cover old and new fields.
-- Snapshot, evergreen, preference, policy, identity, task, decision, and mode entries have documented semantics.
-- Conflicting non-snapshot entries produce an inspectable conflict artifact or status item instead of being silently merged.
-- Tests cover two-node conflicting reflection snapshots and verify operator-visible conflict output.
+- Done: Metadata round-trip tests cover old and new fields plus unknown-field preservation.
+- Done: Snapshot, evergreen, preference, policy, identity, task, decision, and mode semantics are documented in `docs/coexistence.md`.
+- Done: Conflicting non-snapshot entries produce inspectable conflict artifacts and status items.
+- Done: Tests cover conflicting reflection snapshots and verify operator-visible conflict output.
 
 ## Workstream 3 - Host-Memory Controls
 
@@ -88,9 +98,9 @@ Goals:
 
 Acceptance criteria:
 
-- Users can disable or narrow profile/identity generation without disabling observations, reflections, search, or cluster sync.
-- Host-local entries do not become cluster-shared memory accidentally.
-- Docs include conflict precedence and practical setup examples.
+- Done: Users can disable or narrow profile/identity generation without disabling observations, reflections, search, recall, or cluster sync.
+- Done: Host-local entries are filtered before shared cluster reflection snapshots and hidden if encountered from remote nodes.
+- Done: Docs include conflict precedence and practical setup examples.
 
 ## Workstream 4 - Production Relay And Transport Operations
 
@@ -107,10 +117,10 @@ Goals:
 
 Acceptance criteria:
 
-- A supported command can run the relay without copying a fixture script.
-- Operators can install, start, stop, inspect, and upgrade the relay predictably.
-- Relay health checks verify storage, endpoints, version, and no plaintext/private-key artifacts.
-- Tests exercise relay failure modes and preserve local-first behavior when relay is down.
+- Done: Supported commands can run the relay without copying a fixture script: `om-relay` and `om cluster relay serve`.
+- Done: Operators can install, start, stop, inspect, and upgrade the relay predictably with documented systemd/launchd examples.
+- Done: Relay health checks verify storage, endpoint version, and no obvious plaintext/private-key artifacts.
+- Done: Tests exercise relay outage/malformed data and preserve local-first behavior when relay is down.
 
 ## Workstream 5 - Cluster Diagnostics And UX Polish
 
@@ -126,10 +136,10 @@ Goals:
 
 Acceptance criteria:
 
-- Approved peers no longer appear as pending in normal converged status.
-- Tests cover pending-to-approved cleanup for filesystem and relay transports.
-- Status output distinguishes unknown transport metadata from actionable pending requests.
-- CLI messages remain safe for public logs and do not print secrets.
+- Done: Approved peers no longer appear as pending in normal converged status.
+- Done: Tests cover pending-to-approved cleanup for filesystem and relay transports.
+- Done: Status output distinguishes pending peers, join request state, review artifacts, and transport reachability.
+- Done: CLI messages remain safe for public logs and do not print secrets.
 
 ## Workstream 6 - Write-Side Review And Agent Feedback
 
@@ -164,9 +174,9 @@ Goals:
 
 Acceptance criteria:
 
-- Public docs describe what to validate without exposing private hostnames, IPs, or operator paths.
-- Local-only operator skill exists outside tracked files for machine-specific dogfood validation.
-- A fresh session can run the validation path from the checklist and produce comparable evidence.
+- Done: Public docs describe what to validate without exposing private hostnames, IPs, or operator paths.
+- Deferred/local: machine-specific dogfood commands belong in a local-only skill outside tracked files.
+- Done: A fresh session can run the validation path from the checklist and produce comparable evidence.
 
 ## Suggested Issue Split
 

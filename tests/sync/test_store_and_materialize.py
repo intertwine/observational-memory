@@ -341,6 +341,52 @@ def test_tombstoned_reflection_snapshot_is_not_selected(tmp_path):
     assert selected.record_id == older.record_id
 
 
+def test_materialize_writes_conflict_artifact_for_non_snapshot_disagreements(tmp_path):
+    config, store = _init_store(tmp_path)
+    store.append_record(
+        kind="reflection_snapshot",
+        namespace="personal",
+        source={"agent": "reflector", "host_alias": "node-a"},
+        payload={
+            "format": "markdown",
+            "body": (
+                "# Reflections\n\n"
+                "## Preferences & Opinions\n"
+                "- Prefers terse reports "
+                "<!--om: id=ome_a kind=preference actionability=medium node=node_a scope=cluster-->"
+            ),
+            "frontier": {"node_a": 1},
+            "input_record_ids": [],
+            "base_snapshot_ids": [],
+        },
+    )
+    store.append_record(
+        kind="reflection_snapshot",
+        namespace="personal",
+        source={"agent": "reflector", "host_alias": "node-b"},
+        payload={
+            "format": "markdown",
+            "body": (
+                "# Reflections\n\n"
+                "## Preferences & Opinions\n"
+                "- Prefers detailed reports "
+                "<!--om: id=ome_b kind=preference actionability=medium node=node_b scope=cluster-->"
+            ),
+            "frontier": {"node_b": 1},
+            "input_record_ids": [],
+            "base_snapshot_ids": [],
+        },
+    )
+
+    materialize_cluster_memory(config, store)
+
+    conflict_path = store.cluster_dir / "review" / "reflection-conflicts.json"
+    assert conflict_path.exists()
+    conflicts = json.loads(conflict_path.read_text())
+    assert conflicts["count"] == 1
+    assert conflicts["conflicts"][0]["kind"] == "preference"
+
+
 def test_reflection_catchup_uses_observation_frontier_only(tmp_path):
     _config, store = _init_store(tmp_path)
     first = store.append_record(

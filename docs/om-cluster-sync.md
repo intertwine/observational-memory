@@ -117,7 +117,16 @@ om cluster override add --target profile --section communication_style --body "P
 om cluster redact --record sha256_...
 ```
 
-Reflection conflicts are handled as snapshots with frontiers and inline entry metadata. Snapshot entries use `last_seen` to prefer newer state; evergreen entries are preserved by union/deduplication until the next reflector pass can reconcile them; entries marked `scope=local` are treated as host-local materialization rather than cluster-shared memory.
+Reflection conflicts are handled as snapshots with frontiers and inline entry metadata. Snapshot entries use `last_seen` to prefer newer state; evergreen entries are preserved by union/deduplication until the next reflector pass can reconcile them; entries marked `scope=local` are removed from shared cluster reflection snapshots and hidden when they arrive from another node.
+
+Non-snapshot conflicts are surfaced as review artifacts instead of being silently smoothed away. If policy, preference, identity, decision, mode, or high-actionability entries disagree across reflection snapshots, materialization writes:
+
+```text
+~/.local/share/observational-memory/clusters/<cluster-id>/review/reflection-conflicts.json
+~/.local/share/observational-memory/clusters/<cluster-id>/review/reflection-conflicts.md
+```
+
+`om cluster status --json` reports the conflict count under `review_artifacts.reflection_conflicts` and includes public-safe remediation text.
 
 ## Namespaces, Source Policies, And Overrides
 
@@ -157,7 +166,46 @@ om cluster init --name "Personal Memory" --transport relay:https://relay.example
 
 The relay stores signed/encrypted records, heads, public node metadata, join requests, and join approvals only. It never receives cluster data keys, node private keys, provider env files, generated Markdown, or plaintext memory. Relay access control can prevent abuse, but relay access is not cluster trust; local nodes still verify membership, signatures, revocation, tombstones, key epochs, and payload hashes exactly as they do with filesystem transport.
 
-The base install uses the stdlib relay client and does not require a relay server dependency. Relay operator responsibilities include retention, availability, metadata exposure, and backup cleanup during compromise recovery.
+The base install includes a supported stdlib relay server; no heavyweight dependency is required:
+
+```bash
+om-relay --storage-dir /var/lib/om-relay --host 127.0.0.1 --port 8765
+om cluster relay serve --storage-dir /var/lib/om-relay --host 127.0.0.1 --port 8765
+om cluster relay health http://127.0.0.1:8765 --artifact-dir /var/lib/om-relay --json
+```
+
+Relay operator responsibilities include retention, availability, metadata exposure, and backup cleanup during compromise recovery. The `relay health` command checks reachability, relay version/storage metadata, and scans relay artifacts for obvious plaintext secrets such as provider keys, node private keys, request secrets, or `data_keys`.
+
+Example systemd unit:
+
+```ini
+[Unit]
+Description=OM Cluster relay
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/om-relay --storage-dir /var/lib/om-relay --host 127.0.0.1 --port 8765
+Restart=on-failure
+User=om-relay
+Group=om-relay
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Example launchd program arguments:
+
+```xml
+<array>
+  <string>/usr/local/bin/om-relay</string>
+  <string>--storage-dir</string>
+  <string>/usr/local/var/om-relay</string>
+  <string>--host</string>
+  <string>127.0.0.1</string>
+  <string>--port</string>
+  <string>8765</string>
+</array>
+```
 
 Direct P2P uses explicit peer URLs:
 

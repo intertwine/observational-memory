@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from observational_memory.config import Config
+from observational_memory.reflection_metadata import (
+    filter_reflection_entries_for_host,
+    find_reflection_conflicts,
+)
 from observational_memory.startup_memory import refresh_startup_memory
 
 from .atomic import DirectoryLock, atomic_write_text
@@ -51,11 +56,12 @@ def materialize_cluster_memory(config: Config, store: ClusterStore, *, reindex: 
         active_written = _prepend_generated_header(config.active_path)
         profile_written = _apply_overrides(config.profile_path, store, "profile") or profile_written
         active_written = _apply_overrides(config.active_path, store, "active") or active_written
+        conflicts_written = _write_conflict_artifacts(store)
 
         summary = MaterializeSummary(
             observations_written=observations_written,
             reflections_written=reflections_written,
-            profile_written=profile_written,
+            profile_written=profile_written or conflicts_written,
             active_written=active_written,
             catchup_needed=catchup_needed,
         )
@@ -136,8 +142,56 @@ def _render_reflections(store: ClusterStore) -> tuple[str | None, bool]:
     body = str(payload.get("body", "")).strip()
     if not body:
         return None, catchup_needed
+    body = filter_reflection_entries_for_host(body, local_node=store.cluster_config.node_id).strip()
     note = "\n\n<!-- Cluster reflection catch-up needed: local observations exceed selected snapshot frontier. -->"
     return GENERATED_HEADER + body + (note if catchup_needed else "") + "\n", catchup_needed
+
+
+def _write_conflict_artifacts(store: ClusterStore) -> bool:
+    snapshots: list[tuple[str, str, str]] = []
+    for record in store.list_records(kind="reflection_snapshot"):
+        try:
+            payload = store.read_payload(record)
+        except Exception:
+            continue
+        snapshots.append((record.record_id, record.node_id, str(payload.get("body") or "")))
+    conflicts = find_reflection_conflicts(snapshots)
+    review_dir = store.cluster_dir / "review"
+    json_path = review_dir / "reflection-conflicts.json"
+    md_path = review_dir / "reflection-conflicts.md"
+    if not conflicts:
+        changed = False
+        for path in (json_path, md_path):
+            if path.exists():
+                path.unlink()
+                changed = True
+        return changed
+    review_dir.mkdir(parents=True, exist_ok=True)
+    data = {
+        "schema": "om.reflection_conflicts.v1",
+        "count": len(conflicts),
+        "conflicts": [conflict.to_dict() for conflict in conflicts],
+    }
+    markdown = _render_conflicts_markdown(conflicts)
+    return _write_if_changed(json_path, json.dumps(data, indent=2, sort_keys=True) + "\n") or _write_if_changed(
+        md_path,
+        markdown,
+    )
+
+
+def _render_conflicts_markdown(conflicts) -> str:
+    lines = [
+        "# OM Cluster Reflection Conflicts",
+        "",
+        "These non-snapshot memory entries disagree across cluster reflection snapshots and need operator review.",
+        "",
+    ]
+    for conflict in conflicts:
+        lines.extend([f"## {conflict.section} ({conflict.kind})", ""])
+        for entry in conflict.entries:
+            lines.append(f"- `{entry['record_id']}` `{entry['node']}` {entry['text']}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _apply_overrides(path: Path, store: ClusterStore, target: str) -> bool:

@@ -17,6 +17,10 @@ class RelayTransport:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 
+    def health(self) -> dict:
+        data = self._get_json("/healthz")
+        return data if isinstance(data, dict) else {"ok": False, "error": "invalid health response"}
+
     def list_heads(self, cluster_id: str) -> dict[str, int]:
         data = self._get_json(f"/v1/clusters/{_q_cluster(cluster_id)}/heads")
         if not isinstance(data, dict):

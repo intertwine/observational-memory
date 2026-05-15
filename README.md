@@ -187,7 +187,7 @@ Claude Code, Codex, and Cowork feed the same local memory, start from compact co
 
 ### Claude Code integration
 
-**SessionStart hook:** On session start, `om context` injects compact derived startup files (`profile.md` + `active.md`) via `additionalContext`. If those files are missing, it regenerates them from reflections/observations. If `om` is unavailable, the shell fallback still supports the older full-file dump behavior.
+**SessionStart hook:** On session start, `om context` injects a budgeted startup pack via `additionalContext`. The pack is built from generated `profile.md` and `active.md` materialized views, includes routing metadata, and emits recall handles for anything omitted from the default budget. If those files are missing, it regenerates them from reflections/observations. If `om` is unavailable, the shell fallback still supports the older full-file dump behavior.
 
 **SessionEnd hook:** When a session ends, the observer runs on that transcript and compresses it into observations.
 
@@ -208,11 +208,11 @@ All hooks are installed automatically to `~/.claude/settings.json`.
 
 ### Codex CLI integration
 
-**Hooks-first startup:** `om install --codex` enables Codex's hooks feature in `~/.codex/config.toml` (`[features].hooks = true`). During Codex's feature-flag rename, it also keeps the legacy `[features].codex_hooks = true` alias enabled for older Codex CLI releases. The installer then adds a global `SessionStart` hook in `~/.codex/hooks.json`. That hook runs `om context`, which injects compact derived startup files (`profile.md` + `active.md`) directly into the Codex session.
+**Hooks-first startup:** `om install --codex` enables Codex's hooks feature in `~/.codex/config.toml` (`[features].hooks = true`). During Codex's feature-flag rename, it also keeps the legacy `[features].codex_hooks = true` alias enabled for older Codex CLI releases. The installer then adds a global `SessionStart` hook in `~/.codex/hooks.json`. That hook runs `om context`, which injects a bounded startup pack directly into the Codex session. Agent integrations can route the pack with `om context --cwd "$PWD" --task "..." --for codex --budget-chars 24000`.
 
 **Hooks-first checkpointing:** The installer also adds a global `Stop` hook in `~/.codex/hooks.json`. At turn end, that hook queues a transcript-specific checkpoint for the active Codex transcript, so `om` can observe only the current session instead of rescanning all recent sessions.
 
-**AGENTS fallback:** The installer still maintains `~/.codex/AGENTS.md`, but only as a conditional fallback. If hooks are unavailable or disabled, AGENTS tells Codex to read `profile.md` and `active.md` manually before substantial work. Deeper memory remains available through `om search`, `reflections.md`, and `observations.md`.
+**AGENTS fallback:** The installer still maintains `~/.codex/AGENTS.md`, but only as a conditional fallback. If hooks are unavailable or disabled, AGENTS tells Codex to read `profile.md` and `active.md` manually before substantial work. Deeper memory remains available through `om recall`, `om search`, `reflections.md`, and `observations.md`.
 
 **Scheduler backstop:** A background job still runs every 15 minutes by default, scans `~/.codex/sessions/` for new transcript data (`*.json` and `*.jsonl`), and compresses it into observations. On macOS that backstop uses launchd by default; elsewhere it uses cron. This is now the safety net rather than the primary path, which helps when hooks are unavailable or a session exits before `Stop` fires.
 
@@ -222,7 +222,7 @@ Because Codex hooks are still experimental, keeping the AGENTS fallback and sche
 
 **Local plugin:** `om install --cowork` copies a bundled plugin to `~/Library/Application Support/Claude/local-agent-mode-plugins/observational-memory/`. The plugin follows the current Claude plugin layout with `.claude-plugin/plugin.json`, `version.json`, `hooks/hooks.json`, a skill, and a `/recall` command.
 
-**SessionStart hook:** When a Cowork session starts, the plugin runs `om context` and injects compact derived startup files (`profile.md` + `active.md`) as additional context.
+**SessionStart hook:** When a Cowork session starts, the plugin runs `om context` and injects the same budgeted startup pack and recall handles as additional context.
 
 **SessionEnd / checkpoint hooks:** Cowork `SessionEnd`, `UserPromptSubmit`, and `PreCompact` hooks run `om observe --source cowork` for the active `audit.jsonl` transcript. In-session checkpoints use the same throttle variables as Claude Code hooks.
 
@@ -246,6 +246,20 @@ om observe --transcript ~/.hermes/sessions/session-123.jsonl --source hermes
 
 **Current scope:** Hermes support is transcript ingestion plus shared-memory compatibility. `om install` does not currently install Hermes hooks or a Hermes-specific scheduler backstop, so Hermes is a manual or integration-driven input path rather than a first-class installer target.
 
+### Startup Recall
+
+`om context` is budgeted by default so startup context does not grow without bound. The generated `profile.md` and `active.md` files remain the readable materialized views, but startup injection may omit lower-priority sections and list expansion handles instead.
+
+Useful recall commands:
+
+```bash
+om recall --handle startup:profile
+om recall --handle startup:active:active-projects
+om recall --query "current OM Cluster hardening work" --limit 8
+```
+
+Hosts and plugins can pass `--cwd`, `--task`, and `--for` to both `context` and `recall` so project/task-specific chunks rank ahead of unrelated durable context. Generated overflow handles are deterministic, so an agent can expand exactly the omitted section without loading all memory.
+
 ### Reflector
 
 A daily background job runs the reflector at 04:00 local machine time, which:
@@ -257,7 +271,7 @@ A daily background job runs the reflector at 04:00 local machine time, which:
 5. Merges, promotes (🟡→🔴), demotes, and archives entries
 6. Stamps `Last updated` and `Last reflected` timestamps programmatically
 
-Reflection entries include inline `<!--om: ...-->` metadata for stable entry IDs, kind, `last_seen`, node, and scope. This lets OM distinguish evergreen preferences from decaying snapshot facts and coexist more cleanly with host-agent memory systems. See [docs/coexistence.md](docs/coexistence.md).
+Reflection entries include inline `<!--om: ...-->` metadata for stable entry IDs, kind, `source_type`, `confidence`, `sensitivity`, `actionability`, `last_seen`, optional verification/expiry fields, node, and scope. This lets OM distinguish evergreen preferences, policy/identity rules, working modes, and decaying snapshot facts while coexisting more cleanly with host-agent memory systems. See [docs/coexistence.md](docs/coexistence.md).
 7. Writes the updated `reflections.md`
 8. Trims observations older than 7 days
 

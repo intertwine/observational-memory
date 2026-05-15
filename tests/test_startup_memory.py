@@ -2,6 +2,7 @@
 
 from observational_memory.config import Config
 from observational_memory.startup_memory import (
+    build_startup_payload,
     ensure_startup_memory,
     refresh_startup_memory,
 )
@@ -98,3 +99,37 @@ def test_ensure_startup_memory_refreshes_missing_files(tmp_path):
 
     assert config.profile_path.exists()
     assert config.active_path.exists()
+
+
+def test_build_startup_payload_prioritizes_task_matching_context(tmp_path):
+    config = Config(memory_dir=tmp_path / "memory")
+    config.ensure_memory_dir()
+    config.reflections_path.write_text(
+        REFLECTIONS
+        + "\n## Creative & Professional\n"
+        + "- "
+        + ("album artwork detail " * 400)
+        + "\n"
+    )
+    config.observations_path.write_text(OBSERVATIONS)
+
+    payload = build_startup_payload(config, budget_chars=2200, cwd="/tmp/observational-memory", task="Workbench MCP")
+
+    assert len(payload.text) <= 2200
+    assert "Workbench MCP" in payload.text
+    assert payload.overflow
+    assert "om recall --handle" in payload.text or "om recall --query" in payload.text
+
+
+def test_profile_identity_can_be_disabled_with_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("OM_PROFILE_INCLUDE_IDENTITY", "0")
+    config = Config(memory_dir=tmp_path / "memory")
+    config.ensure_memory_dir()
+    config.reflections_path.write_text(REFLECTIONS)
+    config.observations_path.write_text(OBSERVATIONS)
+
+    refresh_startup_memory(config)
+
+    profile = config.profile_path.read_text()
+    assert "## Core Identity" not in profile
+    assert "## Preferences & Opinions" in profile

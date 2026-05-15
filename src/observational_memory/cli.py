@@ -198,7 +198,10 @@ def prune(ctx: click.Context, dry_run: bool, as_json: bool, drop_stale: bool, na
     if not config.reflections_path.exists():
         raise click.ClickException("reflections.md does not exist.")
     action = "drop" if drop_stale else config.snapshot_expiry_action
-    text = ensure_reflection_metadata(config.reflections_path.read_text(), node="local")
+    from datetime import datetime, timezone
+
+    source_mtime = datetime.fromtimestamp(config.reflections_path.stat().st_mtime, tz=timezone.utc)
+    text = ensure_reflection_metadata(config.reflections_path.read_text(), node="local", source_mtime=source_mtime)
     pruned, summary = prune_stale_snapshots(text, ttl_days=config.snapshot_ttl_days, action=action)
     if as_json:
         payload = {**summary.to_dict(), "dry_run": dry_run, "namespace": namespace}
@@ -469,17 +472,26 @@ def _format_location(path: str | None, line: int | None) -> str | None:
 
 
 @cli.command(hidden=True)
+@click.option("--budget-chars", type=int, help="Maximum startup context characters to emit.")
+@click.option("--cwd", "routing_cwd", help="Current working directory for task-aware startup routing.")
+@click.option("--task", help="Current task summary for task-aware startup routing.")
+@click.option("--for", "agent", help="Host agent name, e.g. codex, claude, cowork, hermes.")
 @click.pass_context
-def context(ctx: click.Context) -> None:
-    """Generate session-start JSON with search-backed memory retrieval.
+def context(
+    ctx: click.Context,
+    budget_chars: int | None,
+    routing_cwd: str | None,
+    task: str | None,
+    agent: str | None,
+) -> None:
+    """Generate session-start JSON with budgeted startup memory.
 
     Called by the SessionStart hook. Outputs JSON with additionalContext
-    containing full reflections + search results (or full observations as fallback).
+    containing compact generated memory and recall handles.
     """
     import json as json_mod
 
-    from .search import get_backend
-    from .startup_memory import ensure_startup_memory
+    from .startup_memory import build_startup_payload
 
     config = ctx.obj["config"]
     try:
@@ -492,46 +504,87 @@ def context(ctx: click.Context) -> None:
     except Exception:
         pass
 
-    ensure_startup_memory(config)
-    parts = []
-
-    if config.profile_path.exists() and config.profile_path.stat().st_size > 0:
-        parts.append(config.profile_path.read_text())
-
-    if config.active_path.exists() and config.active_path.stat().st_size > 0:
-        parts.append(config.active_path.read_text())
-
-    # Backward-compatible fallback for older installs if derived files are unavailable.
-    if not parts:
-        if config.reflections_path.exists() and config.reflections_path.stat().st_size > 0:
-            parts.append("## Long-Term Memory (Reflections)\n\n" + config.reflections_path.read_text())
-
-        observations_added = False
-        backend = get_backend(config.search_backend, config)
-        if backend.is_ready():
-            results = backend.search("recent context current tasks projects", limit=10)
-            if results:
-                obs_parts = []
-                for r in results:
-                    if r.document.source.value == "observations":
-                        obs_parts.append(r.document.content)
-                if obs_parts:
-                    parts.append("## Recent Observations\n\n" + "\n\n".join(obs_parts))
-                    observations_added = True
-
-        if not observations_added:
-            if config.observations_path.exists() and config.observations_path.stat().st_size > 0:
-                parts.append("## Recent Observations\n\n" + config.observations_path.read_text())
-
-    if parts:
-        context_text = "\n\n---\n\n".join(parts)
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": context_text,
-            }
+    payload = build_startup_payload(config, budget_chars=budget_chars, cwd=routing_cwd, task=task, agent=agent)
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": payload.text,
         }
-        click.echo(json_mod.dumps(output))
+    }
+    click.echo(json_mod.dumps(output))
+
+
+@cli.command()
+@click.option("--query", help="Search query for deeper memory recall.")
+@click.option("--handle", help="Expansion handle from `om context`, e.g. startup:active:active-projects.")
+@click.option("--limit", default=8, show_default=True, help="Maximum search results.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.option("--cwd", "routing_cwd", help="Current working directory to include in recall routing metadata.")
+@click.option("--task", help="Current task summary to include in recall routing metadata.")
+@click.option("--for", "agent", help="Host agent name, e.g. codex, claude, cowork, hermes.")
+@click.pass_context
+def recall(
+    ctx: click.Context,
+    query: str | None,
+    handle: str | None,
+    limit: int,
+    as_json: bool,
+    routing_cwd: str | None,
+    task: str | None,
+    agent: str | None,
+) -> None:
+    """Recall deeper memory by search query or startup expansion handle."""
+    import json as json_mod
+
+    from .search import get_backend
+    from .startup_memory import recall_handle
+
+    if not query and not handle:
+        raise click.UsageError("Provide --query or --handle.")
+
+    config = ctx.obj["config"]
+    output: dict[str, object] = {
+        "query": query,
+        "handle": handle,
+        "cwd": routing_cwd,
+        "task": task,
+        "agent": agent,
+        "results": [],
+    }
+    if handle:
+        try:
+            text = recall_handle(config, handle)
+        except KeyError as e:
+            raise click.ClickException(f"Unknown recall handle: {handle}") from e
+        output["text"] = text
+        if not query:
+            if as_json:
+                click.echo(json_mod.dumps(output, indent=2, sort_keys=True))
+            else:
+                click.echo(text.rstrip())
+            return
+
+    backend = get_backend(config.search_backend, config)
+    results = backend.search(query or "", limit=limit) if backend.is_ready() else []
+    payloads = [_search_result_payload(result) for result in results]
+    output["results"] = payloads
+    if as_json:
+        click.echo(json_mod.dumps(output, indent=2, sort_keys=True))
+        return
+    if handle and output.get("text"):
+        click.echo(str(output["text"]).rstrip())
+        click.echo()
+        click.echo("---")
+        click.echo()
+    if not payloads:
+        click.echo("No recall results.")
+        return
+    for item in payloads:
+        location = _format_location(item.get("source_path"), item.get("source_line"))  # type: ignore[arg-type]
+        suffix = f" ({location})" if location else ""
+        click.echo(f"[{item['rank']}] {item['heading'] or item['doc_id']}{suffix}")
+        click.echo(str(item["content"]).rstrip())
+        click.echo()
 
 
 @cli.group()
@@ -724,15 +777,18 @@ def cluster_status(ctx: click.Context, as_json: bool) -> None:
                 click.echo(f"Reason: {data['join_request']['reason']}")
             return
         records = store.list_records(include_tombstoned=True)
+        pending_peers = _visible_pending_peers(store)
         data = {
             "initialized": True,
             "enabled": cluster_feature_enabled(config),
             "cluster": {"id": cluster_config.id, "name": cluster_config.name},
             "node": {"id": cluster_config.node_id, "alias": cluster_config.node_alias},
             "transports": [transport.to_dict() for transport in cluster_config.transports],
+            "transport_diagnostics": _transport_diagnostics(cluster_config),
             "heads": store.all_heads(),
             "peers": {node_id: node.to_dict() for node_id, node in store.public_nodes().items()},
-            "pending_peers": {node_id: node.to_dict() for node_id, node in store.pending_nodes().items()},
+            "pending_peers": pending_peers,
+            "review_artifacts": _cluster_review_artifacts(store),
             "records": {
                 "total": len(records),
                 "observations": len([r for r in records if r.kind == "observation"]),
@@ -753,6 +809,7 @@ def cluster_status(ctx: click.Context, as_json: bool) -> None:
                 "request_id": pending_state.get("request_id"),
                 "reason": pending_state.get("reason"),
             }
+        data["remediation"] = _cluster_remediation(data)
     if as_json:
         click.echo(json_mod.dumps(data, indent=2, sort_keys=True))
         return
@@ -771,8 +828,151 @@ def cluster_status(ctx: click.Context, as_json: bool) -> None:
         click.echo("Pending peers:")
         for node_id, peer in data["pending_peers"].items():
             click.echo(f"  {node_id} {peer.get('alias', node_id)}")
+    if data.get("remediation"):
+        click.echo("Remediation:")
+        for item in data["remediation"]:
+            click.echo(f"  - {item}")
     if data.get("join_request"):
         click.echo(f"Join request: {data['join_request']['status']} ({data['join_request']['request_id']})")
+
+
+def _visible_pending_peers(store) -> dict[str, dict]:
+    approved = set(store.public_nodes())
+    return {node_id: node.to_dict() for node_id, node in store.pending_nodes().items() if node_id not in approved}
+
+
+def _cluster_review_artifacts(store) -> dict[str, object]:
+    conflict_path = store.cluster_dir / "review" / "reflection-conflicts.json"
+    if not conflict_path.exists():
+        return {"reflection_conflicts": {"count": 0, "path": None}}
+    try:
+        data = json.loads(conflict_path.read_text())
+        count = int(data.get("count", 0))
+    except Exception:
+        count = -1
+    return {"reflection_conflicts": {"count": count, "path": str(conflict_path)}}
+
+
+def _transport_diagnostics(cluster_config) -> list[dict[str, object]]:
+    diagnostics: list[dict[str, object]] = []
+    for transport in cluster_config.transports:
+        item: dict[str, object] = {"type": transport.type, "path": transport.path, "reachable": None}
+        try:
+            if transport.type == "filesystem" and transport.path:
+                path = Path(transport.path).expanduser()
+                item.update(
+                    {"reachable": path.exists(), "writable": os.access(path, os.W_OK) if path.exists() else False}
+                )
+            elif transport.type == "relay" and transport.path:
+                from .sync.transports.relay import RelayTransport
+
+                health = RelayTransport(transport.path, timeout_seconds=2.0).health()
+                item.update({"reachable": bool(health.get("ok")), "health": health})
+            elif transport.type == "p2p" and transport.path:
+                item.update({"reachable": None, "message": "P2P reachability is checked during sync."})
+        except Exception as e:
+            item.update({"reachable": False, "last_error": str(e)})
+        diagnostics.append(item)
+    return diagnostics
+
+
+def _cluster_remediation(data: dict) -> list[str]:
+    items: list[str] = []
+    if data.get("pending_peers"):
+        items.append(
+            "Inspect pending public node metadata with `om cluster status --json`; "
+            "approve only request-mode joins you recognize."
+        )
+    join_request = data.get("join_request")
+    if isinstance(join_request, dict) and join_request.get("status") == "pending":
+        items.append(
+            "This node is waiting for approval; ask an existing member to run "
+            "`om cluster requests` and `om cluster approve`."
+        )
+    for transport in data.get("transport_diagnostics", []):
+        if isinstance(transport, dict) and transport.get("reachable") is False:
+            items.append(
+                f"Transport {transport.get('type')} is unreachable; verify relay service, shared directory, "
+                "or network access."
+            )
+    review = data.get("review_artifacts")
+    if isinstance(review, dict):
+        conflicts = review.get("reflection_conflicts")
+        if isinstance(conflicts, dict) and conflicts.get("count", 0):
+            items.append(f"Review reflection conflicts at {conflicts.get('path')}.")
+    return items
+
+
+@cluster.group("relay")
+def cluster_relay() -> None:
+    """Run and inspect an OM Cluster relay."""
+
+
+@cluster_relay.command("serve")
+@click.option("--storage-dir", required=True, type=click.Path(path_type=Path), help="Relay artifact directory.")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind host.")
+@click.option("--port", default=8765, show_default=True, type=int, help="Bind port.")
+def cluster_relay_serve(storage_dir: Path, host: str, port: int) -> None:
+    """Run the supported file-backed relay server."""
+    from .sync.relay_server import serve_relay
+
+    server = serve_relay(storage_dir, host=host, port=port)
+    bind_host, bind_port = server.server_address
+    click.echo(f"OM Cluster relay serving http://{bind_host}:{bind_port} storage={storage_dir}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+@cluster_relay.command("health")
+@click.argument("url", required=False)
+@click.option("--artifact-dir", type=click.Path(path_type=Path), help="Local relay artifact directory to scan.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def cluster_relay_health(ctx: click.Context, url: str | None, artifact_dir: Path | None, as_json: bool) -> None:
+    """Check relay reachability and artifact secrecy."""
+    import json as json_mod
+
+    from .sync.config import load_cluster_config
+    from .sync.relay_server import scan_relay_artifacts
+    from .sync.transports.relay import RelayTransport
+
+    config = ctx.obj["config"]
+    cluster_config = load_cluster_config(config)
+    urls = [url] if url else []
+    if not urls and cluster_config:
+        urls = [
+            transport.path
+            for transport in cluster_config.transports
+            if transport.type == "relay" and transport.path
+        ]
+    checks = []
+    for relay_url in urls:
+        try:
+            checks.append({"url": relay_url, **RelayTransport(relay_url).health()})
+        except Exception as e:
+            checks.append({"url": relay_url, "ok": False, "error": str(e)})
+    artifact_scan = scan_relay_artifacts(artifact_dir) if artifact_dir else None
+    payload = {"checks": checks, "artifact_scan": artifact_scan, "ok": all(item.get("ok") for item in checks)}
+    if artifact_scan is not None:
+        payload["ok"] = bool(payload["ok"] and artifact_scan["ok"])
+    if as_json:
+        click.echo(json_mod.dumps(payload, indent=2, sort_keys=True))
+        return
+    if not checks and artifact_scan is None:
+        click.echo("No relay URL or artifact directory configured.")
+        return
+    for item in checks:
+        status = "ok" if item.get("ok") else "failed"
+        click.echo(f"{item['url']}: {status}")
+        if item.get("error"):
+            click.echo(f"  error: {item['error']}")
+    if artifact_scan is not None:
+        status = "ok" if artifact_scan["ok"] else "failed"
+        click.echo(f"artifact scan: {status} ({artifact_scan['file_count']} files)")
 
 
 @cluster.command("requests")

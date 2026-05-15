@@ -561,13 +561,15 @@ def _run_cluster_reflector(config: Config, dry_run: bool = False) -> str | None:
 
     base_snapshot_ids = [selected_snapshot.record_id] if selected_snapshot else []
     frontier = frontier_join(observation_frontier, selected_frontier)
+    from .reflection_metadata import filter_reflection_entries_for_cluster
+
     store.append_record(
         kind="reflection_snapshot",
         namespace=store.cluster_config.default_namespace,
         source={"agent": "reflector", "host_alias": store.cluster_config.node_alias},
         payload={
             "format": "markdown",
-            "body": result,
+            "body": filter_reflection_entries_for_cluster(result),
             "frontier": frontier,
             "input_record_ids": [record.record_id for record in observations],
             "base_snapshot_ids": base_snapshot_ids,

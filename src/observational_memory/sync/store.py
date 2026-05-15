@@ -396,6 +396,9 @@ class ClusterStore:
             self._node_metadata_path(self.nodes_dir, metadata.node_id),
             json.dumps(metadata.to_dict(), indent=2, sort_keys=True) + "\n",
         )
+        pending_path = self._node_metadata_path(self.pending_nodes_dir, metadata.node_id)
+        if pending_path.exists():
+            pending_path.unlink()
 
     def import_node_metadata_bytes(self, data: bytes) -> bool:
         try:
@@ -403,6 +406,9 @@ class ClusterStore:
         except Exception:
             return False
         if metadata.node_id in self.public_nodes():
+            pending_path = self._node_metadata_path(self.pending_nodes_dir, metadata.node_id)
+            if pending_path.exists():
+                pending_path.unlink()
             return False
         # Public metadata alone is not trust. Keep it separate so diagnostics can
         # show pending/unknown nodes without authorizing their records.

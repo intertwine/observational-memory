@@ -11,6 +11,7 @@ from observational_memory.sync.config import (
 )
 from observational_memory.sync.engine import sync_cluster
 from observational_memory.sync.materialize import materialize_cluster_memory
+from observational_memory.sync.relay_server import scan_relay_artifacts, serve_relay
 from observational_memory.sync.store import ClusterStore
 
 
@@ -86,6 +87,118 @@ def test_two_nodes_converge_over_relay_transport(tmp_path):
         assert b"relay memory from B" not in relay_bytes
         assert b"signing_private_key_b64" not in relay_bytes
         assert b"data_keys" not in relay_bytes
+
+
+def test_pending_peer_metadata_is_removed_after_relay_approval(tmp_path):
+    with _relay_server() as relay:
+        config_a = _node_config(tmp_path, "a")
+        cluster_a = initialize_cluster_config(
+            config_a,
+            name="Cluster",
+            node_alias="node-a",
+            transports=[TransportConfig(type="relay", path=relay.url)],
+        )
+        store_a = ClusterStore.from_config(config_a)
+        store_a.ensure_layout()
+        _membership(store_a)
+        invite_token = create_invite_token(config_a, cluster_a, expires="1h", mode="trusted-direct")
+
+        config_b = _node_config(tmp_path, "b")
+        _cluster_b, invite = join_cluster_from_invite(config_b, invite_token, node_alias="node-b")
+        store_b = ClusterStore.from_config(config_b)
+        store_b.ensure_layout()
+        _membership(store_b, invite=invite)
+
+        sync_cluster(config_b)
+        sync_cluster(config_a)
+        sync_cluster(config_b)
+        sync_cluster(config_a)
+
+        store_a = ClusterStore.from_config(config_a)
+        assert store_b.cluster_config.node_id in store_a.public_nodes()
+        assert store_b.cluster_config.node_id not in store_a.pending_nodes()
+
+
+def test_supported_relay_server_health_and_secret_scan(tmp_path):
+    storage = tmp_path / "relay"
+    server = serve_relay(storage, host="127.0.0.1", port=0)
+    host, port = server.server_address
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config_a = _node_config(tmp_path, "a")
+        cluster_a = initialize_cluster_config(
+            config_a,
+            name="Cluster",
+            node_alias="node-a",
+            transports=[TransportConfig(type="relay", path=f"http://{host}:{port}")],
+        )
+        store_a = ClusterStore.from_config(config_a)
+        store_a.ensure_layout()
+        _membership(store_a)
+        store_a.append_record(
+            kind="observation",
+            namespace="personal",
+            source={"agent": "codex", "host_alias": "node-a"},
+            payload={"format": "markdown", "body": "- server relay memory", "observed_at": "2026-05-08T12:00:00Z"},
+        )
+
+        summary = sync_cluster(config_a)
+
+        assert summary.transports[0].error is None
+        scan = scan_relay_artifacts(storage)
+        assert scan["ok"] is True
+        assert scan["file_count"] > 0
+        relay_bytes = b"".join(path.read_bytes() for path in storage.rglob("*") if path.is_file())
+        assert b"server relay memory" not in relay_bytes
+        assert cluster_a.id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_relay_outage_is_reported_without_losing_local_records(tmp_path):
+    config_a = _node_config(tmp_path, "a")
+    initialize_cluster_config(
+        config_a,
+        name="Cluster",
+        node_alias="node-a",
+        transports=[TransportConfig(type="relay", path="http://127.0.0.1:9")],
+    )
+    store_a = ClusterStore.from_config(config_a)
+    store_a.ensure_layout()
+    _membership(store_a)
+    record = store_a.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex", "host_alias": "node-a"},
+        payload={"format": "markdown", "body": "- local-first memory", "observed_at": "2026-05-08T12:00:00Z"},
+    )
+
+    summary = sync_cluster(config_a)
+
+    assert summary.transports[0].error
+    assert ClusterStore.from_config(config_a)._record_path_by_id(record.record_id) is not None
+
+
+def test_malformed_relay_data_fails_closed(tmp_path):
+    with _relay_server() as relay:
+        config_a = _node_config(tmp_path, "a")
+        cluster_a = initialize_cluster_config(
+            config_a,
+            name="Cluster",
+            node_alias="node-a",
+            transports=[TransportConfig(type="relay", path=relay.url)],
+        )
+        store_a = ClusterStore.from_config(config_a)
+        store_a.ensure_layout()
+        _membership(store_a)
+        relay.storage[f"{cluster_a.id}/nodes/node_bad"] = b"{"
+
+        summary = sync_cluster(config_a)
+
+        assert summary.pulled == 0
+        assert "node_bad" not in ClusterStore.from_config(config_a).public_nodes()
 
 
 class _Relay:

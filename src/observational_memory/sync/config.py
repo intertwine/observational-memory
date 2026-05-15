@@ -115,7 +115,10 @@ def cluster_feature_enabled(config: Config) -> bool:
         if enabled:
             load_node_keypair(config, cluster_config)
             load_cluster_secret(config, cluster_config.id)
-            enabled = True
+            if not (config.clusters_dir / cluster_config.id).exists():
+                enabled = False
+            else:
+                enabled = True
     except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
         enabled = False
     _store_feature_cache(cache_key, env_signature, config_signature, key_paths, enabled)
@@ -261,6 +264,7 @@ def initialize_cluster_config(
     write_cluster_config(config, cluster_config)
     write_node_keypair(config, cluster_config.id, keypair)
     write_cluster_secret(config, secret)
+    (config.clusters_dir / cluster_config.id).mkdir(parents=True, exist_ok=True)
     return cluster_config
 
 

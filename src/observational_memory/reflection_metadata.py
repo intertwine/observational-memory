@@ -26,8 +26,31 @@ class PruneSummary:
         }
 
 
-def ensure_reflection_metadata(text: str, *, now: datetime | None = None, node: str = "local") -> str:
+@dataclass(frozen=True)
+class ReflectionConflict:
+    section: str
+    kind: str
+    actionability: str
+    entries: list[dict[str, str]]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "section": self.section,
+            "kind": self.kind,
+            "actionability": self.actionability,
+            "entries": self.entries,
+        }
+
+
+def ensure_reflection_metadata(
+    text: str,
+    *,
+    now: datetime | None = None,
+    node: str = "local",
+    source_mtime: datetime | None = None,
+) -> str:
     now_value = _iso(now or datetime.now(timezone.utc))
+    legacy_seen_value = _iso(source_mtime) if source_mtime is not None else now_value
     lines = text.splitlines()
     current_section = ""
     output: list[str] = []
@@ -47,11 +70,13 @@ def ensure_reflection_metadata(text: str, *, now: datetime | None = None, node: 
             output.append(line)
             continue
         fields = parse_metadata(line)
+        kind = fields.setdefault("kind", infer_kind(body, current_section))
         fields.setdefault("id", _entry_id(body))
-        fields.setdefault("kind", infer_kind(body, current_section))
-        fields.setdefault("last_seen", now_value)
+        fields.setdefault("last_seen", legacy_seen_value)
         fields.setdefault("node", node)
         fields.setdefault("scope", "cluster")
+        for key, value in _default_fields(kind).items():
+            fields.setdefault(key, value)
         output.append(f"{prefix}{body} {format_metadata(fields)}")
     return "\n".join(output).rstrip() + "\n"
 
@@ -69,7 +94,21 @@ def parse_metadata(line: str) -> dict[str, str]:
 
 
 def format_metadata(fields: dict[str, str]) -> str:
-    ordered = ["id", "kind", "last_seen", "node", "scope"]
+    ordered = [
+        "id",
+        "kind",
+        "mode",
+        "source_type",
+        "confidence",
+        "sensitivity",
+        "actionability",
+        "last_seen",
+        "last_verified",
+        "expires",
+        "seen_count",
+        "node",
+        "scope",
+    ]
     parts = []
     for key in ordered:
         if key in fields:
@@ -81,8 +120,12 @@ def format_metadata(fields: dict[str, str]) -> str:
 
 def infer_kind(body: str, section: str = "") -> str:
     lower = f"{section} {body}".lower()
+    if "working mode" in lower or "execution mode" in lower or "launch mode" in lower or "mode:" in lower:
+        return "mode"
     if "identity" in lower or "name:" in lower or "role:" in lower:
         return "identity"
+    if "policy" in lower or "must not" in lower or "never " in lower or "requires explicit approval" in lower:
+        return "policy"
     if "preference" in lower or "prefers" in lower or "communication" in lower:
         return "preference"
     snapshot_markers = (
@@ -105,6 +148,76 @@ def infer_kind(body: str, section: str = "") -> str:
     if "decision" in lower or "decided" in lower:
         return "decision"
     return "evergreen"
+
+
+def filter_reflection_entries_for_cluster(text: str) -> str:
+    """Remove host-local reflection entries before writing shared cluster snapshots."""
+    output: list[str] = []
+    for line in text.splitlines():
+        fields = parse_metadata(line)
+        if fields.get("scope") == "local":
+            continue
+        output.append(line)
+    return "\n".join(output).rstrip() + "\n"
+
+
+def filter_reflection_entries_for_host(text: str, *, local_node: str) -> str:
+    """Hide remote host-local entries when materializing generated Markdown."""
+    output: list[str] = []
+    for line in text.splitlines():
+        fields = parse_metadata(line)
+        if fields.get("scope") == "local" and fields.get("node") not in {"", local_node}:
+            continue
+        output.append(line)
+    return "\n".join(output).rstrip() + "\n"
+
+
+def find_reflection_conflicts(snapshots: list[tuple[str, str, str]]) -> list[ReflectionConflict]:
+    """Find operator-visible conflicts across reflection snapshot bodies.
+
+    ``snapshots`` contains ``(record_id, node_id, body)`` tuples. This is a
+    deterministic heuristic: non-snapshot entries in the same section/kind from
+    different records are reviewable when their normalized text differs.
+    """
+    buckets: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for record_id, node_id, body in snapshots:
+        section = ""
+        for line in body.splitlines():
+            heading = _HEADING_RE.match(line)
+            if heading:
+                section = heading.group(2).strip()
+                continue
+            bullet = _BULLET_RE.match(line)
+            if not bullet:
+                continue
+            fields = parse_metadata(line)
+            kind = fields.get("kind") or infer_kind(bullet.group(2), section)
+            actionability = fields.get("actionability", _default_fields(kind)["actionability"])
+            if fields.get("scope") == "local" or kind == "snapshot":
+                continue
+            if kind not in {"identity", "preference", "policy", "decision", "mode"} and actionability != "high":
+                continue
+            text = bullet.group(2).strip()
+            key = (section, kind)
+            buckets.setdefault(key, []).append(
+                {
+                    "record_id": record_id,
+                    "node": fields.get("node", node_id),
+                    "entry_id": fields.get("id", _entry_id(text)),
+                    "actionability": actionability,
+                    "text": text,
+                }
+            )
+    conflicts: list[ReflectionConflict] = []
+    for (section, kind), entries in sorted(buckets.items()):
+        normalized = {entry["text"].casefold() for entry in entries}
+        record_ids = {entry["record_id"] for entry in entries}
+        if len(normalized) > 1 and len(record_ids) > 1:
+            actionability = "high" if any(entry["actionability"] == "high" for entry in entries) else "medium"
+            conflicts.append(
+                ReflectionConflict(section=section, kind=kind, actionability=actionability, entries=entries)
+            )
+    return conflicts
 
 
 def prune_stale_snapshots(
@@ -184,3 +297,26 @@ def _iso(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _default_fields(kind: str) -> dict[str, str]:
+    actionability = {
+        "identity": "high",
+        "policy": "high",
+        "preference": "medium",
+        "decision": "medium",
+        "task": "medium",
+        "mode": "high",
+        "snapshot": "low",
+        "evergreen": "medium",
+    }.get(kind, "medium")
+    sensitivity = "normal"
+    if kind in {"identity", "policy"}:
+        sensitivity = "personal"
+    return {
+        "source_type": "inferred",
+        "confidence": "medium",
+        "sensitivity": sensitivity,
+        "actionability": actionability,
+        "seen_count": "1",
+    }
