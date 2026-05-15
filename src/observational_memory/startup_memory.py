@@ -12,6 +12,9 @@ _SECTION_RE_TEMPLATE = r"(?ms)^({heading}\n.*?)(?=^## |\Z)"
 _SUBSECTION_RE_TEMPLATE = r"(?ms)^({heading}\n.*?)(?=^### |\Z)"
 DEFAULT_STARTUP_BUDGET_CHARS = 24000
 MIN_STARTUP_BUDGET_CHARS = 2000
+LARGE_STARTUP_CHUNK_CHARS = 8000
+STARTUP_PROFILE_PREFERENCE_LIMIT = 16
+_OM_METADATA_COMMENT_RE = re.compile(r"\s*<!--om:.*?-->")
 
 
 @dataclass(frozen=True)
@@ -79,7 +82,7 @@ def build_startup_payload(
     """Build a deterministic, budgeted startup payload with recall handles."""
     ensure_startup_memory(config)
     budget = max(int(budget_chars or DEFAULT_STARTUP_BUDGET_CHARS), MIN_STARTUP_BUDGET_CHARS)
-    chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent)
+    chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=True)
     header = _startup_header(budget=budget, cwd=cwd, task=task, agent=agent)
     footer = _recall_footer(task=task, cwd=cwd)
 
@@ -94,7 +97,7 @@ def build_startup_payload(
         else:
             overflow.append(chunk)
 
-    selected.sort(key=lambda item: (0 if item.source == "profile" else 1, item.heading, item.handle))
+    selected.sort(key=_selected_chunk_order)
     parts = [header.rstrip()]
     parts.extend(chunk.body.strip() for chunk in selected)
     if overflow:
@@ -123,6 +126,10 @@ def recall_handle(config: Config, handle: str) -> str:
         return config.active_path.read_text() if config.active_path.exists() else ""
     chunks = _startup_chunks(config)
     for chunk in chunks:
+        if chunk.handle == handle:
+            return chunk.body.rstrip() + "\n"
+    startup_chunks = _startup_chunks(config, project_startup=True)
+    for chunk in startup_chunks:
         if chunk.handle == handle:
             return chunk.body.rstrip() + "\n"
     raise KeyError(handle)
@@ -262,12 +269,26 @@ def _startup_chunks(
     cwd: str | None = None,
     task: str | None = None,
     agent: str | None = None,
+    project_startup: bool = False,
+    strip_metadata: bool = False,
 ) -> list[StartupChunk]:
     chunks: list[StartupChunk] = []
     for source, path in (("profile", config.profile_path), ("active", config.active_path)):
         text = path.read_text() if path.exists() else ""
-        for heading, body in _split_h2_chunks(text):
-            handle = f"startup:{source}:{_slug(heading)}"
+        chunk_parts: list[tuple[str, str, str]]
+        if project_startup and source == "profile":
+            chunk_parts = _startup_profile_chunk_parts(text, cwd=cwd, task=task, agent=agent)
+        elif project_startup and source == "active":
+            chunk_parts = _active_startup_chunk_parts(text)
+        else:
+            chunk_parts = [
+                (heading, body, f"startup:{source}:{_slug(heading)}") for heading, body in _split_h2_chunks(text)
+            ]
+        for heading, body, handle in chunk_parts:
+            if strip_metadata:
+                body = _strip_om_metadata(body)
+            if project_startup and _is_empty_startup_chunk(body):
+                continue
             chunks.append(
                 StartupChunk(
                     source=source,
@@ -278,6 +299,177 @@ def _startup_chunks(
                 )
             )
     return chunks
+
+
+def _startup_profile_chunk_parts(
+    text: str,
+    *,
+    cwd: str | None,
+    task: str | None,
+    agent: str | None,
+) -> list[tuple[str, str, str]]:
+    normal_chunks = [(heading, body, f"startup:profile:{_slug(heading)}") for heading, body in _split_h2_chunks(text)]
+    by_heading = {heading: body for heading, body, _handle in normal_chunks}
+    core = by_heading.get("Core Identity", "")
+    preferences = by_heading.get("Preferences & Opinions", "")
+    core_has_nested_preferences = bool(_profile_nested_lines(core, label="Preferences"))
+    large_core = len(core) > LARGE_STARTUP_CHUNK_CHARS or core_has_nested_preferences
+    large_preferences = len(preferences) > LARGE_STARTUP_CHUNK_CHARS
+    if not large_core and not large_preferences:
+        return normal_chunks
+
+    working_profile = _build_working_profile_chunk(
+        core=core,
+        preferences=preferences,
+        include_basics=large_core,
+        cwd=cwd,
+        task=task,
+        agent=agent,
+    )
+    projected: list[tuple[str, str, str]] = []
+    if working_profile:
+        projected.append(("Working Profile", working_profile, "startup:profile:working-profile"))
+    for heading, body, handle in normal_chunks:
+        if heading == "Core Identity" and large_core:
+            continue
+        if heading == "Preferences & Opinions" and large_preferences:
+            continue
+        projected.append((heading, body, handle))
+    return projected
+
+
+def _build_working_profile_chunk(
+    *,
+    core: str,
+    preferences: str,
+    include_basics: bool,
+    cwd: str | None,
+    task: str | None,
+    agent: str | None,
+) -> str:
+    basics = _profile_identity_basics(core) if include_basics else []
+    preference_lines = _profile_nested_lines(core, label="Preferences") + _profile_section_bullets(preferences)
+    selected_preferences = _select_startup_profile_lines(
+        preference_lines,
+        limit=STARTUP_PROFILE_PREFERENCE_LIMIT,
+        route_terms=_route_terms(cwd=cwd, task=task, agent=agent),
+    )
+    if not basics and not selected_preferences:
+        return ""
+
+    parts = ["## Working Profile"]
+    if basics:
+        parts.extend(["", *basics])
+    if selected_preferences:
+        parts.extend(["", "- **Startup working contract:**"])
+        parts.extend(f"  {line}" for line in selected_preferences)
+    parts.extend(
+        [
+            "",
+            "- Full profile available with `om recall --handle startup:profile`.",
+        ]
+    )
+    return "\n".join(parts)
+
+
+def _profile_identity_basics(core: str) -> list[str]:
+    if not core:
+        return []
+    wanted = ("- **Name:**", "- **Role/occupation:**", "- **Communication style:**", "- **Working hours:**")
+    lines: list[str] = []
+    for line in core.splitlines()[1:]:
+        stripped = line.strip()
+        if any(stripped.startswith(prefix) for prefix in wanted):
+            lines.append(stripped)
+    return lines
+
+
+def _profile_nested_lines(section: str, *, label: str) -> list[str]:
+    if not section:
+        return []
+    lines: list[str] = []
+    collecting = False
+    marker = f"- **{label}:**"
+    for line in section.splitlines()[1:]:
+        stripped = line.strip()
+        if stripped.startswith("- **") and not stripped.startswith(marker):
+            collecting = False
+        if stripped.startswith(marker):
+            collecting = True
+            continue
+        if collecting and stripped.startswith("- "):
+            lines.append(stripped)
+    return lines
+
+
+def _profile_section_bullets(section: str) -> list[str]:
+    if not section:
+        return []
+    return [line.strip() for line in section.splitlines()[1:] if line.strip().startswith("- ")]
+
+
+def _select_startup_profile_lines(lines: list[str], *, limit: int, route_terms: list[str]) -> list[str]:
+    if not lines:
+        return []
+    indexed = list(enumerate(dict.fromkeys(lines)))
+    ranked = sorted(indexed, key=lambda item: (-_startup_profile_line_score(item[1], route_terms), item[0]))
+    return [line for _index, line in ranked[:limit]]
+
+
+def _startup_profile_line_score(line: str, route_terms: list[str]) -> int:
+    lower = line.lower()
+    score = 1 if "🔴" in line else 0
+    score += sum(4 for term in route_terms if term in lower)
+    return score
+
+
+def _active_startup_chunk_parts(text: str) -> list[tuple[str, str, str]]:
+    chunk_parts: list[tuple[str, str, str]] = []
+    for heading, body in _split_h2_chunks(text):
+        subsections = _split_h3_subchunks(heading, body)
+        if subsections:
+            chunk_parts.extend(subsections)
+        else:
+            chunk_parts.append((heading, body, f"startup:active:{_slug(heading)}"))
+    return chunk_parts
+
+
+def _split_h3_subchunks(parent_heading: str, body: str) -> list[tuple[str, str, str]]:
+    lines = body.splitlines()
+    current_heading = ""
+    current: list[str] | None = None
+    chunks: list[tuple[str, list[str]]] = []
+    for line in lines:
+        if line.startswith("### "):
+            current_heading = line[4:].strip()
+            current = [line]
+            chunks.append((current_heading, current))
+        elif current is not None:
+            current.append(line)
+    if not chunks:
+        return []
+    return [
+        (
+            f"{parent_heading} / {heading}",
+            "\n".join([f"## {parent_heading} / {heading}", *chunk_lines[1:]]).strip(),
+            f"startup:active:{_slug(parent_heading)}:{_slug(heading)}",
+        )
+        for heading, chunk_lines in chunks
+        if "\n".join(chunk_lines).strip()
+    ]
+
+
+def _strip_om_metadata(text: str) -> str:
+    return _OM_METADATA_COMMENT_RE.sub("", text)
+
+
+def _is_empty_startup_chunk(text: str) -> bool:
+    for line in text.splitlines()[1:]:
+        stripped = line.strip()
+        if not stripped or stripped == "-" or stripped.startswith("<!--"):
+            continue
+        return False
+    return True
 
 
 def _split_h2_chunks(text: str) -> list[tuple[str, str]]:
@@ -334,6 +526,33 @@ def _chunk_priority(
     if route_terms and any(term in lower_body or term in lower_heading for term in route_terms):
         priority += 5
     return priority
+
+
+def _selected_chunk_order(chunk: StartupChunk) -> tuple[int, int, str, str]:
+    source_order = 0 if chunk.source == "profile" else 1
+    heading = chunk.heading.lower()
+    if chunk.source == "profile":
+        if heading == "working profile":
+            section_order = 0
+        elif "core identity" in heading:
+            section_order = 1
+        elif "preference" in heading:
+            section_order = 2
+        elif "relationship" in heading or "communication" in heading:
+            section_order = 3
+        else:
+            section_order = 4
+    elif heading.startswith("current session"):
+        section_order = 0
+    elif heading.startswith("active projects"):
+        section_order = 1
+    elif heading.startswith("life & operations"):
+        section_order = 2
+    elif heading.startswith("creative & professional"):
+        section_order = 3
+    else:
+        section_order = 4
+    return (source_order, section_order, chunk.heading, chunk.handle)
 
 
 def _route_terms(*, cwd: str | None, task: str | None, agent: str | None) -> list[str]:
