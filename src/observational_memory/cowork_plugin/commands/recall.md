@@ -13,10 +13,10 @@ Search observational memory for context from past sessions.
 /recall $ARGUMENTS
 ```
 
-Run the following command to search memory:
+Run the following command to recall memory:
 
 ```bash
-om search "$ARGUMENTS" --limit 10
+om recall --query "$ARGUMENTS" --limit 10
 ```
 
 Present the results to the user, highlighting the most relevant matches.

@@ -1,8 +1,16 @@
 # OM Cluster Public Validation Checklist
 
-This checklist is public-safe. Use temporary directories, local loopback relay URLs, and synthetic memory values. Keep private hostnames, IPs, tunnels, provider keys, and machine-specific paths out of committed evidence.
+This checklist is safe to share in public logs. Use temporary directories, loopback relay URLs, and fake memory values. Do not include private hostnames, IPs, tunnels, provider keys, or real memory values.
 
-## Baseline
+Run normal quality checks first:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+```
+
+## 1. Baseline Without Cluster
 
 ```bash
 OM_CLUSTER_ENABLED=0 om context
@@ -15,7 +23,7 @@ Expected:
 - `om recall` works without cluster mode.
 - Existing local Markdown remains readable.
 
-## Request Approval And Convergence
+## 2. Request Approval And Convergence
 
 Create at least two temp OM homes and one shared transport directory or loopback relay.
 
@@ -36,7 +44,7 @@ Expected:
 - After approval and sync, trusted peers appear in `peers`, not `pending_peers`.
 - Status includes `transport_diagnostics`, `review_artifacts`, and any remediation text.
 
-## Relay Transport
+## 3. Relay Transport
 
 Run a local relay:
 
@@ -51,7 +59,7 @@ Expected:
 - Artifact scan reports no provider keys, node private keys, request secrets, plaintext memory values, or `data_keys`.
 - Stopping the relay causes sync to report a transport error without deleting local records or breaking local materialization.
 
-## Redaction
+## 4. Redaction
 
 Write a synthetic observation, sync it, redact the record, sync again, and reindex.
 
@@ -61,7 +69,7 @@ Expected:
 - The tombstone record itself is visible in cluster record counts.
 - Redaction does not claim to erase backups or already-synced transport blobs.
 
-## Key Epochs And Rewrap
+## 5. Key Epochs And Rewrap
 
 ```bash
 om cluster rotate-key
@@ -78,7 +86,7 @@ Expected:
 - Rewrap records materialize old payloads when the old key is no longer present.
 - Purge output remains a readiness report, not automatic deletion.
 
-## Reflection Metadata And Conflicts
+## 6. Reflection Metadata And Conflicts
 
 Create two synthetic reflection snapshots with conflicting preference, policy, identity, decision, mode, or high-actionability entries.
 
@@ -89,7 +97,7 @@ Expected:
 - Conflict artifacts appear under `clusters/<cluster-id>/review/reflection-conflicts.{json,md}`.
 - `om cluster status --json` reports the review artifact count.
 
-## Public Evidence
+## 7. Public Evidence
 
 Safe evidence to commit or paste:
 

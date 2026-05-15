@@ -1,6 +1,6 @@
 # Maintainer Guide
 
-This document contains developer and maintainer workflows that were moved out of the main README to keep onboarding focused.
+This guide is for people changing, testing, and releasing Observational Memory. User install docs live in [install.md](install.md).
 
 ## Development Install
 
@@ -23,12 +23,31 @@ make qmd-bench      # repo-local QMD 2.1 benchmark fixture
 make brew-formula   # generate Homebrew formula from current PyPI release
 make brew-check     # sync into active tapped checkout and audit the Homebrew formula
 
-# Or directly with uv
+# Or directly with uv. This matches CI.
 uv sync
+uv run ruff check .
+uv run ruff format --check .
 uv run pytest
 uv run pytest tests/test_transcripts.py
 uv run pytest -v
 ```
+
+CI runs the lint step on Python 3.11, 3.12, and 3.13. A local `ruff check` pass is not enough; run `ruff format --check` too.
+
+## Documentation Rules
+
+Docs for the next `v0.6.1` release should follow this layout:
+
+- `README.md`: short user doorway, install snippet, architecture picture, and links.
+- `docs/install.md`: user install and setup.
+- `docs/integrations.md`: host-specific behavior.
+- `docs/search-and-recall.md`: `om context`, `om recall`, `om search`, and QMD basics.
+- `docs/configuration.md`: env vars, paths, schedules, providers, and search backends.
+- `docs/om-cluster-sync.md`: cluster operations and security model.
+- `docs/om-cluster-validation.md`: public-safe cluster validation.
+- `docs/MAINTAINERS.md`: maintainer and release workflows.
+
+Use plain English. Aim for a 10th grade reading level. Prefer short sections, tables, and working CLI snippets. Archive completed implementation plans under `docs/archive/` instead of linking them as current guidance.
 
 ## QMD Benchmarking
 
@@ -129,11 +148,13 @@ Installer-managed user-level files:
 
 Runtime expectations:
 
-- `SessionStart` runs `om context` to inject `profile.md` + `active.md`.
+- `SessionStart` runs `om context` to inject a budgeted startup pack.
 - `Stop` queues transcript-specific Codex checkpointing through the hidden `om codex-checkpoint` path.
 - a background scheduler remains installed as a backstop for Codex transcript observation:
   - `launchd` on macOS by default
   - cron on other Unix-like platforms by default
+- agents can expand omitted startup sections with `om recall --handle ...`
+- agents can retrieve deeper context with `om recall --query ...`
 - `om status` and `om doctor` should report launchd vs cron truthfully, including duplicate macOS backstops.
 
 Important maintainer rules:
@@ -141,7 +162,7 @@ Important maintainer rules:
 - Preserve unrelated user or third-party hook groups in `hooks.json`.
 - Do not default to repo-local `.codex/hooks.json`; OM is intentionally user-level shared memory.
 - `om uninstall --codex` should remove OM-managed hooks and the OM AGENTS fallback block, but should not disable `hooks = true` or `codex_hooks = true`.
-- AGENTS should stay conditional fallback only; avoid reintroducing unconditional startup reads when hooks are present.
+- AGENTS should stay conditional fallback only. Avoid reintroducing unconditional startup reads when hooks are present.
 
 ## Hermes Integration Model
 
@@ -154,6 +175,7 @@ Runtime expectations:
 - The Hermes parser keeps user messages, assistant prose, and summarized tool calls.
 - It intentionally drops `session_meta`, raw tool output, and other machine-oriented records before the observer LLM sees them.
 - `om install` does not currently manage Hermes hooks or a Hermes-specific scheduler backstop; keep docs and status output truthful about that scope.
+- The active future handoff remains `plans/hermes-first-class-plugin.md`.
 
 Tests that should protect Hermes behavior:
 
@@ -197,21 +219,63 @@ make release-homebrew HOMEBREW_TAP_DIR=../homebrew-tap
 This means `make brew-check` validates the same formula path that Homebrew actually audits, instead of only checking the generated file in this repo.
 If `intertwine/tap` is not tapped locally, `make brew-check` exits with instructions instead of reporting a misleading success.
 
+## v0.6.1 Release Prep
+
+The docs update is meant to support a later `v0.6.1` release. Do not tag or publish from a docs-only pass unless the user asks.
+
+Before cutting `v0.6.1`:
+
+```bash
+git status --short
+make check
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+OM_CLUSTER_ENABLED=0 uv run om context >/tmp/om-context.json
+uv run om recall --query "current work" --limit 3
+```
+
+Recommended cluster checks:
+
+```bash
+uv run pytest tests/sync/test_filesystem_sync.py tests/sync/test_relay_transport.py
+uv run pytest tests/sync/test_store_and_materialize.py
+```
+
+Release flow:
+
+1. Confirm the docs and draft notes in [RELEASE-0.6.1.md](RELEASE-0.6.1.md).
+2. Bump the version with `make bump-version BUMP=patch`.
+3. Run `make check`.
+4. Build with `make build`.
+5. Publish to PyPI.
+6. Push the tag.
+7. Watch the Homebrew release workflow.
+
 ## File Structure
 
 ```text
 observational-memory/
-├── README.md                         # User-facing docs
+├── README.md                         # Short user doorway
 ├── docs/MAINTAINERS.md               # This file
+├── docs/install.md                   # User install guide
+├── docs/integrations.md              # Agent/platform integrations
+├── docs/search-and-recall.md         # Startup, recall, search, QMD basics
+├── docs/configuration.md             # Env vars, paths, providers, schedules
+├── docs/om-cluster-sync.md           # Cluster operations
+├── docs/om-cluster-validation.md     # Public-safe validation checklist
+├── docs/archive/                     # Old plans and status reports
 ├── LICENSE                           # MIT
 ├── pyproject.toml                    # Python package config
 ├── src/observational_memory/
-│   ├── cli.py                        # CLI: om observe, reflect, search, backfill, install, status
+│   ├── cli.py                        # CLI: observe, reflect, recall, search, cluster, install, status
 │   ├── config.py                     # Paths, defaults, env detection
 │   ├── llm.py                        # LLM API abstraction (direct + enterprise providers)
 │   ├── observe.py                    # Observer logic
 │   ├── reflect.py                    # Reflector logic
-│   ├── startup_memory.py             # Compact startup profile/active file generation
+│   ├── startup_memory.py             # Budgeted startup packs and recall handles
+│   ├── reflection_metadata.py        # Inline metadata, local scope, conflict detection
+│   ├── sync/                         # OM Cluster records, transports, relay, materialization
 │   ├── transcripts/
 │   │   ├── claude.py                 # Claude Code JSONL parser
 │   │   ├── codex.py                  # Codex CLI session parser

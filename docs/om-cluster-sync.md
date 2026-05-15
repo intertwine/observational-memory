@@ -1,6 +1,8 @@
 # OM Cluster Sync
 
-OM Cluster syncs memory across machines by replicating encrypted, signed, append-only records. The human-readable Markdown files stay local materialized views.
+OM Cluster syncs memory across machines by moving encrypted, signed, append-only records. The readable Markdown files stay local materialized views.
+
+Cluster mode is opt-in. Nothing syncs until you run `om cluster init` or `om cluster join`.
 
 ## Quick Start
 
@@ -36,23 +38,24 @@ Use the transport directory with Syncthing, Dropbox, iCloud Drive, rsync, a NAS,
 
 ## What Syncs
 
-OM Cluster syncs:
+OM Cluster syncs these record kinds:
 
 - `observation` records
 - `reflection_snapshot` records
 - `manual_override` records
 - `tombstone` redaction records
 - `node_membership` records
-- `key_rotation` records
+- `key_epoch` records
+- `payload_rewrap` records
 
-OM Cluster materializes these local files from records:
+OM Cluster rebuilds these local files from records:
 
 - `observations.md`
 - `reflections.md`
 - `profile.md`
 - `active.md`
 
-OM Cluster never syncs:
+OM Cluster does not sync:
 
 - `~/.config/observational-memory/env`
 - `~/.config/observational-memory/cluster-keys/`
@@ -67,7 +70,7 @@ OM Cluster never syncs:
 
 The filesystem transport is treated as untrusted. Record payloads are encrypted with ChaCha20-Poly1305 and signed with Ed25519 node keys before they leave the local machine. The clear envelope contains routing metadata such as cluster ID, record kind, namespace, node ID, sequence, HLC timestamp, parents, and privacy-preserving source hints.
 
-Unknown nodes are rejected by default. The default `om cluster invite` mode creates a request-mode invite. `om cluster join` uses that token to publish a signed pending join request, and an already trusted node must approve it with `om cluster approve <request-id>` before the new node receives encrypted cluster key material. Transport visibility still does not imply trust.
+Unknown nodes are rejected by default. The default `om cluster invite` mode creates a request-mode invite. `om cluster join` uses that token to publish a signed pending join request. An already trusted node must approve it with `om cluster approve <request-id>` before the new node receives encrypted cluster key material. Transport visibility does not imply trust.
 
 Public metadata from unknown nodes may be cached as pending peers for diagnostics, but it does not authorize those nodes or their records. `om cluster status --json` reports pending peers so operators can inspect unexpected shared-folder activity.
 
@@ -81,7 +84,7 @@ Trusted direct invite tokens are sensitive because they include cluster key mate
 
 Private keys and provider credentials are stored only under the local config directory. Cluster key directories are owner-only (`0700`) and key files are owner-only (`0600`).
 
-OM Cluster v1 uses a personal-cluster trust model: any currently trusted node can add, revoke, redact, or rotate cluster state. Do not add machines you would not trust with those administrative actions.
+OM Cluster v1 uses a personal-cluster trust model. Any currently trusted node can add, revoke, redact, or rotate cluster state. Do not add machines you would not trust with those actions.
 
 ## Operations
 
@@ -108,6 +111,8 @@ om cluster override get --target profile --section communication_style
 
 `om observe`, `om reflect`, and `om context` keep the old direct Markdown behavior unless cluster mode is enabled by local cluster config and keys. Sync failures do not block local memory capture.
 
+`om context` can pull before startup when cluster config enables it. The pull has a short deadline so startup does not hang on a bad transport.
+
 ## Materialization
 
 Do not edit cluster-generated `observations.md`, `reflections.md`, `profile.md`, or `active.md` as durable sync sources. Durable changes should be represented as new records, for example:
@@ -117,7 +122,7 @@ om cluster override add --target profile --section communication_style --body "P
 om cluster redact --record sha256_...
 ```
 
-Reflection conflicts are handled as snapshots with frontiers and inline entry metadata. Snapshot entries use `last_seen` to prefer newer state; evergreen entries are preserved by union/deduplication until the next reflector pass can reconcile them; entries marked `scope=local` are removed from shared cluster reflection snapshots and hidden when they arrive from another node.
+Reflection conflicts use snapshots, frontiers, and inline entry metadata. Snapshot entries use `last_seen` to prefer newer state. Entries marked `scope=local` are removed from shared cluster reflection snapshots and hidden when they arrive from another node.
 
 Non-snapshot conflicts are surfaced as review artifacts instead of being silently smoothed away. If policy, preference, identity, decision, mode, or high-actionability entries disagree across reflection snapshots, materialization writes:
 
@@ -158,7 +163,7 @@ For a known device compromise, revoke the node, rotate the key, and inspect the 
 
 ## Relay, Discovery, And P2P
 
-The core sync engine is transport-agnostic. Filesystem transport works for shared folders, and relay transport works with an HTTP service that stores opaque cluster artifacts:
+The sync engine does not trust the transport. Filesystem transport works for shared folders. Relay transport works with an HTTP service that stores opaque cluster artifacts:
 
 ```bash
 om cluster init --name "Personal Memory" --transport relay:https://relay.example.com

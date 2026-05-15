@@ -7,7 +7,7 @@ Recommended ownership:
 - Host memory owns host-local feedback, UI/tool preferences, ephemeral conversation state, and behavior that applies only inside that host.
 - Observational Memory owns cross-agent project state, multi-host identity/preferences, durable workflow rules, architectural memory, and memory intended to sync across machines.
 
-Overlap is acceptable, but conflict resolution should be explicit:
+Overlap is fine, but the owner should be clear:
 
 - Host-local rules win for host-specific behavior.
 - OM wins for cross-agent and cross-machine project memory.
@@ -24,7 +24,7 @@ Reflection entries now carry inline metadata comments:
 
 Snapshot entries age according to `OM_SNAPSHOT_TTL_DAYS` (default `14`) and `OM_SNAPSHOT_EXPIRY_ACTION` (default `stale-section`). Run `om prune` to apply pruning without waiting for the next reflection pass.
 
-Supported metadata keys are open-ended and unknown fields are preserved. Current generated keys include:
+Metadata keys are open-ended, and unknown fields are preserved. Current generated keys include:
 
 - `kind`: `snapshot`, `evergreen`, `preference`, `policy`, `identity`, `task`, `decision`, or `mode`.
 - `source_type`: usually `inferred` for reflector-generated metadata.
@@ -45,7 +45,7 @@ OM_PROFILE_INCLUDE_IDENTITY=0 om context
 OM_PROFILE_SECTIONS=preferences,relationship,key-facts om context
 ```
 
-These controls narrow generated startup/profile materialization only. They do not disable observation capture, reflection, search, recall, or cluster sync.
+These controls only narrow generated startup/profile output. They do not disable observation capture, reflection, search, recall, or cluster sync.
 
 Cluster behavior for host-local scope:
 
