@@ -11,7 +11,7 @@
 
 Observational Memory, or `om`, gives Claude Code, Codex, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
 
-The current `main` branch is the documentation baseline for the next `v0.6.1` release. It includes:
+The current release is `v0.6.1`. It includes:
 
 - budgeted startup context through `om context`
 - first-class recall through `om recall`
@@ -167,9 +167,9 @@ The short version:
 
 ## Release State
 
-This branch is preparing the next `v0.6.1` release. The package version is still controlled by `pyproject.toml`; no release is made by this documentation pass.
+`v0.6.1` is the current release. It hardens the `0.6.0` OM Cluster release, adds budgeted startup context and first-class recall, and updates the user docs for day-to-day setup.
 
-Before release, maintainers should run:
+Before the next release, maintainers should run:
 
 ```bash
 make check

@@ -1,10 +1,10 @@
-# Draft Release Notes: v0.6.1
+# Release 0.6.1
 
-Status: draft. Do not publish this as a release until the version bump and release workflow run.
+Released May 15, 2026.
 
 ## Summary
 
-`v0.6.1` is planned as a hardening release for `v0.6.0` OM Cluster and startup context work. It keeps cluster sync opt-in and keeps local Markdown as the readable view.
+`v0.6.1` is a hardening release for `v0.6.0` OM Cluster and startup context work. It keeps cluster sync opt-in and keeps local Markdown as the readable view.
 
 ## User-Facing Changes
 
@@ -26,9 +26,9 @@ Status: draft. Do not publish this as a release until the version bump and relea
 - Relay access is not cluster trust. Local nodes still verify signatures, membership, revocation, key epochs, tombstones, and payload hashes.
 - Hosted platform memory export remains review-based. `om` does not silently write ChatGPT or Claude Managed Agents memory.
 
-## Maintainer Checklist
+## Validation
 
-Before release:
+Release validation:
 
 ```bash
 make check
@@ -37,7 +37,7 @@ uv run ruff format --check .
 uv run pytest
 ```
 
-Recommended extra checks:
+Recommended extra checks for local release validation:
 
 ```bash
 OM_CLUSTER_ENABLED=0 om context
@@ -45,4 +45,21 @@ om recall --query "current work" --limit 3
 om cluster relay health --artifact-dir /tmp/om-relay --json
 ```
 
-For release publishing, follow [MAINTAINERS.md](MAINTAINERS.md).
+## Upgrade
+
+Homebrew:
+
+```bash
+brew update
+brew upgrade observational-memory
+```
+
+PyPI / uv tool:
+
+```bash
+uv tool install --reinstall observational-memory==0.6.1
+om install
+om doctor
+```
+
+For maintainer release steps, see [MAINTAINERS.md](MAINTAINERS.md).

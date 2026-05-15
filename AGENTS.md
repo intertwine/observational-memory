@@ -4,7 +4,7 @@ This repo uses Observational Memory itself, but repo work should remain local-fi
 
 ## Current Goal Shape
 
-The next release target is `v0.6.1`. Documentation and hardening can be prepared now. Do not bump versions, tag releases, publish to PyPI, or update Homebrew unless Bryan explicitly asks.
+The current release line is `v0.6.1`. Do not bump versions, tag releases, publish to PyPI, or update Homebrew again unless Bryan explicitly asks.
 
 ## Work Rules
 

@@ -212,7 +212,7 @@ def test_install_cowork_copies_valid_plugin(monkeypatch, tmp_path):
     hooks_json = plugin_dir / "hooks" / "hooks.json"
     hooks_payload = json.loads(hooks_json.read_text())
     assert set(hooks_payload["hooks"]) == {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact"}
-    assert json.loads((plugin_dir / "version.json").read_text()) == {"version": "0.5.7"}
+    assert json.loads((plugin_dir / "version.json").read_text()) == {"version": "0.6.1"}
     assert os.access(plugin_dir / "hooks" / "scripts" / "session-start.sh", os.X_OK)
     assert os.access(plugin_dir / "hooks" / "scripts" / "session-end.sh", os.X_OK)
 

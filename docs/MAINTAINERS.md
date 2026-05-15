@@ -36,7 +36,7 @@ CI runs the lint step on Python 3.11, 3.12, and 3.13. A local `ruff check` pass 
 
 ## Documentation Rules
 
-Docs for the next `v0.6.1` release should follow this layout:
+Current docs should follow this layout:
 
 - `README.md`: short user doorway, install snippet, architecture picture, and links.
 - `docs/install.md`: user install and setup.
@@ -219,11 +219,11 @@ make release-homebrew HOMEBREW_TAP_DIR=../homebrew-tap
 This means `make brew-check` validates the same formula path that Homebrew actually audits, instead of only checking the generated file in this repo.
 If `intertwine/tap` is not tapped locally, `make brew-check` exits with instructions instead of reporting a misleading success.
 
-## v0.6.1 Release Prep
+## v0.6.1 Release
 
-The docs update is meant to support a later `v0.6.1` release. Do not tag or publish from a docs-only pass unless the user asks.
+`v0.6.1` is the current hardening release for the post-`0.6.0` cluster and startup-context work.
 
-Before cutting `v0.6.1`:
+Before cutting a patch release from this line:
 
 ```bash
 git status --short
@@ -244,8 +244,8 @@ uv run pytest tests/sync/test_store_and_materialize.py
 
 Release flow:
 
-1. Confirm the docs and draft notes in [RELEASE-0.6.1.md](RELEASE-0.6.1.md).
-2. Bump the version with `make bump-version BUMP=patch`.
+1. Confirm the docs and release notes in [RELEASE-0.6.1.md](RELEASE-0.6.1.md) or the new release note file.
+2. Bump the version with the appropriate `make bump-version BUMP=...` command.
 3. Run `make check`.
 4. Build with `make build`.
 5. Publish to PyPI.

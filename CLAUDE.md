@@ -4,7 +4,7 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The repo is preparing documentation and hardening for the next `v0.6.1` release. Do not tag, publish, bump the version, or update Homebrew unless Bryan explicitly asks for a release.
+The current release line is `v0.6.1`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
@@ -129,4 +129,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-For `v0.6.1`, update docs and validation evidence first. Release steps come later and require explicit user approval.
+`v0.6.1` has release notes in `docs/RELEASE-0.6.1.md`. Future release steps require explicit user approval.
