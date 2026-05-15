@@ -219,9 +219,9 @@ make release-homebrew HOMEBREW_TAP_DIR=../homebrew-tap
 This means `make brew-check` validates the same formula path that Homebrew actually audits, instead of only checking the generated file in this repo.
 If `intertwine/tap` is not tapped locally, `make brew-check` exits with instructions instead of reporting a misleading success.
 
-## v0.6.1 Release
+## v0.6.2 Release
 
-`v0.6.1` is the current hardening release for the post-`0.6.0` cluster and startup-context work.
+`v0.6.2` is the current hardening release for startup context over large real-world memory corpora.
 
 Before cutting a patch release from this line:
 
@@ -244,7 +244,7 @@ uv run pytest tests/sync/test_store_and_materialize.py
 
 Release flow:
 
-1. Confirm the docs and release notes in [RELEASE-0.6.1.md](RELEASE-0.6.1.md) or the new release note file.
+1. Confirm the docs and release notes in [RELEASE-0.6.2.md](RELEASE-0.6.2.md) or the new release note file.
 2. Bump the version with the appropriate `make bump-version BUMP=...` command.
 3. Run `make check`.
 4. Build with `make build`.

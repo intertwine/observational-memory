@@ -510,6 +510,8 @@ def _chunk_priority(
     priority = 4
     if source == "profile":
         priority = 7
+    if lower_heading == "working profile":
+        priority = 14
     if any(term in lower_heading for term in ("preference", "relationship", "communication")):
         priority = 10
     if "core identity" in lower_heading:

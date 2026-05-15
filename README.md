@@ -11,9 +11,11 @@
 
 Observational Memory, or `om`, gives Claude Code, Codex, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
 
-The current release is `v0.6.1`. It includes:
+The current release is `v0.6.2`. It includes:
 
 - budgeted startup context through `om context`
+- compact startup profile projection for long-running memory corpora
+- project-level active context routing so large active files still fit
 - first-class recall through `om recall`
 - richer reflection metadata and host-memory controls
 - OM Cluster relay operations and health checks
@@ -167,7 +169,7 @@ The short version:
 
 ## Release State
 
-`v0.6.1` is the current release. It hardens the `0.6.0` OM Cluster release, adds budgeted startup context and first-class recall, and updates the user docs for day-to-day setup.
+`v0.6.2` is the current release. It tunes startup context for large real-world memory corpora by emitting a compact working profile, splitting active context by project, and keeping full generated memory available through recall.
 
 Before the next release, maintainers should run:
 

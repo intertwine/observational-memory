@@ -16,7 +16,7 @@ Route the startup pack when the host can provide more detail:
 
 ```bash
 om context --for codex --cwd "$PWD" --task "fix cluster validation docs"
-om context --for claude --cwd "$PWD" --task "prepare v0.6.1 release notes"
+om context --for claude --cwd "$PWD" --task "prepare v0.6.2 release notes"
 ```
 
 Control the budget:
@@ -32,12 +32,16 @@ startup:active:active-projects
 startup:profile:preferences-opinions
 ```
 
+For large memory corpora, startup context is a projection rather than a full dump.
+`om context` can emit a compact `Working Profile`, strip inline OM provenance comments from startup output, and split active context by project-level subsections. The full generated Markdown remains available through recall handles.
+
 ## Recall
 
 Use a handle when startup context points to an omitted section:
 
 ```bash
 om recall --handle startup:active:active-projects
+om recall --handle startup:active:active-projects:observational-memory
 om recall --handle startup:profile
 ```
 
