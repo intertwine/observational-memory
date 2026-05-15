@@ -945,9 +945,7 @@ def cluster_relay_health(ctx: click.Context, url: str | None, artifact_dir: Path
     urls = [url] if url else []
     if not urls and cluster_config:
         urls = [
-            transport.path
-            for transport in cluster_config.transports
-            if transport.type == "relay" and transport.path
+            transport.path for transport in cluster_config.transports if transport.type == "relay" and transport.path
         ]
     checks = []
     for relay_url in urls:

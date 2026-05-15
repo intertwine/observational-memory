@@ -105,11 +105,7 @@ def test_build_startup_payload_prioritizes_task_matching_context(tmp_path):
     config = Config(memory_dir=tmp_path / "memory")
     config.ensure_memory_dir()
     config.reflections_path.write_text(
-        REFLECTIONS
-        + "\n## Creative & Professional\n"
-        + "- "
-        + ("album artwork detail " * 400)
-        + "\n"
+        REFLECTIONS + "\n## Creative & Professional\n" + "- " + ("album artwork detail " * 400) + "\n"
     )
     config.observations_path.write_text(OBSERVATIONS)
 

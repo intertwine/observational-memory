@@ -381,7 +381,7 @@ def _recall_footer(*, task: str | None, cwd: str | None) -> str:
             "",
             "- Expand all profile context: `om recall --handle startup:profile`",
             "- Expand all active context: `om recall --handle startup:active`",
-            f"- Search deeper memory: `om recall --query \"{_shell_safe_hint(query)}\" --limit 8`",
+            f'- Search deeper memory: `om recall --query "{_shell_safe_hint(query)}" --limit 8`',
         ]
     )
 
@@ -395,8 +395,7 @@ def _overflow_section(chunks: list[StartupChunk]) -> str:
 
 def _hard_trim(text: str, budget: int) -> str:
     marker = (
-        "\n\n## Startup Payload Truncated\n\n"
-        "- Increase `--budget-chars` or use `om recall` handles for expansion.\n"
+        "\n\n## Startup Payload Truncated\n\n- Increase `--budget-chars` or use `om recall` handles for expansion.\n"
     )
     keep = max(budget - len(marker), 0)
     return text[:keep].rstrip() + marker

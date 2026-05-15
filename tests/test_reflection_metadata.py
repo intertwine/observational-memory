@@ -50,9 +50,7 @@ def test_ensure_reflection_metadata_can_preserve_legacy_file_age():
 
 def test_mode_kind_and_unknown_fields_round_trip():
     text = (
-        "# Reflections\n\n"
-        "## Working Mode\n"
-        "- Execution mode: stop stopping <!--om: id=ome_keep custom=still-here-->\n"
+        "# Reflections\n\n## Working Mode\n- Execution mode: stop stopping <!--om: id=ome_keep custom=still-here-->\n"
     )
 
     result = ensure_reflection_metadata(text, now=datetime(2026, 5, 14, tzinfo=timezone.utc), node="node_a")
@@ -65,10 +63,7 @@ def test_mode_kind_and_unknown_fields_round_trip():
 
 def test_scope_local_entries_filter_from_cluster_and_remote_hosts():
     text = ensure_reflection_metadata(
-        "# Reflections\n\n"
-        "## Preferences & Opinions\n"
-        "- Local only <!--om: scope=local node=node_a-->\n"
-        "- Shared\n",
+        "# Reflections\n\n## Preferences & Opinions\n- Local only <!--om: scope=local node=node_a-->\n- Shared\n",
         now=datetime(2026, 5, 14, tzinfo=timezone.utc),
         node="node_a",
     )
