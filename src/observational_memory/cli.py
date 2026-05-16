@@ -45,11 +45,13 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
         observe_all_claude,
         observe_all_codex,
         observe_all_cowork,
+        observe_all_grok,
         observe_all_hermes,
         observe_auto_memory,
         observe_claude_transcript,
         observe_codex_transcript,
         observe_cowork_transcript,
+        observe_grok_transcript,
         observe_hermes_transcript,
     )
 
@@ -69,6 +71,8 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
             result = observe_hermes_transcript(transcript, config, dry_run)
         elif transcript_source == "cowork":
             result = observe_cowork_transcript(transcript, config, dry_run)
+        elif transcript_source == "grok":
+            result = observe_grok_transcript(transcript, config, dry_run)
         elif transcript_source == "claude-memory":
             raise click.ClickException("--transcript does not support --source claude-memory.")
         else:
@@ -102,6 +106,10 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
     if source in ("cowork", "all"):
         click.echo("Scanning Cowork sessions...")
         results.extend(observe_all_cowork(config, dry_run))
+
+    if source in ("grok", "all"):
+        click.echo("Scanning Grok sessions...")
+        results.extend(observe_all_grok(config, dry_run))
 
     if source in ("claude-memory", "all"):
         click.echo("Scanning Claude Code auto-memory files...")
@@ -2368,12 +2376,13 @@ def install(
 @click.option("--claude", "targets", flag_value="claude")
 @click.option("--codex", "targets", flag_value="codex")
 @click.option("--cowork", "targets", flag_value="cowork")
+@click.option("--grok", "targets", flag_value="grok", help="Remove Grok Build TUI hooks")
 @click.option("--both", "targets", flag_value="both", default=True)
 @click.option("--all", "targets", flag_value="all")
 @click.option("--purge", is_flag=True, help="Also remove memory files")
 @click.pass_context
 def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
-    """Remove observational memory hooks and background scheduler jobs."""
+    """Remove OM hooks/scheduler jobs for selected targets (claude/codex/grok/cowork)."""
     config = ctx.obj["config"]
 
     if targets in ("claude", "both", "all"):

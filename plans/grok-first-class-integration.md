@@ -243,7 +243,17 @@ The ralph-wiggum persistent goal loop (scheduler task 019e2e0155b7) was used to 
 - All changes are isolated to Grok support. Pre-existing modifications in llm.py/reflect.py etc. will not appear in the PR diff.
 - The ralph-wiggum loop (task 019e2e0155b7) was cancelled after driving the feature to completion.
 
-The Draft PR Summary below is ready for use.
+**Post-PR-review fixes (addressing Codex review findings on the draft PR #49):**
+- Fixed P1 (dispatch): Added missing `observe_all_grok`/`observe_grok_transcript` imports and the dispatch branches for `source == "grok"` (scanning) and `transcript_source == "grok"` (single file). `--source grok` and `--transcript <grok-jsonl> --source grok --dry-run` now work as expected.
+- Fixed P1 (discovery): Changed `find_recent_grok_sessions` glob from `*/updates.jsonl` to `*/*/updates.jsonl` to correctly discover real sessions at `~/.grok/sessions/<cwd-encoded>/<session-id>/updates.jsonl`.
+- Improved P2 (cursoring): Switched Grok resumption to count-based `after_index` (message count stored as cursor) + updated parser to skip the first N emitted messages. This eliminates reprocessing of same-second chunks.
+- Fixed P2 (uninstall): Added the missing `--grok` option to the `uninstall` command definition (the implementation and dispatch logic were already present).
+- Updated `TestGrokParser::test_find_recent_grok_sessions` to use the correct two-level directory structure.
+- All Grok tests (6) pass. Full `uv run ruff` clean. `uv run pytest` overall still has the 6 pre-existing unrelated Cluster sync failures (noted in PR description).
+
+The draft PR is now ready for merge (the two blocking P1s from the review are resolved).
+
+The Draft PR Summary below is ready for use (updated with these fixes).
 
 ## Draft PR Summary (for independent review)
 

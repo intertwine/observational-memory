@@ -686,9 +686,10 @@ def observe_grok_transcript(
 
     cursor = config.load_cursor()
     cursor_key = str(transcript_path)
-    after_ts = cursor.get(cursor_key)
+    after_count = cursor.get(cursor_key)
+    after_index = int(after_count) if isinstance(after_count, (int, str)) and str(after_count).isdigit() else None
 
-    all_messages = parse_transcript(transcript_path, after_uuid=after_ts, source="grok")
+    all_messages = parse_transcript(transcript_path, after_index=after_index, source="grok")
     if not all_messages:
         return None
 
@@ -704,9 +705,8 @@ def observe_grok_transcript(
     combined = "\n\n".join(r for r in results if r) if results else None
 
     if combined and not dry_run:
-        # Advance cursor to the end of what we just processed
-        last_ts = _latest_message_timestamp(all_messages) or str(len(all_messages))
-        cursor[cursor_key] = last_ts
+        # Use count-based cursor for Grok to avoid reprocessing same-second chunks
+        cursor[cursor_key] = len(all_messages)
         config.save_cursor(cursor)
 
     return combined

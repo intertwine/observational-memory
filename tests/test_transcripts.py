@@ -398,16 +398,22 @@ class TestGrokParser:
         assert messages == []
 
     def test_find_recent_grok_sessions(self, tmp_path):
+        import time
+
         from observational_memory.transcripts.grok import find_recent_grok_sessions
 
         sessions_dir = tmp_path / "sessions"
-        (sessions_dir / "session1").mkdir(parents=True)
-        (sessions_dir / "session1" / "updates.jsonl").write_text("{}")
-        time.sleep(0.01)
-        (sessions_dir / "session2").mkdir()
-        (sessions_dir / "session2" / "updates.jsonl").write_text("{}")
+        # Real Grok structure: <cwd-encoded>/<session-id>/updates.jsonl
+        (sessions_dir / "cwd1" / "session1").mkdir(parents=True)
+        f1 = sessions_dir / "cwd1" / "session1" / "updates.jsonl"
+        f1.write_text("{}")
+
+        time.sleep(0.05)
+        (sessions_dir / "cwd1" / "session2").mkdir(parents=True)
+        f2 = sessions_dir / "cwd1" / "session2" / "updates.jsonl"
+        f2.write_text("{}")
 
         results = find_recent_grok_sessions(sessions_dir)
         assert len(results) == 2
-        # Newest first
+        # Newest first (by mtime)
         assert results[0].parent.name == "session2"

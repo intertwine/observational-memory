@@ -38,20 +38,23 @@ def find_recent_grok_sessions(sessions_dir: Path | None = None) -> list[Path]:
     if not sessions_dir.exists():
         return []
     return sorted(
-        sessions_dir.glob("*/updates.jsonl"),
+        sessions_dir.glob("*/*/updates.jsonl"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )[:50]  # Limit to recent ones, similar to Codex pattern
 
 
-def parse_transcript(path: Path, after_uuid: str | None = None, source: str = "grok") -> list[Message]:
+def parse_transcript(
+    path: Path, after_uuid: str | None = None, source: str = "grok", after_index: int | None = None
+) -> list[Message]:
     """Parse a Grok updates.jsonl into normalized Messages.
 
-    Currently supports common user_message / assistant_message events.
-    Tool calls and other updates are summarized in content when possible.
+    Supports count-based resumption via after_index (preferred for Grok to avoid
+    same-second chunk reprocessing) or legacy timestamp-based via after_uuid.
     """
     messages: list[Message] = []
-    seen_after = after_uuid is None
+    seen_after = after_uuid is None and after_index is None
+    message_count = 0
 
     if not path.exists():
         return messages
@@ -70,27 +73,37 @@ def parse_transcript(path: Path, after_uuid: str | None = None, source: str = "g
         update = entry.get("params", {}).get("update", {})
         update_type = update.get("sessionUpdate", "")
 
-        # Basic cursor support (use timestamp as pseudo-uuid for now)
-        ts = str(entry.get("timestamp", ""))
-        if not seen_after:
-            if ts == after_uuid:
-                seen_after = True
+        content = _extract_grok_content(update)
+        if not content:
             continue
 
-        content = _extract_grok_content(update)
-        if content:
-            if "user_message" in update_type or "user_message_chunk" in update_type:
-                role = "user"
+        message_count += 1
+
+        if not seen_after:
+            if after_index is not None:
+                if message_count <= after_index:
+                    continue
+                seen_after = True
+            elif after_uuid:
+                ts = str(entry.get("timestamp", ""))
+                if ts == after_uuid:
+                    seen_after = True
+                continue
             else:
-                role = "assistant"
-            messages.append(
-                Message(
-                    role=role,
-                    content=content,
-                    timestamp=str(entry.get("timestamp", "")),
-                    source=source,
-                )
+                seen_after = True
+
+        if "user_message" in update_type or "user_message_chunk" in update_type:
+            role = "user"
+        else:
+            role = "assistant"
+        messages.append(
+            Message(
+                role=role,
+                content=content,
+                timestamp=str(entry.get("timestamp", "")),
+                source=source,
             )
+        )
 
     return messages
 
