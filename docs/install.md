@@ -6,7 +6,7 @@ This guide is for people installing Observational Memory for day-to-day use. Mai
 
 - Python 3.11 or newer
 - `uv` or Homebrew
-- Claude Code and/or Codex if you want automatic hooks
+- Claude Code, Codex, and/or Grok Build TUI if you want automatic hooks
 - One LLM provider:
   - Anthropic API key
   - OpenAI API key
@@ -51,6 +51,7 @@ The installer sets up:
 - memory files in `~/.local/share/observational-memory/`
 - Claude Code hooks when requested
 - Codex hooks and the AGENTS fallback when requested
+- Grok hooks when requested
 - background observer and reflector jobs
 
 Then check the install:
@@ -101,12 +102,13 @@ om install \
 ```bash
 om install --claude
 om install --codex
+om install --grok
 om install --both
 om install --cowork
 om install --all
 ```
 
-`--both` installs Claude Code and Codex support. `--all` also tries Cowork. Cowork is macOS-only.
+`--both` installs Claude Code and Codex support. `--all` also installs Grok support and tries Cowork. Cowork is macOS-only.
 
 ## Scheduler Choices
 
@@ -134,6 +136,7 @@ On Windows:
 - config lives under `%APPDATA%\observational-memory\`
 - scheduled jobs use Task Scheduler
 - Claude hooks call `om` directly, so `bash` and `jq` are not required
+- Grok hooks call `om` directly, so `bash` and `jq` are not required
 - Cowork install is skipped because Cowork is macOS-only
 
 PowerShell examples:

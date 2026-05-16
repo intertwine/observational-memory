@@ -182,6 +182,31 @@ Tests that should protect Hermes behavior:
 - `tests/test_transcripts.py`
 - `tests/test_cli_observe.py`
 
+## Grok Integration Model
+
+Grok Build TUI is a first-class local integration.
+
+Installer-managed user-level files:
+
+- `~/.grok/hooks/observational-memory.json`
+  OM installs and removes only its own Grok hook file.
+- `~/.claude/settings.json`
+  Grok may also read Claude-compatible hooks. `om install --grok` checks this file and skips duplicate native `SessionStart` context injection when OM Claude hooks already exist.
+
+Runtime expectations:
+
+- `SessionStart` runs `om context` through native Grok hooks when Claude compatibility is not already providing OM context.
+- `SessionEnd`, `UserPromptSubmit`, and `PreCompact` call the hidden `om grok-checkpoint` path.
+- `om observe --source grok` scans recent `~/.grok/sessions/<cwd>/<session-id>/updates.jsonl` files.
+- Grok cursors are count-based because streaming chunks can share timestamps.
+- Grok native memory is independent of OM memory. Do not present one as replacing the other.
+
+Tests that should protect Grok behavior:
+
+- `tests/test_transcripts.py::TestGrokParser`
+- `tests/test_observe.py::TestGrokObserver`
+- `tests/test_cli_install.py::TestGrokInstall`
+
 ## Homebrew Release
 
 `observational-memory` is published to Homebrew via a tap formula (to avoid name collisions with short/common formula names). The executable remains `om`.
@@ -219,9 +244,9 @@ make release-homebrew HOMEBREW_TAP_DIR=../homebrew-tap
 This means `make brew-check` validates the same formula path that Homebrew actually audits, instead of only checking the generated file in this repo.
 If `intertwine/tap` is not tapped locally, `make brew-check` exits with instructions instead of reporting a misleading success.
 
-## v0.6.2 Release
+## v0.6.3 Release
 
-`v0.6.2` is the current hardening release for startup context over large real-world memory corpora.
+`v0.6.3` is the current release. It makes Grok Build TUI first-class while preserving the startup-context hardening from `v0.6.2`.
 
 Before cutting a patch release from this line:
 
@@ -244,7 +269,7 @@ uv run pytest tests/sync/test_store_and_materialize.py
 
 Release flow:
 
-1. Confirm the docs and release notes in [RELEASE-0.6.2.md](RELEASE-0.6.2.md) or the new release note file.
+1. Confirm the docs and release notes in [RELEASE-0.6.3.md](RELEASE-0.6.3.md) or the new release note file.
 2. Bump the version with the appropriate `make bump-version BUMP=...` command.
 3. Run `make check`.
 4. Build with `make build`.
@@ -279,6 +304,7 @@ observational-memory/
 │   ├── transcripts/
 │   │   ├── claude.py                 # Claude Code JSONL parser
 │   │   ├── codex.py                  # Codex CLI session parser
+│   │   ├── grok.py                   # Grok Build TUI updates.jsonl parser
 │   │   ├── hermes.py                 # Hermes Agent session parser
 │   │   └── auto_memory.py            # Claude Code auto-memory scanner
 │   ├── search/                       # Pluggable search over memory files
@@ -291,9 +317,9 @@ observational-memory/
 │   ├── prompts/
 │   │   ├── observer.md               # Observer system prompt
 │   │   └── reflector.md              # Reflector system prompt
-│   └── hooks/claude/
-│       ├── session-start.sh          # Inject memory on session start (search-backed)
-│       └── session-end.sh            # Trigger observer on session end
+│   └── hooks/
+│       ├── claude/                   # Claude startup and checkpoint hooks
+│       └── grok/                     # Grok startup hook
 └── tests/
     ├── test_cli_context.py           # Context injection tests
     ├── test_cli_observe.py           # Observe CLI routing tests

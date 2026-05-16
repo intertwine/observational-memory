@@ -5,7 +5,7 @@ This folder holds the longer guides for Observational Memory. The main README is
 ## Start Here
 
 - [Install and setup](install.md): install paths, first run, and platform notes.
-- [Platform integrations](integrations.md): Claude Code, Codex, Cowork, Hermes, ChatGPT, and Claude Managed Agents.
+- [Platform integrations](integrations.md): Claude Code, Codex, Grok, Cowork, Hermes, ChatGPT, and Claude Managed Agents.
 - [Search, recall, and startup context](search-and-recall.md): how `om context`, `om recall`, and `om search` fit together.
 - [Configuration](configuration.md): env file, provider auth, model choices, schedules, paths, and search backends.
 
@@ -19,7 +19,7 @@ This folder holds the longer guides for Observational Memory. The main README is
 ## Maintainers
 
 - [Maintainer guide](MAINTAINERS.md): development, CI, QMD validation, release, and Homebrew work.
-- [v0.6.2 release notes](RELEASE-0.6.2.md): current release summary.
+- [v0.6.3 release notes](RELEASE-0.6.3.md): current release summary.
 
 ## Archive
 

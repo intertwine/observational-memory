@@ -4,7 +4,7 @@ This repo uses Observational Memory itself, but repo work should remain local-fi
 
 ## Current Goal Shape
 
-The current release line is `v0.6.1`. Do not bump versions, tag releases, publish to PyPI, or update Homebrew again unless Bryan explicitly asks.
+The current release line is `v0.6.3`. Do not bump versions, tag releases, publish to PyPI, or update Homebrew again unless Bryan explicitly asks.
 
 ## Work Rules
 
@@ -46,7 +46,7 @@ uv run pytest
 
 ## Current Feature Boundaries
 
-- Claude Code and Codex have installer-managed hooks.
+- Claude Code, Codex, and Grok have installer-managed hooks.
 - Cowork has a macOS local plugin.
 - Hermes is transcript ingestion only in this repo today.
 - OM Cluster is opt-in and disabled unless initialized or joined.

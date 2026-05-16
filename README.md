@@ -1,6 +1,6 @@
 # Observational Memory
 
-![Observational Memory header showing local agent memory moving through Codex hooks, Claude, ChatGPT Memory, Claude Cowork, and Hermes.](assets/observational-memory-header.png)
+![Observational Memory header showing local agent memory moving through Codex hooks, Claude, Grok, ChatGPT Memory, Claude Cowork, and Hermes.](assets/observational-memory-header.png)
 
 [![PyPI version](https://img.shields.io/pypi/v/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/observational-memory.svg)](https://pypi.org/project/observational-memory/)
@@ -9,10 +9,11 @@
 
 **Local memory for the agents you already use.**
 
-Observational Memory, or `om`, gives Claude Code, Codex, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
+Observational Memory, or `om`, gives Claude Code, Codex, Grok Build TUI, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
 
-The current release is `v0.6.2`. It includes:
+The current release is `v0.6.3`. It includes:
 
+- first-class Grok Build TUI hooks and transcript observation
 - budgeted startup context through `om context`
 - compact startup profile projection for long-running memory corpora
 - project-level active context routing so large active files still fit
@@ -70,7 +71,7 @@ Default paths:
 
 ```mermaid
 flowchart LR
-    A["Claude Code, Codex, Cowork, Hermes logs"] --> B["om observe"]
+    A["Claude Code, Codex, Grok, Cowork, Hermes logs"] --> B["om observe"]
     C["Claude auto-memory files"] --> D["search index"]
     B --> E["observations.md"]
     E --> F["om reflect"]
@@ -86,7 +87,7 @@ flowchart LR
 1. Install `om`.
 2. Run `om install` and answer the provider questions.
 3. Run `om doctor`.
-4. Start using Claude Code or Codex normally.
+4. Start using Claude Code, Codex, or Grok normally.
 5. Search memory when you need it:
 
 ```bash
@@ -120,6 +121,7 @@ Start here:
 | --- | --- |
 | Claude Code | Hooks for startup context and checkpoints. |
 | Codex | Hooks-first startup and Stop checkpoints, with an AGENTS fallback. |
+| Grok Build TUI | Native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation. |
 | Claude Cowork | Local plugin on macOS with hooks and `/recall`. |
 | Hermes | Manual session-log ingestion. A first-class Hermes plugin is planned in [plans/hermes-first-class-plugin.md](plans/hermes-first-class-plugin.md). |
 | ChatGPT / Claude Managed Agents | Reviewed export bundles through `om export`; `om` does not silently write hosted memory. |
@@ -155,7 +157,7 @@ Do not sync `~/.local/share/observational-memory/` directly with Dropbox, iCloud
 ## Architecture At A Glance
 
 <p align="center">
-  <img src="assets/system-diagram.jpeg" alt="Observational Memory system diagram showing Claude Code and Codex hooks feeding shared local markdown memory, search, and reflection." width="980" />
+  <img src="assets/system-diagram.jpeg" alt="Observational Memory system diagram showing agent hooks feeding shared local markdown memory, search, and reflection." width="980" />
 </p>
 
 The short version:
@@ -169,7 +171,7 @@ The short version:
 
 ## Release State
 
-`v0.6.2` is the current release. It tunes startup context for large real-world memory corpora by emitting a compact working profile, splitting active context by project, and keeping full generated memory available through recall.
+`v0.6.3` is the current release. It makes Grok Build TUI a first-class local agent in the ecosystem while keeping the `v0.6.2` startup-context improvements for large real-world memory corpora.
 
 Before the next release, maintainers should run:
 

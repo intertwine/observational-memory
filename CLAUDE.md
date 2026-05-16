@@ -4,12 +4,13 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.6.1`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.6.3`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
 - budgeted startup context with `om context`
 - first-class recall with `om recall`
+- first-class Grok Build TUI hooks and transcript observation
 - richer reflection metadata and host-local scope controls
 - opt-in OM Cluster sync
 - stdlib relay server through `om-relay` and `om cluster relay serve`
@@ -44,7 +45,7 @@ CI runs `ruff check`, `ruff format --check`, and `pytest` on Python 3.11, 3.12, 
 
 ## Architecture
 
-Observational Memory is user-level memory for Claude Code, Codex, Cowork, and Hermes.
+Observational Memory is user-level memory for Claude Code, Codex, Grok Build TUI, Cowork, and Hermes.
 
 ```text
 transcripts -> om observe -> observations.md
@@ -64,12 +65,13 @@ Important modules:
 - `src/observational_memory/search/`: BM25, QMD, and no-op search backends.
 - `src/observational_memory/sync/`: OM Cluster config, records, crypto, materialization, and transports.
 - `src/observational_memory/sync/relay_server.py`: supported stdlib relay server.
-- `src/observational_memory/transcripts/`: Claude, Codex, Cowork, Hermes, and Claude auto-memory parsers.
+- `src/observational_memory/transcripts/`: Claude, Codex, Grok, Cowork, Hermes, and Claude auto-memory parsers.
 
 ## Agent Integrations
 
 - Claude Code: hooks for startup context, session end, prompt submit, and pre-compact checkpoints.
 - Codex: hooks-first startup and Stop checkpoints, plus a conditional AGENTS fallback.
+- Grok Build TUI: native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation.
 - Cowork: macOS local plugin with hooks and `/recall`.
 - Hermes: manual transcript ingestion today; first-class plugin work remains in `plans/hermes-first-class-plugin.md`.
 
@@ -129,4 +131,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-`v0.6.1` has release notes in `docs/RELEASE-0.6.1.md`. Future release steps require explicit user approval.
+`v0.6.3` has release notes in `docs/RELEASE-0.6.3.md`. Future release steps require explicit user approval.
