@@ -120,3 +120,45 @@ om export --target generic --include-observations
 ChatGPT exports are concise seeds that you review before adding to ChatGPT or a project.
 
 Claude Managed Agents exports are small Markdown files plus a manifest. They are designed for memory-store import or review.
+
+## Grok Build TUI (xAI)
+
+Grok has excellent native hook support and also reads `~/.claude/settings.json` for compatibility.
+
+Install:
+
+```bash
+om install --grok
+# or
+om install --all
+```
+
+What gets installed:
+
+- `~/.grok/hooks/observational-memory.json` — OM `SessionStart` (context) + checkpoint hooks
+- On Windows: direct `om` executable invocations (no shell script dependency)
+- If OM Claude hooks already exist in `~/.claude/settings.json`, the installer intelligently omits a duplicate `SessionStart` to avoid double-injecting context (Grok inherits it via the compatibility layer)
+
+Runtime behavior:
+
+- `SessionStart` → `om context` (search-backed, Cluster-aware, budgeted)
+- `SessionEnd` / `UserPromptSubmit` / `PreCompact` → `om grok-checkpoint` (queues observation of the `updates.jsonl`)
+- `om observe --source grok` ingests Grok sessions (parses the rich `session/update` JSONL format with proper chunk and tool handling)
+- Large Grok sessions are automatically processed in safe batches
+
+Check it:
+
+```bash
+om context --for grok --cwd "$PWD" --task "continue the current feature"
+om recall --query "the feature we were implementing" --for grok
+om doctor   # Look for the Grok Build TUI section
+```
+
+Useful commands:
+
+```bash
+om grok-checkpoint --transcript ~/.grok/sessions/.../updates.jsonl
+om observe --source grok --dry-run
+```
+
+Grok also has its own experimental native memory (`~/.grok/memory/`). OM and Grok memory are independent peers — use OM when you want cross-agent (Claude + Codex + Grok + Hermes) shared memory.

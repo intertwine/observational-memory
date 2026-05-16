@@ -663,3 +663,73 @@ def _write_observations(new_observations: str, config: Config) -> None:
         config.observations_path.write_text(new_observations.rstrip() + "\n")
     refresh_startup_memory(config)
     _reindex_if_enabled(config)
+
+
+# --- Grok observation support (Phase 2) ---
+
+
+def observe_grok_transcript(
+    transcript_path: Path,
+    config: Config | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Run observer on a specific Grok updates.jsonl transcript.
+
+    Grok sessions can be very long (streaming chunks). We split into manageable
+    batches (max 250 messages per LLM call) to avoid empty responses from the
+    observer model on oversized prompts. Cursor is updated progressively.
+    """
+    if config is None:
+        config = Config()
+
+    from .transcripts.grok import parse_transcript
+
+    cursor = config.load_cursor()
+    cursor_key = str(transcript_path)
+    all_parsed_messages = parse_transcript(transcript_path, source="grok")
+    if not all_parsed_messages:
+        return None
+
+    after_count = cursor.get(cursor_key)
+    after_index = int(after_count) if isinstance(after_count, (int, str)) and str(after_count).isdigit() else 0
+    if after_index > len(all_parsed_messages):
+        after_index = 0
+
+    all_messages = all_parsed_messages[after_index:]
+    if not all_messages:
+        return None
+
+    # Chunk large transcripts (Grok-specific robustness for long agent sessions)
+    MAX_BATCH = 250
+    results = []
+    for i in range(0, len(all_messages), MAX_BATCH):
+        batch = all_messages[i : i + MAX_BATCH]
+        res = run_observer(batch, config, dry_run, transcript_path=transcript_path, source="grok")
+        if res:
+            results.append(res)
+
+    combined = "\n\n".join(r for r in results if r) if results else None
+
+    if not dry_run and (combined or len(all_messages) >= config.min_messages):
+        # Use count-based cursor for Grok to avoid reprocessing same-second chunks
+        cursor[cursor_key] = len(all_parsed_messages)
+        config.save_cursor(cursor)
+
+    return combined
+
+
+def observe_all_grok(config: Config | None = None, dry_run: bool = False) -> list[str]:
+    """Scan all recent Grok sessions and run observer on new ones."""
+    from .transcripts.grok import find_recent_grok_sessions
+
+    if config is None:
+        config = Config()
+
+    results = []
+
+    for path in find_recent_grok_sessions(config.grok_sessions_dir):
+        result = observe_grok_transcript(path, config, dry_run)
+        if result:
+            results.append(result)
+
+    return results

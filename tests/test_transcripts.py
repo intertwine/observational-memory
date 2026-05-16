@@ -351,3 +351,86 @@ class TestCoworkDiscovery:
 
         results = find_all(tmp_path / "nonexistent")
         assert results == []
+
+
+class TestGrokParser:
+    """Tests for the Grok Build TUI transcript parser (updates.jsonl with session/update events)."""
+
+    def test_parse_grok_updates_jsonl(self, tmp_path):
+        from observational_memory.transcripts.grok import parse_transcript as parse_grok
+
+        transcript = tmp_path / "grok-sample.jsonl"
+        # Minimal real-world-like events from inspection of actual Grok sessions on this machine
+        transcript.write_text(
+            '{"timestamp":1778885590,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"user_message_chunk","content":{"type":"text",'
+            '"text":"Please orient yourself to this local machine."}}}}\n'
+            + '{"timestamp":1778885591,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"agent_thought_chunk","content":{"type":"text",'
+            '"text":"The user wants a machine orientation report."}}}}\n'
+            + '{"timestamp":1778885592,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"tool_call","name":"list_dir"}}}\n'
+            + '{"timestamp":1778885593,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"agent_message_chunk","content":{"type":"text",'
+            '"text":"Here is the report on this workstation..."}}}}\n'
+        )
+        messages = parse_grok(transcript, source="grok")
+        assert len(messages) >= 3
+        assert all(m.source == "grok" for m in messages)
+        roles = {m.role for m in messages}
+        assert "user" in roles
+        assert "assistant" in roles
+        contents = " ".join(m.content for m in messages)
+        assert "orient yourself" in contents.lower() or "machine" in contents.lower()
+        assert any("tool" in m.content.lower() for m in messages if "tool" in m.content.lower())
+
+    def test_grok_parser_handles_empty_or_invalid(self, tmp_path):
+        from observational_memory.transcripts.grok import parse_transcript as parse_grok
+
+        transcript = tmp_path / "empty.jsonl"
+        transcript.write_text("")
+        messages = parse_grok(transcript)
+        assert messages == []
+
+        bad = tmp_path / "bad.jsonl"
+        bad.write_text("not json\n")
+        messages = parse_grok(bad)
+        assert messages == []
+
+    def test_find_recent_grok_sessions(self, tmp_path):
+        import time
+
+        from observational_memory.transcripts.grok import find_recent_grok_sessions
+
+        sessions_dir = tmp_path / "sessions"
+        # Real Grok structure: <cwd-encoded>/<session-id>/updates.jsonl
+        (sessions_dir / "cwd1" / "session1").mkdir(parents=True)
+        f1 = sessions_dir / "cwd1" / "session1" / "updates.jsonl"
+        f1.write_text("{}")
+
+        time.sleep(0.05)
+        (sessions_dir / "cwd1" / "session2").mkdir(parents=True)
+        f2 = sessions_dir / "cwd1" / "session2" / "updates.jsonl"
+        f2.write_text("{}")
+
+        results = find_recent_grok_sessions(sessions_dir)
+        assert len(results) == 2
+        # Newest first (by mtime)
+        assert results[0].parent.name == "session2"
+
+    def test_grok_parser_supports_timestamp_cursor_and_tool_call_cleanup(self, tmp_path):
+        from observational_memory.transcripts.grok import parse_transcript as parse_grok
+
+        transcript = tmp_path / "grok-cursor.jsonl"
+        transcript.write_text(
+            '{"timestamp":1,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"one"}}}}\n'
+            + '{"timestamp":2,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"agent_message_chunk","content":{"type":"text",'
+            '"text":"before <tool_call>{\\"name\\":\\"x\\"}</tool_call> after"}}}}\n'
+        )
+
+        messages = parse_grok(transcript, after_timestamp="1")
+
+        assert len(messages) == 1
+        assert messages[0].content == "before after [tool call details omitted for observation]"

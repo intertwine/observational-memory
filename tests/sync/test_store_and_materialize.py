@@ -13,7 +13,11 @@ from observational_memory.sync.store import ClusterStore, NodeMetadata
 
 
 def _init_store(tmp_path, name="Test", alias="node-a"):
-    config = Config(memory_dir=tmp_path / alias / "memory", env_file=tmp_path / alias / "config" / "env")
+    config = Config(
+        memory_dir=tmp_path / alias / "memory",
+        env_file=tmp_path / alias / "config" / "env",
+        observation_retention_days=36500,
+    )
     cluster_config = initialize_cluster_config(
         config,
         name=name,

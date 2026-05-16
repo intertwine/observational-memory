@@ -19,7 +19,12 @@ def _messages():
 
 
 def _init_cluster(tmp_path):
-    config = Config(memory_dir=tmp_path / "memory", env_file=tmp_path / "config" / "env", min_messages=3)
+    config = Config(
+        memory_dir=tmp_path / "memory",
+        env_file=tmp_path / "config" / "env",
+        min_messages=3,
+        observation_retention_days=36500,
+    )
     initialize_cluster_config(
         config,
         name="Test",
