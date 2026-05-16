@@ -285,6 +285,27 @@ class TestHermesObserver:
 
 
 class TestGrokObserver:
+    @staticmethod
+    def _write_grok_messages(transcript: Path, count: int) -> None:
+        transcript.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "timestamp": 1778885590 + i,
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": f"message-{i}"},
+                            }
+                        },
+                    }
+                )
+                for i in range(count)
+            )
+            + "\n"
+        )
+
     @patch("observational_memory.observe.run_observer")
     def test_observe_grok_transcript_advances_cursor_to_total_message_count(self, mock_run_observer, tmp_path):
         mock_run_observer.return_value = "## 2026-05-16\n\n- checkpoint"
@@ -292,32 +313,26 @@ class TestGrokObserver:
         transcript = tmp_path / "updates.jsonl"
         config = Config(memory_dir=tmp_path / "memory", env_file=tmp_path / "config" / "env")
 
-        def write_messages(count: int) -> None:
-            transcript.write_text(
-                "\n".join(
-                    json.dumps(
-                        {
-                            "timestamp": 1778885590 + i,
-                            "method": "session/update",
-                            "params": {
-                                "update": {
-                                    "sessionUpdate": "agent_message_chunk",
-                                    "content": {"type": "text", "text": f"message-{i}"},
-                                }
-                            },
-                        }
-                    )
-                    for i in range(count)
-                )
-                + "\n"
-            )
-
-        write_messages(5)
+        self._write_grok_messages(transcript, 5)
         observe_grok_transcript(transcript, config, dry_run=False)
         assert config.load_cursor()[str(transcript)] == 5
 
-        write_messages(7)
+        self._write_grok_messages(transcript, 7)
         observe_grok_transcript(transcript, config, dry_run=False)
 
         assert config.load_cursor()[str(transcript)] == 7
         assert mock_run_observer.call_args_list[1].args[0][0].content == "message-5"
+
+    @patch("observational_memory.observe.run_observer")
+    def test_observe_grok_transcript_advances_cursor_when_observer_returns_none(self, mock_run_observer, tmp_path):
+        mock_run_observer.return_value = None
+
+        transcript = tmp_path / "updates.jsonl"
+        config = Config(memory_dir=tmp_path / "memory", env_file=tmp_path / "config" / "env", min_messages=5)
+
+        self._write_grok_messages(transcript, 5)
+
+        result = observe_grok_transcript(transcript, config, dry_run=False)
+
+        assert result is None
+        assert config.load_cursor()[str(transcript)] == 5

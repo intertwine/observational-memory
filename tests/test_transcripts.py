@@ -372,7 +372,7 @@ class TestGrokParser:
             '"sessionUpdate":"tool_call","name":"list_dir"}}}\n'
             + '{"timestamp":1778885593,"method":"session/update","params":{"update":{'
             '"sessionUpdate":"agent_message_chunk","content":{"type":"text",'
-            '"text":"Here is the report on SponkMax..."}}}}\n'
+            '"text":"Here is the report on this workstation..."}}}}\n'
         )
         messages = parse_grok(transcript, source="grok")
         assert len(messages) >= 3
@@ -417,3 +417,20 @@ class TestGrokParser:
         assert len(results) == 2
         # Newest first (by mtime)
         assert results[0].parent.name == "session2"
+
+    def test_grok_parser_supports_timestamp_cursor_and_tool_call_cleanup(self, tmp_path):
+        from observational_memory.transcripts.grok import parse_transcript as parse_grok
+
+        transcript = tmp_path / "grok-cursor.jsonl"
+        transcript.write_text(
+            '{"timestamp":1,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"one"}}}}\n'
+            + '{"timestamp":2,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"agent_message_chunk","content":{"type":"text",'
+            '"text":"before <tool_call>{\\"name\\":\\"x\\"}</tool_call> after"}}}}\n'
+        )
+
+        messages = parse_grok(transcript, after_timestamp="1")
+
+        assert len(messages) == 1
+        assert messages[0].content == "before after [tool call details omitted for observation]"

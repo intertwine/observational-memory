@@ -22,6 +22,7 @@ This parser is intentionally defensive for the early-beta nature of Grok.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -45,15 +46,15 @@ def find_recent_grok_sessions(sessions_dir: Path | None = None) -> list[Path]:
 
 
 def parse_transcript(
-    path: Path, after_uuid: str | None = None, source: str = "grok", after_index: int | None = None
+    path: Path, after_timestamp: str | None = None, source: str = "grok", after_index: int | None = None
 ) -> list[Message]:
     """Parse a Grok updates.jsonl into normalized Messages.
 
     Supports count-based resumption via after_index (preferred for Grok to avoid
-    same-second chunk reprocessing) or legacy timestamp-based via after_uuid.
+    same-second chunk reprocessing) or timestamp-based resumption via after_timestamp.
     """
     messages: list[Message] = []
-    seen_after = after_uuid is None and after_index is None
+    seen_after = after_timestamp is None and after_index is None
     message_count = 0
 
     if not path.exists():
@@ -84,9 +85,9 @@ def parse_transcript(
                 if message_count <= after_index:
                     continue
                 seen_after = True
-            elif after_uuid:
+            elif after_timestamp:
                 ts = str(entry.get("timestamp", ""))
-                if ts == after_uuid:
+                if ts == after_timestamp:
                     seen_after = True
                 continue
             else:
@@ -127,7 +128,8 @@ def _extract_grok_content(update: dict[str, Any]) -> str:
             if isinstance(text, str) and text.strip():
                 # Clean up embedded tool call XML for readability in observations
                 if "<tool_call>" in text:
-                    text = text.split("<tool_call>")[0].strip() + " [tool call details omitted for observation]"
+                    text = re.sub(r"<tool_call>.*?(?:</tool_call>|$)", "", text, flags=re.DOTALL)
+                    text = re.sub(r"\s+", " ", text).strip() + " [tool call details omitted for observation]"
                 return text.strip()
         # Fallback to any string value in the dict
         for v in content.values():

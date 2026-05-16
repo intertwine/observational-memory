@@ -44,6 +44,10 @@ if [[ -f "$ACTIVE" && -s "$ACTIVE" ]]; then
 fi
 
 if [[ -n "$context" ]]; then
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "observational-memory Grok hook fallback requires jq to emit context JSON" >&2
+        exit 0
+    fi
     # Grok (via Claude compatibility or native hooks) understands this shape
     jq -n --arg ctx "$context" '{
         hookSpecificOutput: {

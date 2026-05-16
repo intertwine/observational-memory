@@ -4974,12 +4974,13 @@ def _install_grok(config: Config) -> None:
 
     has_claude_om = _has_om_claude_session_start(config)
 
-    payload: dict[str, object] = {"hooks": {}}
+    hooks_payload: dict[str, list[dict[str, object]]] = {}
+    payload: dict[str, object] = {"hooks": hooks_payload}
 
     session_start_cmd, checkpoint_cmd = _grok_hook_commands()
 
     if not has_claude_om:
-        payload["hooks"]["SessionStart"] = [
+        hooks_payload["SessionStart"] = [
             {
                 "hooks": [
                     {
@@ -4997,7 +4998,7 @@ def _install_grok(config: Config) -> None:
 
     # Register checkpoint events using the dedicated grok-checkpoint command
     for event in ["SessionEnd", "UserPromptSubmit", "PreCompact"]:
-        payload["hooks"][event] = [
+        hooks_payload[event] = [
             {
                 "hooks": [
                     {

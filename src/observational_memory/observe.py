@@ -710,7 +710,7 @@ def observe_grok_transcript(
 
     combined = "\n\n".join(r for r in results if r) if results else None
 
-    if combined and not dry_run:
+    if not dry_run and (combined or len(all_messages) >= config.min_messages):
         # Use count-based cursor for Grok to avoid reprocessing same-second chunks
         cursor[cursor_key] = len(all_parsed_messages)
         config.save_cursor(cursor)
@@ -733,37 +733,3 @@ def observe_all_grok(config: Config | None = None, dry_run: bool = False) -> lis
             results.append(result)
 
     return results
-
-
-def _grok_messages_since_cursor(transcript_path: Path, cursor: dict) -> tuple[list[Message], int]:
-    """Return new Grok messages for a transcript plus total parsed count."""
-    from .transcripts.grok import parse_transcript
-
-    cursor_key = str(transcript_path)
-    after_ts = cursor.get(cursor_key)
-
-    all_messages = parse_transcript(transcript_path, source="grok")
-    if not all_messages:
-        return [], 0
-
-    if after_ts is None:
-        return all_messages, len(all_messages)
-
-    # Filter messages after the cursor timestamp (or count fallback)
-    new_messages = []
-    for m in all_messages:
-        if m.timestamp and m.timestamp > str(after_ts):
-            new_messages.append(m)
-        elif not m.timestamp and len(new_messages) == 0:
-            # If no timestamps, fall back to count-based (simple for v1)
-            pass
-
-    # For robustness, if timestamps not reliable, return all new since last known count
-    if not new_messages and isinstance(after_ts, (int, str)) and str(after_ts).isdigit():
-        try:
-            idx = int(after_ts)
-            new_messages = all_messages[idx:] if idx < len(all_messages) else []
-        except (ValueError, IndexError):
-            new_messages = all_messages
-
-    return new_messages, len(all_messages)
