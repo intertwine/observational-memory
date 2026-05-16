@@ -40,7 +40,11 @@ def _membership(store, invite=None):
 
 
 def _node_config(tmp_path, name):
-    return Config(memory_dir=tmp_path / name / "memory", env_file=tmp_path / name / "config" / "env")
+    return Config(
+        memory_dir=tmp_path / name / "memory",
+        env_file=tmp_path / name / "config" / "env",
+        observation_retention_days=36500,
+    )
 
 
 def test_two_nodes_converge_over_filesystem_transport(tmp_path):

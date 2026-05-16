@@ -16,7 +16,11 @@ from observational_memory.sync.store import ClusterStore
 
 
 def _node_config(tmp_path, name):
-    return Config(memory_dir=tmp_path / name / "memory", env_file=tmp_path / name / "config" / "env")
+    return Config(
+        memory_dir=tmp_path / name / "memory",
+        env_file=tmp_path / name / "config" / "env",
+        observation_retention_days=36500,
+    )
 
 
 def _membership(store, invite=None):
