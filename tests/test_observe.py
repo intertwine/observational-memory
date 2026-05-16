@@ -1,5 +1,6 @@
 """Tests for the observer module."""
 
+import json
 from pathlib import Path
 from unittest.mock import PropertyMock, patch
 
@@ -11,6 +12,7 @@ from observational_memory.observe import (
     _format_messages,
     observe_all_hermes,
     observe_codex_transcript,
+    observe_grok_transcript,
     observe_hermes_transcript,
     run_observer,
     run_observer_backfill,
@@ -280,3 +282,42 @@ class TestHermesObserver:
 
         assert results == ["## 2026-04-04\n\n- hermes"]
         mock_observe.assert_called_once_with(transcript, config, True)
+
+
+class TestGrokObserver:
+    @patch("observational_memory.observe.run_observer")
+    def test_observe_grok_transcript_advances_cursor_to_total_message_count(self, mock_run_observer, tmp_path):
+        mock_run_observer.return_value = "## 2026-05-16\n\n- checkpoint"
+
+        transcript = tmp_path / "updates.jsonl"
+        config = Config(memory_dir=tmp_path / "memory", env_file=tmp_path / "config" / "env")
+
+        def write_messages(count: int) -> None:
+            transcript.write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "timestamp": 1778885590 + i,
+                            "method": "session/update",
+                            "params": {
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": f"message-{i}"},
+                                }
+                            },
+                        }
+                    )
+                    for i in range(count)
+                )
+                + "\n"
+            )
+
+        write_messages(5)
+        observe_grok_transcript(transcript, config, dry_run=False)
+        assert config.load_cursor()[str(transcript)] == 5
+
+        write_messages(7)
+        observe_grok_transcript(transcript, config, dry_run=False)
+
+        assert config.load_cursor()[str(transcript)] == 7
+        assert mock_run_observer.call_args_list[1].args[0][0].content == "message-5"
