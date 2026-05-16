@@ -663,3 +663,101 @@ def _write_observations(new_observations: str, config: Config) -> None:
         config.observations_path.write_text(new_observations.rstrip() + "\n")
     refresh_startup_memory(config)
     _reindex_if_enabled(config)
+
+
+# --- Grok observation support (Phase 2) ---
+
+
+def observe_grok_transcript(
+    transcript_path: Path,
+    config: Config | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Run observer on a specific Grok updates.jsonl transcript.
+
+    Grok sessions can be very long (streaming chunks). We split into manageable
+    batches (max 250 messages per LLM call) to avoid empty responses from the
+    observer model on oversized prompts. Cursor is updated progressively.
+    """
+    if config is None:
+        config = Config()
+
+    from .transcripts.grok import parse_transcript
+
+    cursor = config.load_cursor()
+    cursor_key = str(transcript_path)
+    after_ts = cursor.get(cursor_key)
+
+    all_messages = parse_transcript(transcript_path, after_uuid=after_ts, source="grok")
+    if not all_messages:
+        return None
+
+    # Chunk large transcripts (Grok-specific robustness for long agent sessions)
+    MAX_BATCH = 250
+    results = []
+    for i in range(0, len(all_messages), MAX_BATCH):
+        batch = all_messages[i : i + MAX_BATCH]
+        res = run_observer(batch, config, dry_run, transcript_path=transcript_path, source="grok")
+        if res:
+            results.append(res)
+
+    combined = "\n\n".join(r for r in results if r) if results else None
+
+    if combined and not dry_run:
+        # Advance cursor to the end of what we just processed
+        last_ts = _latest_message_timestamp(all_messages) or str(len(all_messages))
+        cursor[cursor_key] = last_ts
+        config.save_cursor(cursor)
+
+    return combined
+
+
+def observe_all_grok(config: Config | None = None, dry_run: bool = False) -> list[str]:
+    """Scan all recent Grok sessions and run observer on new ones."""
+    from .transcripts.grok import find_recent_grok_sessions
+
+    if config is None:
+        config = Config()
+
+    results = []
+
+    for path in find_recent_grok_sessions(config.grok_sessions_dir):
+        result = observe_grok_transcript(path, config, dry_run)
+        if result:
+            results.append(result)
+
+    return results
+
+
+def _grok_messages_since_cursor(transcript_path: Path, cursor: dict) -> tuple[list[Message], int]:
+    """Return new Grok messages for a transcript plus total parsed count."""
+    from .transcripts.grok import parse_transcript
+
+    cursor_key = str(transcript_path)
+    after_ts = cursor.get(cursor_key)
+
+    all_messages = parse_transcript(transcript_path, source="grok")
+    if not all_messages:
+        return [], 0
+
+    if after_ts is None:
+        return all_messages, len(all_messages)
+
+    # Filter messages after the cursor timestamp (or count fallback)
+    new_messages = []
+    for m in all_messages:
+        if m.timestamp and m.timestamp > str(after_ts):
+            new_messages.append(m)
+        elif not m.timestamp and len(new_messages) == 0:
+            # If no timestamps, fall back to count-based (simple for v1)
+            pass
+
+    # For robustness, if timestamps not reliable, return all new since last known count
+    if not new_messages and isinstance(after_ts, (int, str)) and str(after_ts).isdigit():
+        try:
+            idx = int(after_ts)
+            new_messages = all_messages[idx:] if idx < len(all_messages) else []
+        except (ValueError, IndexError):
+            new_messages = all_messages
+
+    return new_messages, len(all_messages)

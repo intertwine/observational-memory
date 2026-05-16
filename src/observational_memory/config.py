@@ -252,6 +252,21 @@ class Config:
     def hermes_sessions_dir(self) -> Path:
         return Path.home() / ".hermes" / "sessions"
 
+    # Grok Build TUI paths (xAI)
+    grok_home: Path = field(default_factory=lambda: Path(os.environ.get("GROK_HOME", Path.home() / ".grok")))
+
+    @property
+    def grok_config_path(self) -> Path:
+        return self.grok_home / "config.toml"
+
+    @property
+    def grok_hooks_dir(self) -> Path:
+        return self.grok_home / "hooks"
+
+    @property
+    def grok_sessions_dir(self) -> Path:
+        return self.grok_home / "sessions"
+
     @property
     def cowork_sessions_dir(self) -> Path:
         return _cowork_app_support_dir() / "local-agent-mode-sessions"

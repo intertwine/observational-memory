@@ -15,7 +15,7 @@ import click
 from . import __version__
 from .config import Config
 
-_OBSERVE_SOURCES = ["claude", "codex", "hermes", "cowork", "claude-memory", "all"]
+_OBSERVE_SOURCES = ["claude", "codex", "grok", "hermes", "cowork", "claude-memory", "all"]
 
 
 @click.group()
@@ -74,7 +74,7 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
         else:
             raise click.ClickException(
                 "Could not detect transcript source. "
-                "Pass --source claude, --source codex, --source hermes, or --source cowork."
+                "Pass --source claude, --source codex, --source grok, --source hermes, or --source cowork."
             )
         if result:
             click.echo(f"Observations updated ({len(result)} chars)")
@@ -2243,8 +2243,9 @@ def _configure_llm(
 @click.option("--claude", "targets", flag_value="claude", help="Install Claude Code hooks")
 @click.option("--codex", "targets", flag_value="codex", help="Install Codex hooks plus AGENTS fallback")
 @click.option("--cowork", "targets", flag_value="cowork", help="Install Cowork plugin")
+@click.option("--grok", "targets", flag_value="grok", help="Install Grok Build TUI hooks (Claude compat aware)")
 @click.option("--both", "targets", flag_value="both", default=True, help="Install Claude Code + Codex (default)")
-@click.option("--all", "targets", flag_value="all", help="Install all integrations including Cowork")
+@click.option("--all", "targets", flag_value="all", help="Install all integrations including Cowork and Grok")
 @click.option(
     "--scheduler",
     type=click.Choice(_SCHEDULER_MODES, case_sensitive=False),
@@ -2276,7 +2277,7 @@ def install(
     bedrock_region: str | None,
     non_interactive: bool,
 ) -> None:
-    """Set up observational memory for Claude Code and/or Codex CLI."""
+    """Set up observational memory for Claude Code, Codex, Grok, and/or Cowork."""
     config = ctx.obj["config"]
     config.ensure_memory_dir()
     scheduler_mode = _resolve_scheduler_mode(scheduler, cron_compat)
@@ -2333,6 +2334,9 @@ def install(
     if targets in ("cowork", "all"):
         _install_cowork_plugin(config)
 
+    if targets in ("grok", "all"):
+        _install_grok(config)
+
     if scheduler_mode == "launchd":
         try:
             _install_launchd(config, targets)
@@ -2380,6 +2384,9 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
 
     if targets in ("cowork", "all"):
         _uninstall_cowork_plugin(config)
+
+    if targets in ("grok", "all"):
+        _uninstall_grok(config)
 
     _uninstall_launchd(config, targets)
     _uninstall_schtasks(config, targets)
@@ -2648,6 +2655,42 @@ def status(ctx: click.Context) -> None:
 
     cowork_transcripts = find_all_cowork(config.cowork_sessions_dir)
     click.echo(f"  Sessions: {len(cowork_transcripts)} audit.jsonl file(s) found")
+
+    # Grok Build TUI status (Phase 1 hook support)
+    grok_hook_file = config.grok_hooks_dir / "observational-memory.json"
+    click.echo("\nGrok Build TUI:")
+    click.echo(f"  Hooks dir: {config.grok_hooks_dir}")
+    if grok_hook_file.exists():
+        click.echo(f"  OM hook file: installed ({grok_hook_file})")
+        try:
+            import json as json_mod
+
+            data = json_mod.loads(grok_hook_file.read_text())
+            events = list(data.get("hooks", {}).keys())
+            click.echo(f"  Registered events: {', '.join(events) if events else 'none'}")
+        except Exception:
+            click.echo("  OM hook file: present (unreadable)")
+    else:
+        click.echo("  OM hook file: not installed (run `om install --grok`)")
+
+    if _has_om_claude_session_start(config):
+        click.echo("  Claude compatibility: OM hooks in ~/.claude/settings.json (Grok will inherit context)")
+
+    grok_config = config.grok_config_path
+    if grok_config.exists():
+        try:
+            import tomllib
+
+            with grok_config.open("rb") as f:
+                gdata = tomllib.load(f)
+            mem = gdata.get("memory", {})
+            enabled = mem.get("enabled", False)
+            status = "enabled" if enabled else "disabled"
+            click.echo(f"  Native memory: {status} in {grok_config} (OM is independent peer)")
+        except Exception:
+            click.echo(f"  Native memory: config present at {grok_config} (parse error)")
+    else:
+        click.echo(f"  Native memory: no {grok_config} (disabled by default)")
 
     # Auto-memory (Claude Code per-project memory)
     from .transcripts.auto_memory import find_memory_directories
@@ -2981,6 +3024,40 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Cowork plugin", "WARN", "not installed", fix="Run: om install --cowork")
 
+    # 14. Grok Build TUI (Phase 1 hook support + Claude compatibility awareness)
+    grok_hook_file = config.grok_hooks_dir / "observational-memory.json"
+    if grok_hook_file.exists():
+        _check("Grok OM hook file", "PASS", str(grok_hook_file))
+    else:
+        _check("Grok OM hook file", "WARN", "not installed", fix="Run: om install --grok")
+
+    if _has_om_claude_session_start(config):
+        _check(
+            "Grok Claude compatibility",
+            "PASS",
+            "OM hooks in ~/.claude/settings.json (Grok inherits context via compatibility layer)",
+        )
+    else:
+        _check("Grok Claude compatibility", "PASS", "using native ~/.grok/hooks/ (no Claude OM hooks detected)")
+
+    if config.grok_config_path.exists():
+        try:
+            import tomllib
+
+            with config.grok_config_path.open("rb") as f:
+                gdata = tomllib.load(f)
+            mem = gdata.get("memory", {})
+            enabled = mem.get("enabled", False)
+            _check(
+                "Grok native memory",
+                "PASS",
+                f"{'enabled' if enabled else 'disabled'} in {config.grok_config_path} (OM is independent peer)",
+            )
+        except Exception:
+            _check("Grok native memory", "WARN", f"config present at {config.grok_config_path} but unreadable")
+    else:
+        _check("Grok native memory", "PASS", "no config (disabled by default; OM is peer)")
+
     # 13. Hook paths valid (only check Claude hook commands that look like file paths, not inline shell commands)
     if config.claude_settings_path.exists():
         try:
@@ -3197,6 +3274,22 @@ def _claude_hook_commands() -> tuple[str, str]:
     return str(hooks_dir / "session-start.sh"), str(hooks_dir / "session-end.sh")
 
 
+def _grok_hook_commands() -> tuple[str, str]:
+    """Return (session_start_command, checkpoint_command) for Grok Build TUI hooks.
+
+    On Windows we register direct ``om`` invocations (``om context`` for SessionStart,
+    ``om grok-checkpoint`` for checkpoint events) for robustness, exactly as done
+    for Claude Code. On POSIX we use the dedicated bash hook script.
+    """
+    if sys.platform == "win32":
+        om_path = _find_om_path() or "om"
+        quoted = _quote_hook_executable(om_path)
+        return f"{quoted} context", f"{quoted} grok-checkpoint"
+
+    grok_hooks_dir = Path(__file__).parent / "hooks" / "grok"
+    return str(grok_hooks_dir / "session-start.sh"), f"{_find_om_path() or 'om'} grok-checkpoint"
+
+
 def _install_claude_hooks(config: Config) -> None:
     """Add SessionStart and session checkpoint hooks to ~/.claude/settings.json."""
     import json
@@ -3368,6 +3461,14 @@ For deeper context when needed, consult:
 - `om search "<query>"`
 
 These files are auto-maintained. Do not modify them directly.
+
+Grok Build TUI (xAI) is supported via `om install --grok` (or `--all`).
+Grok uses the same OM profile.md / active.md for startup context
+(via native ~/.grok/hooks/observational-memory.json or the Claude compatibility layer).
+Use `om grok-checkpoint --transcript <updates.jsonl>` from Grok SessionEnd/UserPromptSubmit hooks,
+and `om observe --source grok` to ingest sessions.
+The same `om search` / `om recall` / `om context` work from within Grok.
+
 {_CODEX_OM_MARKER}"""
 
 
@@ -4798,3 +4899,137 @@ def _schtasks_job_statuses(config: Config, targets: str = "both") -> list[dict[s
             }
         )
     return jobs
+
+
+@cli.command(hidden=True, name="grok-checkpoint")
+@click.option("--transcript", type=click.Path(path_type=Path), help="Specific Grok updates.jsonl to process")
+@click.pass_context
+def grok_checkpoint(ctx: click.Context, transcript: Path | None) -> None:
+    """Observe Grok session transcripts (for use by SessionEnd/UserPromptSubmit/PreCompact hooks)."""
+    from .observe import observe_all_grok, observe_grok_transcript
+
+    config = ctx.obj["config"]
+
+    if transcript:
+        transcript = Path(transcript).expanduser()
+        result = observe_grok_transcript(transcript, config)
+        if result:
+            click.echo(f"Grok checkpoint processed: {transcript}")
+        else:
+            click.echo(f"No new Grok messages in {transcript}")
+    else:
+        results = observe_all_grok(config)
+        click.echo(f"Grok checkpoint: processed {len(results)} sessions")
+
+
+# --- Grok Build TUI (xAI) integration (re-applied after restore) ---
+
+_GROK_OM_HOOK_FILE = "observational-memory.json"
+
+
+def _has_om_claude_session_start(config: Config) -> bool:
+    """Return True if OM SessionStart hook is already installed in ~/.claude/settings.json."""
+    claude_settings = config.claude_settings_path
+    if not claude_settings.exists():
+        return False
+    try:
+        import json as json_mod
+
+        data = json_mod.loads(claude_settings.read_text())
+        hooks = data.get("hooks", {})
+        for group in hooks.get("SessionStart", []):
+            for hook in group.get("hooks", []):
+                cmd = hook.get("command", "")
+                if "observational-memory" in cmd or "om context" in cmd or "hooks/claude/session-start" in cmd:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _install_grok(config: Config) -> None:
+    """Install Grok Build TUI hooks.
+
+    Respects existing OM Claude hooks via compatibility layer to avoid duplicate
+    context injection. Creates native ~/.grok/hooks/observational-memory.json.
+
+    On Windows, commands are registered as direct ``om`` invocations (matching
+    the Claude Code strategy) for robustness.
+    """
+    import json as json_mod
+
+    grok_hooks_dir = config.grok_hooks_dir
+    grok_hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    hook_file = grok_hooks_dir / _GROK_OM_HOOK_FILE
+
+    has_claude_om = _has_om_claude_session_start(config)
+
+    payload: dict[str, object] = {"hooks": {}}
+
+    session_start_cmd, checkpoint_cmd = _grok_hook_commands()
+
+    if not has_claude_om:
+        payload["hooks"]["SessionStart"] = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": session_start_cmd,
+                        "timeout": 5,
+                        "statusMessage": "Loading observational memory...",
+                    }
+                ]
+            }
+        ]
+        click.echo("Installed Grok SessionStart hook (native)")
+    else:
+        click.echo("Grok SessionStart omitted (Claude compatibility layer already provides OM context)")
+
+    # Register checkpoint events using the dedicated grok-checkpoint command
+    for event in ["SessionEnd", "UserPromptSubmit", "PreCompact"]:
+        payload["hooks"][event] = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": checkpoint_cmd,
+                        "timeout": 30,
+                        "async": True,
+                        "statusMessage": "Checkpointing observational memory (Grok)...",
+                    }
+                ]
+            }
+        ]
+
+    hook_file.write_text(json_mod.dumps(payload, indent=2) + "\n")
+    click.echo(f"Installed Grok hooks in {hook_file}")
+
+    if has_claude_om:
+        click.echo(
+            "Note: Grok will inherit OM context via ~/.claude/settings.json compatibility. Run `om doctor` to verify."
+        )
+
+
+def _uninstall_grok(config: Config) -> None:
+    """Remove OM Grok hooks file if it only contains our entries."""
+    import json as json_mod
+
+    hook_file = config.grok_hooks_dir / _GROK_OM_HOOK_FILE
+    if not hook_file.exists():
+        return
+
+    try:
+        payload = json_mod.loads(hook_file.read_text())
+    except Exception:
+        hook_file.unlink(missing_ok=True)
+        click.echo(f"Removed invalid Grok hook file {hook_file}")
+        return
+
+    hooks = payload.get("hooks", {})
+    our_keys = {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact"}
+    if set(hooks.keys()).issubset(our_keys) or not hooks:
+        hook_file.unlink()
+        click.echo(f"Removed Grok OM hook file {hook_file}")
+    else:
+        click.echo(f"Left {hook_file} in place (contains user hooks beyond OM)")

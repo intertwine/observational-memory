@@ -28,13 +28,15 @@ def _set_base_env(monkeypatch, tmp_path):
     xdg_config = tmp_path / "config"
     xdg_data = tmp_path / "data"
     codex_home = tmp_path / "codex"
-    for p in (home, xdg_config, xdg_data, codex_home):
+    grok_home = tmp_path / "grok"
+    for p in (home, xdg_config, xdg_data, codex_home, grok_home):
         p.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("GROK_HOME", str(grok_home))
 
     for key in [
         "OM_LLM_PROVIDER",
@@ -965,3 +967,85 @@ def test_uninstall_cron_warns_when_crontab_read_times_out(monkeypatch, capsys):
     _uninstall_cron("codex")
 
     assert "Warning: Failed to read crontab: timed out after 5s" in capsys.readouterr().out
+
+
+class TestGrokInstall:
+    """Targeted tests for `om install --grok` (and `--all`)."""
+
+    def test_install_grok_creates_native_hook_file(self, tmp_path, monkeypatch):
+        """Basic smoke test that --grok creates the expected native hook file."""
+        _set_base_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        grok_home = Path(os.environ["GROK_HOME"])
+        hook_file = grok_home / "hooks" / "observational-memory.json"
+        runner = CliRunner()
+
+        result = runner.invoke(
+            cli,
+            ["install", "--grok", "--provider", "openai", "--llm-model", "gpt-4o-mini", "--non-interactive"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert hook_file.exists()
+        data = json.loads(hook_file.read_text())
+        assert "hooks" in data
+        # On this POSIX test machine, SessionStart should be present (no Claude OM hooks in fake env)
+        assert "SessionStart" in data["hooks"]
+        assert any("session-start.sh" in h["command"] for h in data["hooks"]["SessionStart"][0]["hooks"])
+
+    def test_install_grok_omits_session_start_when_claude_om_hooks_present(self, tmp_path, monkeypatch):
+        """Validates the critical anti-duplication logic for Claude compatibility layer."""
+        _set_base_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        home = Path(os.environ["HOME"])
+        claude_dir = home / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        settings = {
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/fake/path/to/observational-memory/hooks/claude/session-start.sh",
+                                "timeout": 5,
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        (claude_dir / "settings.json").write_text(json.dumps(settings))
+
+        grok_home = Path(os.environ["GROK_HOME"])
+        hook_file = grok_home / "hooks" / "observational-memory.json"
+        runner = CliRunner()
+
+        result = runner.invoke(
+            cli,
+            ["install", "--grok", "--provider", "openai", "--llm-model", "gpt-4o-mini", "--non-interactive"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert hook_file.exists()
+        data = json.loads(hook_file.read_text())
+        # Because Claude OM SessionStart was detected, native Grok file should NOT have SessionStart
+        assert "SessionStart" not in data.get("hooks", {})
+        # But it should still have checkpoint events
+        assert "SessionEnd" in data.get("hooks", {})
+        assert "UserPromptSubmit" in data.get("hooks", {})
+
+    def test_install_all_includes_grok(self, tmp_path, monkeypatch):
+        _set_base_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        grok_home = Path(os.environ["GROK_HOME"])
+        hook_file = grok_home / "hooks" / "observational-memory.json"
+        runner = CliRunner()
+
+        result = runner.invoke(
+            cli,
+            ["install", "--all", "--provider", "openai", "--llm-model", "gpt-4o-mini", "--non-interactive"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert hook_file.exists()

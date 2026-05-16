@@ -351,3 +351,63 @@ class TestCoworkDiscovery:
 
         results = find_all(tmp_path / "nonexistent")
         assert results == []
+
+
+class TestGrokParser:
+    """Tests for the Grok Build TUI transcript parser (updates.jsonl with session/update events)."""
+
+    def test_parse_grok_updates_jsonl(self, tmp_path):
+        from observational_memory.transcripts.grok import parse_transcript as parse_grok
+
+        transcript = tmp_path / "grok-sample.jsonl"
+        # Minimal real-world-like events from inspection of actual Grok sessions on this machine
+        transcript.write_text(
+            '{"timestamp":1778885590,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"user_message_chunk","content":{"type":"text",'
+            '"text":"Please orient yourself to this local machine."}}}}\n'
+            + '{"timestamp":1778885591,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"agent_thought_chunk","content":{"type":"text",'
+            '"text":"The user wants a machine orientation report."}}}}\n'
+            + '{"timestamp":1778885592,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"tool_call","name":"list_dir"}}}\n'
+            + '{"timestamp":1778885593,"method":"session/update","params":{"update":{'
+            '"sessionUpdate":"agent_message_chunk","content":{"type":"text",'
+            '"text":"Here is the report on SponkMax..."}}}}\n'
+        )
+        messages = parse_grok(transcript, source="grok")
+        assert len(messages) >= 3
+        assert all(m.source == "grok" for m in messages)
+        roles = {m.role for m in messages}
+        assert "user" in roles
+        assert "assistant" in roles
+        contents = " ".join(m.content for m in messages)
+        assert "orient yourself" in contents.lower() or "machine" in contents.lower()
+        assert any("tool" in m.content.lower() for m in messages if "tool" in m.content.lower())
+
+    def test_grok_parser_handles_empty_or_invalid(self, tmp_path):
+        from observational_memory.transcripts.grok import parse_transcript as parse_grok
+
+        transcript = tmp_path / "empty.jsonl"
+        transcript.write_text("")
+        messages = parse_grok(transcript)
+        assert messages == []
+
+        bad = tmp_path / "bad.jsonl"
+        bad.write_text("not json\n")
+        messages = parse_grok(bad)
+        assert messages == []
+
+    def test_find_recent_grok_sessions(self, tmp_path):
+        from observational_memory.transcripts.grok import find_recent_grok_sessions
+
+        sessions_dir = tmp_path / "sessions"
+        (sessions_dir / "session1").mkdir(parents=True)
+        (sessions_dir / "session1" / "updates.jsonl").write_text("{}")
+        time.sleep(0.01)
+        (sessions_dir / "session2").mkdir()
+        (sessions_dir / "session2" / "updates.jsonl").write_text("{}")
+
+        results = find_recent_grok_sessions(sessions_dir)
+        assert len(results) == 2
+        # Newest first
+        assert results[0].parent.name == "session2"
