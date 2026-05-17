@@ -73,9 +73,9 @@ Important modules:
 - Codex: hooks-first startup and Stop checkpoints, plus a conditional AGENTS fallback.
 - Grok Build TUI: native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation.
 - Cowork: macOS local plugin with hooks and `/recall`.
-- Hermes: manual transcript ingestion today; first-class plugin work remains in `plans/hermes-first-class-plugin.md`.
+- Hermes: core `om` supports manual transcript ingestion; live startup context, search, explicit writes, and OM Cluster participation come from the external `intertwine/hermes-observational-memory` Hermes memory-provider plugin.
 
-Do not document Hermes as hook-installed until that plugin work is done.
+Do not document Hermes as `om install` hook-installed. The Hermes plugin is installed and selected through Hermes itself.
 
 ## Documentation Rules
 

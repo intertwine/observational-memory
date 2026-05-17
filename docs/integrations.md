@@ -84,7 +84,31 @@ om observe --transcript "$HOME/Library/Application Support/Claude/local-agent-mo
 
 ## Hermes
 
-Hermes support currently means transcript ingestion. `om install` does not install Hermes hooks yet.
+Hermes has two supported paths:
+
+- direct `om` transcript ingestion for existing Hermes session logs;
+- the standalone [hermes-observational-memory](https://github.com/intertwine/hermes-observational-memory) memory-provider plugin for live Hermes context, search, recall, and explicit writes.
+
+The plugin is installed through Hermes, not through `om install`:
+
+```bash
+hermes plugins install intertwine/hermes-observational-memory --no-enable
+hermes memory setup
+```
+
+Choose `observational_memory` in the memory setup flow. Hermes memory providers are exclusive plugins, so activation happens through `memory.provider` instead of `plugins.enabled`.
+
+The current plugin release line targets `observational-memory>=0.6.3,<0.7`. Supported recent Hermes builds discover the plugin from `$HERMES_HOME/plugins/observational_memory`; no source-tree symlink is needed.
+
+The plugin adds:
+
+- `om_context` for compact startup context and optional task-specific recall;
+- `om_search` for search over OM observations and reflections;
+- `om_remember` for explicit durable observations;
+- optional Hermes session writeback into OM observations;
+- optional OM Cluster pull-before-context when cluster mode is enabled and `sync_before_context` is true.
+
+For more setup and validation detail, see [Hermes plugin](hermes-plugin.md).
 
 Manual observe path:
 
@@ -92,8 +116,6 @@ Manual observe path:
 om observe --source hermes
 om observe --transcript ~/.hermes/sessions/session-123.jsonl --source hermes
 ```
-
-The next Hermes work is a first-class external memory-provider plugin. The active handoff is [plans/hermes-first-class-plugin.md](../plans/hermes-first-class-plugin.md).
 
 ## Claude Code Auto-Memory
 

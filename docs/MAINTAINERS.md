@@ -166,7 +166,10 @@ Important maintainer rules:
 
 ## Hermes Integration Model
 
-Hermes support is currently transcript ingestion support, not a hook installer.
+Hermes support has two layers:
+
+- core `om` transcript ingestion for Hermes session logs;
+- the external `intertwine/hermes-observational-memory` Hermes memory-provider plugin for live startup context, search, explicit writes, and optional OM Cluster participation.
 
 Runtime expectations:
 
@@ -174,13 +177,16 @@ Runtime expectations:
 - `om observe --transcript /path/to/session.jsonl --source hermes` processes one Hermes session explicitly.
 - The Hermes parser keeps user messages, assistant prose, and summarized tool calls.
 - It intentionally drops `session_meta`, raw tool output, and other machine-oriented records before the observer LLM sees them.
-- `om install` does not currently manage Hermes hooks or a Hermes-specific scheduler backstop; keep docs and status output truthful about that scope.
-- The active future handoff remains `plans/hermes-first-class-plugin.md`.
+- `om install` does not manage Hermes hooks, install the Hermes plugin, or set `memory.provider`; keep docs and status output truthful about that scope.
+- The Hermes plugin is installed with `hermes plugins install intertwine/hermes-observational-memory --no-enable` and activated with `hermes memory setup`.
+- Keep the plugin dependency line aligned with the current OM release line; for `v0.6.3`, the plugin should require `observational-memory>=0.6.3,<0.7`.
 
 Tests that should protect Hermes behavior:
 
 - `tests/test_transcripts.py`
 - `tests/test_cli_observe.py`
+
+The standalone plugin has its own tests in the `intertwine/hermes-observational-memory` repo. Do not treat this repo's Hermes parser tests as proof that the live Hermes plugin still loads under current Hermes.
 
 ## Grok Integration Model
 

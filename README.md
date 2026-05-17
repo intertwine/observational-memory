@@ -108,6 +108,7 @@ Start here:
 - [Documentation index](docs/README.md)
 - [Install and setup](docs/install.md)
 - [Platform integrations](docs/integrations.md)
+- [Hermes plugin](docs/hermes-plugin.md)
 - [Search, recall, and startup context](docs/search-and-recall.md)
 - [Configuration](docs/configuration.md)
 - [OM Cluster sync](docs/om-cluster-sync.md)
@@ -123,7 +124,7 @@ Start here:
 | Codex | Hooks-first startup and Stop checkpoints, with an AGENTS fallback. |
 | Grok Build TUI | Native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation. |
 | Claude Cowork | Local plugin on macOS with hooks and `/recall`. |
-| Hermes | Manual session-log ingestion. A first-class Hermes plugin is planned in [plans/hermes-first-class-plugin.md](plans/hermes-first-class-plugin.md). |
+| Hermes | External memory-provider plugin through [intertwine/hermes-observational-memory](https://github.com/intertwine/hermes-observational-memory), plus manual session-log ingestion. |
 | ChatGPT / Claude Managed Agents | Reviewed export bundles through `om export`; `om` does not silently write hosted memory. |
 
 ## Common Commands

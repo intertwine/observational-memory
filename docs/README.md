@@ -6,6 +6,7 @@ This folder holds the longer guides for Observational Memory. The main README is
 
 - [Install and setup](install.md): install paths, first run, and platform notes.
 - [Platform integrations](integrations.md): Claude Code, Codex, Grok, Cowork, Hermes, ChatGPT, and Claude Managed Agents.
+- [Hermes plugin](hermes-plugin.md): standalone Hermes memory-provider setup and OM Cluster validation.
 - [Search, recall, and startup context](search-and-recall.md): how `om context`, `om recall`, and `om search` fit together.
 - [Configuration](configuration.md): env file, provider auth, model choices, schedules, paths, and search backends.
 
@@ -29,6 +30,7 @@ Completed implementation plans and old status reports live under [archive/](arch
 flowchart TD
     R["README.md"] --> I["install.md"]
     R --> P["integrations.md"]
+    P --> H["hermes-plugin.md"]
     R --> S["search-and-recall.md"]
     R --> C["configuration.md"]
     R --> K["om-cluster-sync.md"]
