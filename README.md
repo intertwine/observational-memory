@@ -172,7 +172,7 @@ The short version:
 
 ## Release State
 
-`v0.6.4` is the current release. It is a stability patch that raises the `SessionStart` hook timeout from 5 s to 15 s across Claude Code, Codex, Grok Build TUI, and Cowork to prevent startup timeouts on cold Python launches or larger memory stores. It also ships a permanent regression test (`make verify-session-start`) so this class of issue stays fixed. Grok Build TUI first-class support from v0.6.3 remains.
+`v0.6.4` is the current release. It is a stability patch that raises the `SessionStart` hook timeout from 5 s to 15 s across Claude Code, Codex, Grok Build TUI, and Cowork to prevent startup timeouts on cold Python launches or larger memory stores. It also ships a permanent regression test (`make verify-session-start`) so this class of issue stays fixed. Grok Build TUI first-class support (introduced in v0.6.3) remains.
 
 Before the next release, maintainers should run:
 
