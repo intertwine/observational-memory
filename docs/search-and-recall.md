@@ -16,7 +16,7 @@ Route the startup pack when the host can provide more detail:
 
 ```bash
 om context --for codex --cwd "$PWD" --task "fix cluster validation docs"
-om context --for claude --cwd "$PWD" --task "prepare v0.6.3 release notes"
+om context --for claude --cwd "$PWD" --task "prepare v0.6.4 release notes"
 ```
 
 Control the budget:

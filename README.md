@@ -11,7 +11,7 @@
 
 Observational Memory, or `om`, gives Claude Code, Codex, Grok Build TUI, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
 
-The current release is `v0.6.3`. It includes:
+The current release is `v0.6.4`. It includes:
 
 - first-class Grok Build TUI hooks and transcript observation
 - budgeted startup context through `om context`
@@ -172,7 +172,7 @@ The short version:
 
 ## Release State
 
-`v0.6.3` is the current release. It makes Grok Build TUI a first-class local agent in the ecosystem while keeping the `v0.6.2` startup-context improvements for large real-world memory corpora.
+`v0.6.4` is the current release. It is a stability patch that raises the `SessionStart` hook timeout from 5 s to 15 s across Claude Code, Codex, Grok Build TUI, and Cowork to prevent startup timeouts on cold Python launches or larger memory stores. It also ships a permanent regression test (`make verify-session-start`) so this class of issue stays fixed. Grok Build TUI first-class support from v0.6.3 remains.
 
 Before the next release, maintainers should run:
 

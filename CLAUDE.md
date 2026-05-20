@@ -4,7 +4,7 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.6.3`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.6.4`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
@@ -131,4 +131,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-`v0.6.3` has release notes in `docs/RELEASE-0.6.3.md`. Future release steps require explicit user approval.
+`v0.6.4` has release notes in `docs/RELEASE-0.6.4.md`. Future release steps require explicit user approval.

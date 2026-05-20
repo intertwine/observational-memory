@@ -20,7 +20,8 @@ This folder holds the longer guides for Observational Memory. The main README is
 ## Maintainers
 
 - [Maintainer guide](MAINTAINERS.md): development, CI, QMD validation, release, and Homebrew work.
-- [v0.6.3 release notes](RELEASE-0.6.3.md): current release summary.
+- [v0.6.4 release notes](RELEASE-0.6.4.md): current release summary.
+- [v0.6.3 release notes](RELEASE-0.6.3.md): previous release summary.
 
 ## Archive
 

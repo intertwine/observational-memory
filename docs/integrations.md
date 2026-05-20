@@ -98,7 +98,7 @@ hermes memory setup
 
 Choose `observational_memory` in the memory setup flow. Hermes memory providers are exclusive plugins, so activation happens through `memory.provider` instead of `plugins.enabled`.
 
-The current plugin release line targets `observational-memory>=0.6.3,<0.7`. Supported recent Hermes builds discover the plugin from `$HERMES_HOME/plugins/observational_memory`; no source-tree symlink is needed.
+The current plugin release line targets `observational-memory>=0.6.4,<0.7`. Supported recent Hermes builds discover the plugin from `$HERMES_HOME/plugins/observational_memory`; no source-tree symlink is needed.
 
 The plugin adds:
 

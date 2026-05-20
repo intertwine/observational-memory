@@ -179,7 +179,7 @@ Runtime expectations:
 - It intentionally drops `session_meta`, raw tool output, and other machine-oriented records before the observer LLM sees them.
 - `om install` does not manage Hermes hooks, install the Hermes plugin, or set `memory.provider`; keep docs and status output truthful about that scope.
 - The Hermes plugin is installed with `hermes plugins install intertwine/hermes-observational-memory --no-enable` and activated with `hermes memory setup`.
-- Keep the plugin dependency line aligned with the current OM release line; for `v0.6.3`, the plugin should require `observational-memory>=0.6.3,<0.7`.
+- Keep the plugin dependency line aligned with the current OM release line; for `v0.6.4`, the plugin should require `observational-memory>=0.6.4,<0.7`.
 
 Tests that should protect Hermes behavior:
 
@@ -250,15 +250,16 @@ make release-homebrew HOMEBREW_TAP_DIR=../homebrew-tap
 This means `make brew-check` validates the same formula path that Homebrew actually audits, instead of only checking the generated file in this repo.
 If `intertwine/tap` is not tapped locally, `make brew-check` exits with instructions instead of reporting a misleading success.
 
-## v0.6.3 Release
+## Current Release Process (v0.6.4 example)
 
-`v0.6.3` is the current release. It makes Grok Build TUI first-class while preserving the startup-context hardening from `v0.6.2`.
+`v0.6.4` is the current release (a stability patch raising the `SessionStart` timeout to 15 s and adding the permanent `make verify-session-start` test). The release process below is the one used for 0.6.4 and should be followed for future releases.
 
-Before cutting a patch release from this line:
+Before cutting a patch release:
 
 ```bash
 git status --short
 make check
+make verify-session-start
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest
@@ -293,7 +294,7 @@ It is the authoritative way to prove "the om session start issue is fixed and wi
 
 Release flow:
 
-1. Confirm the docs and release notes in [RELEASE-0.6.3.md](RELEASE-0.6.3.md) or the new release note file.
+1. Confirm the docs and release notes in the latest [RELEASE-*.md](RELEASE-0.6.4.md) file (or create a new one for the next version).
 2. Bump the version with the appropriate `make bump-version BUMP=...` command.
 3. Run `make check`.
 4. Build with `make build`.
