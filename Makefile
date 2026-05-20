@@ -3,7 +3,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: help test lint format check build clean bump-version publish-test publish install-dev doctor qmd-bench-setup qmd-bench-embed qmd-bench-preflight qmd-bench qmd-bench-json brew-formula brew-check release-homebrew brew-install
+.PHONY: help test lint format check build clean bump-version publish-test publish install-dev doctor verify-session-start qmd-bench-setup qmd-bench-embed qmd-bench-preflight qmd-bench qmd-bench-json brew-formula brew-check release-homebrew brew-install
 
 # ---------- Colors (portable) ----------
 ifdef NO_COLOR
@@ -65,7 +65,8 @@ help:
 	@$(ECHO) ""
 	@$(ECHO) "$(YELLOW)Development:$(NC)"
 	@$(ECHO) "  make install-dev    - Install in editable mode with dev deps"
-	@$(ECHO) "  make doctor         - Run om doctor diagnostics"
+	@$(ECHO) "  make doctor             - Run om doctor diagnostics"
+	@$(ECHO) "  make verify-session-start - Prove SessionStart hooks (Claude/Codex/Grok) after hook changes"
 
 # Run all tests
 test:
@@ -141,6 +142,14 @@ install-dev:
 # Run diagnostics
 doctor:
 	@uv run om doctor
+
+# Verify SessionStart hook registration + execution for Claude, Codex, and Grok
+# (the exact paths agents use at startup). Run this after changes to hook
+# installation, the `context` command, or the hook shell scripts.
+verify-session-start:
+	@$(ECHO) "$(YELLOW)Verifying SessionStart hooks (Claude / Codex / Grok)...$(NC)"
+	@uv run python scripts/verify_session_start_hooks.py
+	@$(ECHO) "$(GREEN)✓ SessionStart hook verification passed$(NC)"
 
 # Build a deterministic repo-local QMD benchmark collection
 qmd-bench-setup:

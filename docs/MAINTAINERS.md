@@ -273,6 +273,24 @@ uv run pytest tests/sync/test_filesystem_sync.py tests/sync/test_relay_transport
 uv run pytest tests/sync/test_store_and_materialize.py
 ```
 
+### SessionStart hook regression test
+
+After any change that touches hook registration (`_install_*`), the `context` command, `startup_memory.py`, or the hook shell scripts in `src/observational_memory/hooks/`, run:
+
+```bash
+make verify-session-start
+# or directly
+uv run python scripts/verify_session_start_hooks.py --keep   # for post-mortem inspection
+```
+
+The script:
+- Performs a completely isolated `om install --all` using the current source tree.
+- Asserts that **all** `SessionStart` registrations (Claude, Codex, and Grok via inheritance) use the safe timeout (currently 15 s).
+- Executes the exact command strings the host agents will run at session start.
+- Validates that they emit correct `hookSpecificOutput` JSON containing the budgeted OM startup context.
+
+It is the authoritative way to prove "the om session start issue is fixed and will stay fixed."
+
 Release flow:
 
 1. Confirm the docs and release notes in [RELEASE-0.6.3.md](RELEASE-0.6.3.md) or the new release note file.

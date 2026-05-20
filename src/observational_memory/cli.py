@@ -3320,7 +3320,7 @@ def _install_claude_hooks(config: Config) -> None:
                 {
                     "type": "command",
                     "command": session_start_command,
-                    "timeout": 5,
+                    "timeout": 15,
                     "statusMessage": "Loading observational memory...",
                 }
             ]
@@ -3574,7 +3574,7 @@ def _om_codex_session_start_group() -> dict:
             {
                 "type": "command",
                 "command": _build_codex_session_start_command(),
-                "timeout": 5,
+                "timeout": 15,
                 "statusMessage": _CODEX_SESSION_START_STATUS,
             }
         ],
@@ -4986,7 +4986,7 @@ def _install_grok(config: Config) -> None:
                     {
                         "type": "command",
                         "command": session_start_cmd,
-                        "timeout": 5,
+                        "timeout": 15,
                         "statusMessage": "Loading observational memory...",
                     }
                 ]
