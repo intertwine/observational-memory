@@ -179,7 +179,7 @@ Runtime expectations:
 - It intentionally drops `session_meta`, raw tool output, and other machine-oriented records before the observer LLM sees them.
 - `om install` does not manage Hermes hooks, install the Hermes plugin, or set `memory.provider`; keep docs and status output truthful about that scope.
 - The Hermes plugin is installed with `hermes plugins install intertwine/hermes-observational-memory --no-enable` and activated with `hermes memory setup`.
-- Keep the plugin dependency line aligned with the current OM release line; for `v0.6.4`, the plugin should require `observational-memory>=0.6.4,<0.7`.
+- Keep the plugin dependency line aligned with the current OM release line; for `v0.6.5`, the plugin should require `observational-memory>=0.6.5,<0.7`.
 
 Tests that should protect Hermes behavior:
 
