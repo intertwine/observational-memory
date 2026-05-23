@@ -36,3 +36,62 @@ def test_tail_starts_on_boundary() -> None:
     # Should not begin mid-word; should resume at a section/blank boundary.
     assert "Older observations elided" in out
     assert out.rstrip().endswith("beta tail content here")
+
+
+def test_non_cluster_observe_sends_full_file(tmp_path, monkeypatch) -> None:
+    """Regression: non-cluster observe must NOT truncate input (overwrite would lose history)."""
+    import observational_memory.observe as obs
+    from observational_memory.config import Config
+
+    monkeypatch.setenv("OM_CLUSTER_ENABLED", "0")
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    cfg = Config(memory_dir=mem, observer_context_max_chars=100)
+    # Big existing observations file (way over the cap).
+    big = "# Observations\n\n" + "\n".join(f"## 2026-05-{d:02d}\n\nold entry {d}" for d in range(1, 28))
+    cfg.observations_path.write_text(big)
+
+    captured = {}
+
+    def fake_compress(system_prompt, user_content, config, operation=None, **k):
+        captured["user_content"] = user_content
+        return "## 2026-05-23\n\nnew observation"
+
+    monkeypatch.setattr(obs, "compress", fake_compress)
+    monkeypatch.setattr(obs, "_cluster_enabled", lambda c: False)
+
+    msgs = [
+        obs.Message(role="user", content=f"m{i}", timestamp="2026-05-23T00:00:00Z", source="claude") for i in range(10)
+    ]
+    obs.run_observer(msgs, cfg, dry_run=True)
+    # Full history present in the prompt despite a tiny cap (cap is cluster-only).
+    assert "old entry 1" in captured["user_content"]
+    assert "Older observations elided" not in captured["user_content"]
+
+
+def test_cluster_observe_applies_cap(tmp_path, monkeypatch) -> None:
+    """In cluster mode the cap applies (append-only log preserves history)."""
+    import observational_memory.observe as obs
+    from observational_memory.config import Config
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    cfg = Config(memory_dir=mem, observer_context_max_chars=100)
+    big = "# Observations\n\n" + "\n".join(f"## 2026-05-{d:02d}\n\nold entry {d}" for d in range(1, 28))
+    cfg.observations_path.write_text(big)
+
+    captured = {}
+
+    def fake_compress(system_prompt, user_content, config, operation=None, **k):
+        captured["user_content"] = user_content
+        return "new"
+
+    monkeypatch.setattr(obs, "compress", fake_compress)
+    monkeypatch.setattr(obs, "_cluster_enabled", lambda c: True)
+
+    msgs = [
+        obs.Message(role="user", content=f"m{i}", timestamp="2026-05-23T00:00:00Z", source="claude") for i in range(10)
+    ]
+    obs.run_observer(msgs, cfg, dry_run=True)
+    assert "Older observations elided" in captured["user_content"]
+    assert "old entry 1\n" not in captured["user_content"]

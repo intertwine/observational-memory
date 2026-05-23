@@ -35,6 +35,48 @@ CODEX_INFERENCE_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 
 
+def validate_inference_base_url(value: str, *, fallback: str = CODEX_INFERENCE_BASE_URL) -> str:
+    """Refuse a non-chatgpt.com base_url for the OAuth-authenticated Codex path.
+
+    The ChatGPT OAuth bearer is high-value; a tampered ``OM_OPENAI_CHATGPT_BASE_URL``
+    or a hand-edited ``base_url`` in auth.json would ship it to a third party on
+    every request. Pin the inference origin to ``chatgpt.com`` (or any
+    ``*.chatgpt.com`` subdomain). Warn-and-fall-back rather than raise — a bad
+    value must never leak the bearer, but also shouldn't deadlock the call.
+    Mirrors the xAI validator in ``oidc_discovery.validate_inference_base_url``.
+    """
+    import logging
+    from urllib.parse import urlparse
+
+    logger = logging.getLogger(__name__)
+    candidate = (value or "").strip().rstrip("/")
+    if not candidate:
+        return fallback
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        logger.warning("Ignoring malformed ChatGPT base_url %r; using %s", candidate, fallback)
+        return fallback
+    if parsed.scheme != "https":
+        logger.warning(
+            "Refusing non-HTTPS ChatGPT base_url %r (bearer would be sent cleartext); using %s",
+            candidate,
+            fallback,
+        )
+        return fallback
+    host = (parsed.hostname or "").lower()
+    if host != "chatgpt.com" and not host.endswith(".chatgpt.com"):
+        logger.warning(
+            "Refusing ChatGPT base_url %r — host %r is not on chatgpt.com; the OAuth "
+            "bearer is only valid against the Codex backend. Using %s.",
+            candidate,
+            host,
+            fallback,
+        )
+        return fallback
+    return candidate
+
+
 def access_token_is_expiring(access_token: str, skew_seconds: int = 0) -> bool:
     """True when ``access_token`` is within ``skew_seconds`` of expiry."""
     claims = decode_jwt_claims(access_token)
@@ -206,7 +248,10 @@ def device_code_login(*, client_id: str | None = None, open_browser: bool = True
             provider="openai-chatgpt",
             code="token_exchange_no_access_token",
         )
-    base_url = (os.getenv("OM_OPENAI_CHATGPT_BASE_URL") or "").strip().rstrip("/") or CODEX_INFERENCE_BASE_URL
+    base_url = validate_inference_base_url(
+        (os.getenv("OM_OPENAI_CHATGPT_BASE_URL") or "").strip().rstrip("/"),
+        fallback=CODEX_INFERENCE_BASE_URL,
+    )
     claims = decode_jwt_claims(access_token)
     return {
         "auth_mode": "chatgpt",

@@ -113,3 +113,25 @@ def test_compress_routes_per_operation(isolated_auth, monkeypatch) -> None:
     llm_mod.compress("sys", "user", cfg, operation="observer")
     llm_mod.compress("sys", "user", cfg, operation="reflector")
     assert calls == ["anthropic", "openai"]
+
+
+def test_infer_provider_uses_explicit_auth_file(tmp_path, monkeypatch) -> None:
+    """A non-default auth store (config.auth_file) must be honored by inference."""
+    import json
+
+    from observational_memory.llm import _infer_provider
+
+    # No OM_AUTH_FILE in env, no API keys, empty default XDG path — only an
+    # explicit custom store path should be detected.
+    monkeypatch.delenv("OM_AUTH_FILE", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "emptyconfig"))
+    custom = tmp_path / "custom-auth.json"
+    custom.write_text(
+        json.dumps({"version": 1, "providers": {"xai-oauth": {"tokens": {"access_token": "T", "refresh_token": "R"}}}})
+    )
+
+    # Without the path, default location has no tokens → stays on default provider.
+    assert _infer_provider("grok-code-fast-1", "openai") == "openai"
+    # With the explicit path, the grok model routes to the subscription.
+    assert _infer_provider("grok-code-fast-1", "openai", auth_file=custom) == "xai-oauth"

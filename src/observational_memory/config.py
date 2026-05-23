@@ -266,6 +266,13 @@ class Config:
     # re-sends the entire (unboundedly growing) file — the dominant cost on the
     # most frequent operation. We send only the most recent tail; 0 disables
     # the cap (legacy behavior: send everything).
+    #
+    # Only applied in OM Cluster mode, where observations are stored as an
+    # append-only record log and observations.md is a materialized view (older
+    # observations live in older records, so a bounded context can't lose data).
+    # In non-cluster mode the observer rewrites the whole file, so the full
+    # existing content is always sent to avoid dropping history. See #52 for the
+    # append-only contract change that would let non-cluster mode bound this too.
     observer_context_max_chars: int = field(
         default_factory=lambda: int(os.environ.get("OM_OBSERVER_CONTEXT_MAX_CHARS", "12000"))
     )

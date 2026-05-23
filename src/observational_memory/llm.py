@@ -40,7 +40,7 @@ def compress(
         # When an operation-specific model override crosses provider boundaries
         # (e.g. reflector set to claude-sonnet-4-6 while default provider is openai),
         # infer the correct provider from the model name.
-        effective_provider = _infer_provider(model, provider)
+        effective_provider = _infer_provider(model, provider, auth_file=_config_auth_file(config))
         if effective_provider != provider:
             config.validate_provider_config(provider=effective_provider)
 
@@ -83,7 +83,15 @@ def compress(
     ) from last_error
 
 
-def _infer_provider(model: str, default_provider: str) -> str:
+def _config_auth_file(config: Config):
+    """Best-effort auth-store path for the active config (None → default path)."""
+    try:
+        return config.auth_file
+    except Exception:
+        return None
+
+
+def _infer_provider(model: str, default_provider: str, *, auth_file=None) -> str:
     """Infer the provider from a model name when it doesn't match the default.
 
     Subscription providers (`openai-chatgpt`, `xai-oauth`) are *sticky*: when the
@@ -92,6 +100,10 @@ def _infer_provider(model: str, default_provider: str) -> str:
     point of `om login`. A model name that doesn't fit the chosen subscription is
     sent to that subscription anyway and surfaces a clear provider-side error,
     instead of a surprise bill. See the v0.6.5 plan amendment.
+
+    ``auth_file`` is the active config's auth-store path so subscription-token
+    detection honors a non-default ``OM_AUTH_FILE`` / custom env file (otherwise
+    a `grok-*` / Codex model could be misrouted to a metered provider).
     """
     import os as _os
 
@@ -107,7 +119,7 @@ def _infer_provider(model: str, default_provider: str) -> str:
             return default_provider
         from .config import _has_subscription_tokens  # local import to avoid cycles
 
-        if _has_subscription_tokens("xai-oauth"):
+        if _has_subscription_tokens("xai-oauth", auth_file):
             return "xai-oauth"
         if _os.environ.get("XAI_API_KEY"):
             return "xai"
@@ -115,7 +127,7 @@ def _infer_provider(model: str, default_provider: str) -> str:
     elif normalized.startswith(("gpt-5-codex", "codex-")):
         from .config import _has_subscription_tokens
 
-        if _has_subscription_tokens("openai-chatgpt"):
+        if _has_subscription_tokens("openai-chatgpt", auth_file):
             return "openai-chatgpt"
     elif normalized.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")):
         if default_provider != "openai":

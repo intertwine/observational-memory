@@ -141,3 +141,26 @@ def test_cloudflare_headers_tolerate_empty_token() -> None:
     headers = openai_chatgpt.cloudflare_headers("")
     assert headers["originator"] == "codex_cli_rs"
     assert "ChatGPT-Account-ID" not in headers
+
+
+def test_codex_base_url_pinning() -> None:
+    from observational_memory.auth.openai_chatgpt import (
+        CODEX_INFERENCE_BASE_URL,
+        validate_inference_base_url,
+    )
+
+    # Accepted: chatgpt.com and subdomains.
+    assert (
+        validate_inference_base_url("https://chatgpt.com/backend-api/codex") == "https://chatgpt.com/backend-api/codex"
+    )
+    assert validate_inference_base_url("https://x.chatgpt.com/v1") == "https://x.chatgpt.com/v1"
+    # Empty → fallback.
+    assert validate_inference_base_url("") == CODEX_INFERENCE_BASE_URL
+    # Rejected (exfiltration / cleartext / look-alike) → fallback, never the bad host.
+    for bad in (
+        "https://attacker.example/v1",
+        "http://chatgpt.com/v1",
+        "https://chatgpt.com.evil.example/v1",
+        "not a url",
+    ):
+        assert validate_inference_base_url(bad) == CODEX_INFERENCE_BASE_URL

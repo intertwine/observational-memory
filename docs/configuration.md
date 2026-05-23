@@ -144,7 +144,9 @@ When a per-workflow provider is set, that workflow uses it directly (no model-na
 
 ### Observer context budget
 
-Every observe run re-sends part of `observations.md` for dedup context. `OM_OBSERVER_CONTEXT_MAX_CHARS` (default `12000`) caps how much of the recent tail is sent so input cost doesn't grow with the file. Set it to `0` to send the whole file (legacy behavior).
+Every observe run re-sends part of `observations.md` for dedup context. `OM_OBSERVER_CONTEXT_MAX_CHARS` (default `12000`) caps how much of the recent tail is sent so input cost doesn't grow with the file. Set it to `0` to send the whole file.
+
+This cap only takes effect when OM Cluster is enabled, where observations are an append-only record log and `observations.md` is a materialized view — a bounded context can't lose history. In non-cluster mode the observer rewrites the whole file, so the full existing content is always sent regardless of this setting.
 
 ### Seeing what will run
 

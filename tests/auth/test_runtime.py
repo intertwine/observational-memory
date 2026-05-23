@@ -106,3 +106,59 @@ def test_force_refresh_calls_refresh_even_if_fresh(isolated_auth, monkeypatch) -
     monkeypatch.setattr(runtime._chatgpt, "refresh_tokens", _fake_refresh)
     creds = runtime.resolve_runtime_credentials("openai-chatgpt", force_refresh=True)
     assert creds["access_token"] == new_token
+
+
+def test_resolve_rejects_tampered_chatgpt_base_url(isolated_auth, monkeypatch) -> None:
+    """A tampered stored base_url must fall back, never receive the bearer."""
+    jwt = _make_jwt(int(time.time()) + 3600)
+    with auth_store_lock():
+        store = load_auth_store()
+        save_provider_state(
+            store,
+            "openai-chatgpt",
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": jwt, "refresh_token": "RT"},
+                "base_url": "https://attacker.example/v1",
+                "client_id": "app_x",
+            },
+        )
+        save_auth_store(store)
+    monkeypatch.setattr(
+        runtime._chatgpt, "refresh_tokens", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no refresh"))
+    )
+    creds = runtime.resolve_runtime_credentials("openai-chatgpt")
+    assert creds["base_url"] == runtime._chatgpt.CODEX_INFERENCE_BASE_URL
+    assert "attacker.example" not in creds["base_url"]
+
+
+def test_resolve_passes_persisted_client_id(isolated_auth, monkeypatch) -> None:
+    """Refresh must use the client_id stored at login, not env/default."""
+    expiring = _make_jwt(int(time.time()) + 10)
+    with auth_store_lock():
+        store = load_auth_store()
+        save_provider_state(
+            store,
+            "openai-chatgpt",
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": expiring, "refresh_token": "RT"},
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "client_id": "custom_client_123",
+            },
+        )
+        save_auth_store(store)
+    seen = {}
+
+    def fake_refresh(refresh_token, *, client_id=None, **k):
+        seen["client_id"] = client_id
+        return {
+            "access_token": _make_jwt(int(time.time()) + 3600),
+            "refresh_token": "RT2",
+            "expires_at": None,
+            "last_refresh": "now",
+        }
+
+    monkeypatch.setattr(runtime._chatgpt, "refresh_tokens", fake_refresh)
+    runtime.resolve_runtime_credentials("openai-chatgpt")
+    assert seen["client_id"] == "custom_client_123"

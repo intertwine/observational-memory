@@ -382,8 +382,13 @@ def refresh_tokens(
     *,
     token_endpoint: str = "",
     timeout_seconds: float = 20.0,
+    client_id: str | None = None,
 ) -> dict:
-    """Refresh xAI tokens. Returns a partial state update."""
+    """Refresh xAI tokens. Returns a partial state update.
+
+    ``client_id`` should be the value persisted at login (custom-client logins
+    must refresh with the same id); falls back to the env/default client id.
+    """
     import httpx
 
     if not isinstance(refresh_token, str) or not refresh_token.strip():
@@ -393,6 +398,7 @@ def refresh_tokens(
             code="xai_auth_missing_refresh_token",
             relogin_required=True,
         )
+    cid = (client_id or "").strip() or _client_id()
     endpoint = (token_endpoint or "").strip() or fetch_xai_discovery(timeout_seconds)["token_endpoint"]
     validate_oauth_endpoint(endpoint, field="token_endpoint")
     timeout = httpx.Timeout(max(5.0, float(timeout_seconds)))
@@ -402,7 +408,7 @@ def refresh_tokens(
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={
                 "grant_type": "refresh_token",
-                "client_id": _client_id(),
+                "client_id": cid,
                 "refresh_token": refresh_token,
             },
         )

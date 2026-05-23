@@ -107,12 +107,12 @@ uv run om login --import    # safely reports "Nothing to import"
 
 ## E2E proof — live subscription transcript
 
-> **Captured by**: Bryan Young (`bryan@intertwinesys.com`)
-> **Host**: macOS (`SponkMax.local`), om installed from this branch
+> **Captured by**: the maintainer, against their own subscription accounts
+> **Host**: macOS (hostname redacted to `<host>`), om installed from this branch
 > **Date**: 2026-05-23
 >
-> Live `om login openai-chatgpt` and live `om login xai-oauth` against Bryan's
-> own subscription accounts, followed by one `om observe` and one `om reflect`
+> Live `om login openai-chatgpt` and live `om login xai-oauth` against the
+> maintainer's own subscription accounts, followed by one `om observe` and one `om reflect`
 > run with each provider active. Token tails are redacted to the last 4 chars;
 > the one-time device code shown during login is single-use and already expired.
 
@@ -179,20 +179,15 @@ and the plan amendment:
 ```text
 $ OM_LLM_PROVIDER=openai-chatgpt OM_LLM_MODEL=gpt-5.5 uv run om observe --source claude
 # Real gpt-5.5 call via the Codex Responses API through the ChatGPT subscription.
-# observations.md grew 6509 -> 6749 lines (+240). New claude record (excerpt):
-
-### From SponkMax.local / claude / project:-Users-bryanyoung-experiments-observational-memory / personal
-
-### Current Context
-- **Active task:** Completing live E2E proof for Observational Memory v0.6.5
-  account-auth with real ChatGPT and xAI/SuperGrok subscription tokens ...
-### Observations
-- 🔴 A critical `llm.py` routing bug was found and fixed: `_infer_provider`
-  cross-routed `gpt-` model names to metered `openai` even when
-  `OM_LLM_PROVIDER=openai-chatgpt` or `xai-oauth` was explicitly set.
-- 🔴 The ChatGPT Codex backend required Cloudflare headers + the Responses API
-  (stream=true, store=false, input as a list, no max_output_tokens).
+# observations.md grew 6509 -> 6749 lines (+240).
 ```
+
+The +240-line delta is the proof the call landed on the subscription. The new
+record carried the expected structure (a `### From <host> / claude / <project>`
+header, a `### Current Context` block, and a `### Observations` list with
+🔴/🟡 priority markers). The raw observation text is the maintainer's own private
+memory and is intentionally not reproduced here (repo doc rule); the line-count
+delta, command, and redacted token tail above are the evidence.
 
 ```text
 $ OM_LLM_PROVIDER=openai-chatgpt OM_LLM_MODEL=gpt-5.5 uv run om reflect
@@ -255,26 +250,19 @@ skew and the 401-triggered single retry keep scheduled jobs from blocking on it.
 
 Unlike the Codex backend, `api.x.ai/v1` is a genuine OpenAI-compatible Chat
 Completions endpoint, so the xAI path works through the shared client with no
-special headers. (Note: your global `OM_LLM_MODEL=gpt-5.5` is not a valid xAI
+special headers. (Note: a global `OM_LLM_MODEL=gpt-5.5` is not a valid xAI
 model, so we pass `grok-code-fast-1` explicitly; the subscription-sticky routing
 fix keeps the call on `xai-oauth` instead of bouncing it to metered OpenAI.)
 
 ```text
 $ OM_LLM_PROVIDER=xai-oauth OM_LLM_MODEL=grok-code-fast-1 uv run om observe --source claude
 # Real grok-code-fast-1 call through the SuperGrok subscription (api.x.ai/v1).
-# observations.md grew 6322 -> 6359 lines (+37). New claude record (excerpt):
-
-### From SponkMax.local / claude / project:-Users-bryanyoung-experiments-observational-memory / personal
-
-### Current Context
-- **Active task:** Completing live E2E proof for Observational Memory v0.6.5
-  account-auth with real ChatGPT and xAI/SuperGrok subscriptions ...
-### Observations
-- 🔴 Bryan completed interactive `om login xai-oauth`; loopback PKCE flow
-  succeeded with `plan=generic&referrer=observational-memory`.
-- 🔴 A critical `_infer_provider` routing bug was found and fixed (subscription
-  providers are now sticky).
+# observations.md grew 6322 -> 6359 lines (+37).
 ```
+
+Same as the ChatGPT run: the +37-line delta is the proof. The new record had the
+expected structure; the raw text (the maintainer's private memory) is not
+reproduced here.
 
 The first `xai-oauth` reflect printed `No observations to reflect on.` — the
 ChatGPT reflect had already consumed the pending observations, so grok correctly
