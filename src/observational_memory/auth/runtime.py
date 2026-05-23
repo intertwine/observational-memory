@@ -29,17 +29,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def resolve_runtime_credentials(provider_id: str, *, force_refresh: bool = False) -> dict:
+def resolve_runtime_credentials(provider_id: str, *, force_refresh: bool = False, config=None) -> dict:
     """Return ``{"access_token", "base_url", "auth_mode"}`` for the given provider.
 
     Performs an in-place refresh under the auth-store lock when the cached
     access_token is expiring (per provider-specific skew). Persists refreshed
     tokens.
+
+    ``config`` selects the auth store: pass the active Config so a non-default
+    ``OM_AUTH_FILE`` / custom env file reads and writes the right tokens.
     """
     if provider_id == "openai-chatgpt":
-        return _resolve_openai_chatgpt(force_refresh=force_refresh)
+        return _resolve_openai_chatgpt(force_refresh=force_refresh, config=config)
     if provider_id == "xai-oauth":
-        return _resolve_xai_oauth(force_refresh=force_refresh)
+        return _resolve_xai_oauth(force_refresh=force_refresh, config=config)
     raise AuthError(
         f"Unknown subscription provider: {provider_id}",
         provider=provider_id,
@@ -47,8 +50,8 @@ def resolve_runtime_credentials(provider_id: str, *, force_refresh: bool = False
     )
 
 
-def _resolve_openai_chatgpt(*, force_refresh: bool) -> dict:
-    store = load_auth_store()
+def _resolve_openai_chatgpt(*, force_refresh: bool, config=None) -> dict:
+    store = load_auth_store(config)
     state = load_provider_state(store, "openai-chatgpt")
     if not state:
         raise AuthError(
@@ -72,8 +75,8 @@ def _resolve_openai_chatgpt(*, force_refresh: bool) -> dict:
         access_token, _chatgpt.CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS
     )
     if force_refresh or expiring:
-        with auth_store_lock():
-            store = load_auth_store()
+        with auth_store_lock(config=config):
+            store = load_auth_store(config)
             state = load_provider_state(store, "openai-chatgpt") or state
             tokens = dict(state.get("tokens") or {})
             access_token = str(tokens.get("access_token") or "").strip()
@@ -92,7 +95,7 @@ def _resolve_openai_chatgpt(*, force_refresh: bool) -> dict:
                 state["expires_at"] = update["expires_at"]
                 state["last_refresh"] = update["last_refresh"]
                 save_provider_state(store, "openai-chatgpt", state, set_active=False)
-                save_auth_store(store)
+                save_auth_store(store, config=config)
                 access_token = update["access_token"]
     return {
         "access_token": access_token,
@@ -101,8 +104,8 @@ def _resolve_openai_chatgpt(*, force_refresh: bool) -> dict:
     }
 
 
-def _resolve_xai_oauth(*, force_refresh: bool) -> dict:
-    store = load_auth_store()
+def _resolve_xai_oauth(*, force_refresh: bool, config=None) -> dict:
+    store = load_auth_store(config)
     state = load_provider_state(store, "xai-oauth")
     if not state:
         raise AuthError(
@@ -127,8 +130,8 @@ def _resolve_xai_oauth(*, force_refresh: bool) -> dict:
         access_token, _xai.XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS
     )
     if force_refresh or expiring:
-        with auth_store_lock():
-            store = load_auth_store()
+        with auth_store_lock(config=config):
+            store = load_auth_store(config)
             state = load_provider_state(store, "xai-oauth") or state
             tokens = dict(state.get("tokens") or {})
             access_token = str(tokens.get("access_token") or "").strip()
@@ -152,7 +155,7 @@ def _resolve_xai_oauth(*, force_refresh: bool) -> dict:
                 state["expires_at"] = update["expires_at"]
                 state["last_refresh"] = update["last_refresh"]
                 save_provider_state(store, "xai-oauth", state, set_active=False)
-                save_auth_store(store)
+                save_auth_store(store, config=config)
                 access_token = update["access_token"]
     return {
         "access_token": access_token,

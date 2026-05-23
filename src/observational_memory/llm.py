@@ -312,7 +312,7 @@ def _call_openai_chatgpt(
     from .auth import AuthError, resolve_runtime_credentials
 
     try:
-        creds = resolve_runtime_credentials("openai-chatgpt")
+        creds = resolve_runtime_credentials("openai-chatgpt", config=config)
     except AuthError:
         raise
     try:
@@ -326,7 +326,7 @@ def _call_openai_chatgpt(
         )
     except Exception as exc:
         if _is_unauthorized(exc):
-            creds = resolve_runtime_credentials("openai-chatgpt", force_refresh=True)
+            creds = resolve_runtime_credentials("openai-chatgpt", force_refresh=True, config=config)
             return _call_codex_responses(
                 base_url=creds["base_url"],
                 access_token=creds["access_token"],
@@ -410,7 +410,7 @@ def _call_xai_oauth(
     from .auth import AuthError, resolve_runtime_credentials
 
     try:
-        creds = resolve_runtime_credentials("xai-oauth")
+        creds = resolve_runtime_credentials("xai-oauth", config=config)
     except AuthError:
         raise
     try:
@@ -424,7 +424,7 @@ def _call_xai_oauth(
         )
     except Exception as exc:
         if _is_unauthorized(exc):
-            creds = resolve_runtime_credentials("xai-oauth", force_refresh=True)
+            creds = resolve_runtime_credentials("xai-oauth", force_refresh=True, config=config)
             return _call_openai_compatible(
                 base_url=creds["base_url"],
                 api_key=creds["access_token"],

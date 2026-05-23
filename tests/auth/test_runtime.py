@@ -162,3 +162,33 @@ def test_resolve_passes_persisted_client_id(isolated_auth, monkeypatch) -> None:
     monkeypatch.setattr(runtime._chatgpt, "refresh_tokens", fake_refresh)
     runtime.resolve_runtime_credentials("openai-chatgpt")
     assert seen["client_id"] == "custom_client_123"
+
+
+def test_resolve_uses_config_auth_file(tmp_path, monkeypatch) -> None:
+    """resolve_runtime_credentials must read the active config's store, not the default."""
+    from observational_memory.config import Config
+
+    monkeypatch.delenv("OM_AUTH_FILE", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "emptyconfig"))
+    jwt = _make_jwt(int(time.time()) + 3600)
+
+    cfg = Config(env_file=tmp_path / "cfg" / "env")  # → auth_file = tmp_path/cfg/auth.json
+    store = load_auth_store(cfg)
+    save_provider_state(
+        store,
+        "openai-chatgpt",
+        {
+            "auth_mode": "chatgpt",
+            "tokens": {"access_token": jwt, "refresh_token": "RT"},
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "client_id": "app_x",
+        },
+    )
+    save_auth_store(store, config=cfg)
+
+    # Default store (no config) has no tokens → raises.
+    with pytest.raises(AuthError):
+        runtime.resolve_runtime_credentials("openai-chatgpt")
+    # With the config, the custom store is found.
+    creds = runtime.resolve_runtime_credentials("openai-chatgpt", config=cfg)
+    assert creds["access_token"] == jwt
