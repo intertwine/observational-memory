@@ -58,6 +58,7 @@ cluster records -> materialized Markdown views
 Important modules:
 
 - `src/observational_memory/cli.py`: Click CLI.
+- `src/observational_memory/auth/`: subscription OAuth (`om login` for ChatGPT/xAI), host-local token store, runtime credential resolution.
 - `src/observational_memory/observe.py`: transcript observation.
 - `src/observational_memory/reflect.py`: durable reflection.
 - `src/observational_memory/startup_memory.py`: budgeted startup packs and recall handles.

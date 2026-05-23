@@ -2025,7 +2025,15 @@ def claude_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
         _release_checkpoint_lock(lock_path)
 
 
-_SUPPORTED_PROVIDERS = ("anthropic", "openai", "anthropic-vertex", "anthropic-bedrock")
+_SUPPORTED_PROVIDERS = (
+    "anthropic",
+    "openai",
+    "anthropic-vertex",
+    "anthropic-bedrock",
+    "openai-chatgpt",
+    "xai-oauth",
+    "xai",
+)
 _SCHEDULER_MODES = ("auto", "launchd", "cron", "schtasks", "none")
 _SCHEDULER_COMMAND_TIMEOUT_SECONDS = 5
 
@@ -2177,7 +2185,28 @@ def _configure_llm(
     if model:
         updates["OM_LLM_MODEL"] = model
 
-    if selected in {"anthropic", "openai"}:
+    if selected in {"openai-chatgpt", "xai-oauth"}:
+        from .config import _has_subscription_tokens
+
+        if not _has_subscription_tokens(selected):
+            click.echo(
+                f"Provider '{selected}' uses your subscription. "
+                f"Run `om login {selected}` to sign in (skipping for now)."
+            )
+    elif selected == "xai":
+        env_var = "XAI_API_KEY"
+        existing = os.environ.get(env_var)
+        if not existing:
+            if non_interactive:
+                raise click.ClickException(
+                    f"Provider '{selected}' requires {env_var}. Set it in env "
+                    f"or {config.env_file} before --non-interactive install."
+                )
+            key = click.prompt("Paste your xAI API key", hide_input=True).strip()
+            if key:
+                updates[env_var] = key
+                os.environ[env_var] = key
+    elif selected in {"anthropic", "openai"}:
         env_var = _provider_api_key_env(selected)
         assert env_var is not None
         existing = os.environ.get(env_var)
@@ -2532,18 +2561,15 @@ def status(ctx: click.Context) -> None:
         if model_env:
             click.echo("  Model overrides: " + ", ".join(f"{key}={value}" for key, value in sorted(model_env.items())))
 
-    # LLM provider/model status
-    click.echo("\nLLM:")
-    try:
-        provider = config.resolve_provider()
-        click.echo(f"  Provider: {provider}")
-        click.echo(f"  Observer model: {config.resolve_model(operation='observer', provider=provider)}")
-        click.echo(f"  Reflector model: {config.resolve_model(operation='reflector', provider=provider)}")
-    except RuntimeError as e:
-        click.echo(f"  Provider: unresolved ({e})")
+    # LLM provider/model status (shared summary with `om auth status`)
+    from .auth import provider_summary_lines
 
+    click.echo("\nLLM:")
+    for line in provider_summary_lines(config):
+        click.echo(line)
     click.echo(f"  Anthropic API key: {'set' if os.environ.get('ANTHROPIC_API_KEY') else 'not set'}")
     click.echo(f"  OpenAI API key: {'set' if os.environ.get('OPENAI_API_KEY') else 'not set'}")
+    click.echo(f"  xAI API key: {'set' if os.environ.get('XAI_API_KEY') else 'not set'}")
     click.echo(f"  Vertex project: {config.vertex_project_id or 'not set'}")
     click.echo(f"  Vertex region: {config.vertex_region or 'not set'}")
     click.echo(f"  Bedrock region: {config.bedrock_region or os.environ.get('AWS_REGION') or 'not set'}")
@@ -2789,6 +2815,59 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         _check("Memory directory", "PASS", str(config.memory_dir))
     else:
         _check("Memory directory", "FAIL", "missing", fix="Run: om install")
+
+    # 6b. Subscription auth store
+    try:
+        from .auth import auth_file_path
+        from .auth.cli_import import detect_cli_imports
+        from .auth.openai_chatgpt import access_token_is_expiring as _chatgpt_expiring
+        from .auth.store import load_auth_store
+        from .auth.xai_oauth import access_token_is_expiring as _xai_expiring
+
+        store_path = auth_file_path(config)
+        store = load_auth_store(config)
+        providers = list((store.get("providers") or {}).keys())
+        if providers:
+            if not sys.platform == "win32" and store_path.exists():
+                mode = store_path.stat().st_mode & 0o777
+                if mode == 0o600:
+                    _check("Auth store permissions", "PASS", f"{store_path} (0600)")
+                else:
+                    _check(
+                        "Auth store permissions",
+                        "WARN",
+                        f"{oct(mode)} (too open)",
+                        fix=f"chmod 600 {store_path}",
+                    )
+            _check("Subscription tokens", "PASS", ", ".join(providers))
+            for pid in providers:
+                state = (store.get("providers") or {}).get(pid) or {}
+                access = (state.get("tokens") or {}).get("access_token") or ""
+                if pid == "openai-chatgpt" and _chatgpt_expiring(access, 24 * 60 * 60):
+                    _check(
+                        f"{pid} expiry",
+                        "WARN",
+                        "access token expires within 24h (refresh on next use)",
+                    )
+                elif pid == "xai-oauth" and _xai_expiring(access, 24 * 60 * 60):
+                    _check(
+                        f"{pid} expiry",
+                        "WARN",
+                        "access token expires within 24h (refresh on next use)",
+                    )
+        else:
+            detected = detect_cli_imports()
+            if detected:
+                _check(
+                    "Subscription tokens",
+                    "WARN",
+                    f"none in {store_path}; sibling CLIs detected: {', '.join(detected)}",
+                    fix="Run: om login --import",
+                )
+            else:
+                _check("Subscription tokens", "PASS", "none configured (using API keys)")
+    except Exception as exc:
+        _check("Subscription tokens", "WARN", f"could not inspect auth store: {exc}")
 
     # 7. Env file permissions
     if config.env_file.exists():
@@ -5043,3 +5122,124 @@ def _uninstall_grok(config: Config) -> None:
         click.echo(f"Removed Grok OM hook file {hook_file}")
     else:
         click.echo(f"Left {hook_file} in place (contains user hooks beyond OM)")
+
+
+# =============================================================================
+# om login / om logout / om auth ...
+# =============================================================================
+
+
+_LOGIN_PROVIDER_CHOICES = ("openai-chatgpt", "xai-oauth")
+_API_KEY_TARGETS = ("openai", "anthropic", "xai")
+
+
+@cli.command()
+@click.argument("provider", type=click.Choice(_LOGIN_PROVIDER_CHOICES), required=False)
+@click.option(
+    "--import",
+    "do_import",
+    is_flag=True,
+    help="Import existing CLI tokens from ~/.codex/ and/or ~/.grok/",
+)
+@click.option(
+    "--api-key",
+    "api_key_target",
+    type=click.Choice(_API_KEY_TARGETS),
+    default=None,
+    help="Save an API key for openai|anthropic|xai instead of logging in via OAuth",
+)
+@click.option("--key", default=None, help="API key value (used with --api-key; prompted if omitted)")
+@click.option("--no-browser", is_flag=True, help="Do not open a browser automatically")
+@click.option(
+    "--manual-paste",
+    is_flag=True,
+    help="Skip the local loopback listener and paste the callback URL by hand (xAI only)",
+)
+@click.option(
+    "--set-default/--no-set-default",
+    default=True,
+    help="Set OM_LLM_PROVIDER to the provider you log in to (default: yes)",
+)
+def login(
+    provider: str | None,
+    do_import: bool,
+    api_key_target: str | None,
+    key: str | None,
+    no_browser: bool,
+    manual_paste: bool,
+    set_default: bool,
+) -> None:
+    """Sign in to a subscription or API-key provider."""
+    from .auth import (
+        AuthError,
+        format_auth_error,
+        interactive_picker,
+        login_api_key,
+        login_import,
+        login_openai_chatgpt,
+        login_xai_oauth,
+    )
+
+    try:
+        if do_import:
+            login_import(provider=provider)
+            return
+        if api_key_target is not None:
+            login_api_key(api_key_target, key=key)
+            return
+        if provider is None:
+            choice = interactive_picker()
+            if choice == "import":
+                login_import()
+                return
+            if choice in _API_KEY_TARGETS:
+                login_api_key(choice)
+                return
+            provider = choice
+        if provider == "openai-chatgpt":
+            login_openai_chatgpt(open_browser=not no_browser, set_default=set_default)
+        elif provider == "xai-oauth":
+            login_xai_oauth(open_browser=not no_browser, manual_paste=manual_paste, set_default=set_default)
+        else:
+            raise click.ClickException(f"Unknown provider: {provider}")
+    except AuthError as exc:
+        raise click.ClickException(format_auth_error(exc)) from exc
+
+
+@cli.command()
+@click.argument("provider", type=click.Choice(_LOGIN_PROVIDER_CHOICES), required=False)
+def logout(provider: str | None) -> None:
+    """Clear stored subscription tokens."""
+    from .auth import logout as _logout
+
+    removed = _logout(provider)
+    if not removed:
+        click.echo("No subscription tokens to remove.")
+        return
+    click.echo("Removed: " + ", ".join(removed))
+
+
+@cli.group()
+def auth() -> None:
+    """Inspect or refresh stored auth credentials."""
+
+
+@auth.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON")
+def auth_status_cmd(as_json: bool) -> None:
+    """Show stored providers (tokens redacted)."""
+    from .auth import auth_status
+
+    auth_status(as_json=as_json)
+
+
+@auth.command("refresh")
+@click.argument("provider", type=click.Choice(_LOGIN_PROVIDER_CHOICES), required=False)
+def auth_refresh_cmd(provider: str | None) -> None:
+    """Force a token refresh now (diagnostic)."""
+    from .auth import AuthError, auth_refresh, format_auth_error
+
+    try:
+        auth_refresh(provider)
+    except AuthError as exc:
+        raise click.ClickException(format_auth_error(exc)) from exc

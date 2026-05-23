@@ -12,6 +12,26 @@ from .transcripts import Message
 OBSERVER_PROMPT_PATH = Path(__file__).parent / "prompts" / "observer.md"
 
 
+def _recent_observations_window(observations: str, config: Config) -> str:
+    """Return only the most recent tail of observations for dedup context.
+
+    Bounds the observer's input so it doesn't re-send the entire (growing)
+    observations.md on every run. A header note tells the model the older
+    history was elided. ``observer_context_max_chars <= 0`` disables the cap.
+    """
+    cap = config.observer_context_max_chars
+    if cap <= 0 or len(observations) <= cap:
+        return observations
+    tail = observations[-cap:]
+    # Start at the next record/section boundary so we don't begin mid-entry.
+    for marker in ("\n## ", "\n### ", "\n\n"):
+        idx = tail.find(marker)
+        if idx != -1:
+            tail = tail[idx + 1 :]
+            break
+    return f"<!-- Older observations elided for context budget; showing the most recent ~{cap} chars. -->\n\n{tail}"
+
+
 def run_observer(
     messages: list[Message],
     config: Config | None = None,
@@ -42,6 +62,7 @@ def run_observer(
     existing_observations = ""
     if config.observations_path.exists():
         existing_observations = config.observations_path.read_text()
+        existing_observations = _recent_observations_window(existing_observations, config)
 
     user_content = (
         f"## Existing observations\n\n{existing_observations}\n\n"

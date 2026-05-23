@@ -83,6 +83,47 @@ def _cowork_app_support_dir() -> Path:
     return Path.home() / "Library" / "Application Support" / "Claude"
 
 
+def _has_subscription_tokens(provider_id: str, auth_path: Path | None = None) -> bool:
+    """Lightweight, side-effect-free check for stored subscription tokens.
+
+    Avoids importing the auth module at config-load time (which would create
+    a circular import). Reads auth.json directly; missing/malformed → False.
+
+    When ``auth_path`` is given (Config methods pass the store path relative to
+    the active env file) it is authoritative. Otherwise we honor ``OM_AUTH_FILE``
+    and fall back to the default XDG location — used by runtime callers that
+    don't have a Config in hand.
+    """
+    import json as _json
+
+    if auth_path is not None:
+        path = auth_path
+    else:
+        override = os.environ.get("OM_AUTH_FILE")
+        if override:
+            path = Path(override).expanduser()
+        else:
+            path = _xdg_config_home() / "observational-memory" / "auth.json"
+    try:
+        if not path.is_file():
+            return False
+        raw = _json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(raw, dict):
+        return False
+    providers = raw.get("providers")
+    if not isinstance(providers, dict):
+        return False
+    state = providers.get(provider_id)
+    if not isinstance(state, dict):
+        return False
+    tokens = state.get("tokens")
+    if not isinstance(tokens, dict):
+        return False
+    return bool(str(tokens.get("access_token") or "").strip() or str(tokens.get("refresh_token") or "").strip())
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -95,8 +136,9 @@ ENV_FILE_TEMPLATE = """\
 # This file is sourced by om, its hooks, and its background scheduler jobs.
 # It is NOT committed to any repo. Keep it private.
 #
-# LLM provider selection:
-# OM_LLM_PROVIDER=auto  # auto|anthropic|openai|anthropic-vertex|anthropic-bedrock
+# LLM provider selection (auto rule order: anthropic key, openai key,
+# openai-chatgpt subscription, xai-oauth subscription, xai api key):
+# OM_LLM_PROVIDER=auto  # auto|anthropic|openai|anthropic-vertex|anthropic-bedrock|openai-chatgpt|xai-oauth|xai
 #
 # Shared/default model for observer + reflector:
 # OM_LLM_MODEL=claude-sonnet-4-5-20250929
@@ -105,9 +147,33 @@ ENV_FILE_TEMPLATE = """\
 # OM_LLM_OBSERVER_MODEL=claude-sonnet-4-5-20250929
 # OM_LLM_REFLECTOR_MODEL=claude-sonnet-4-5-20250929
 #
+# Optional per-step PROVIDER overrides (run a fast model for observe and a
+# strong model for reflect). When set, that workflow uses this provider
+# directly and its model resolves from the per-step model override or the
+# provider default (NOT the global OM_LLM_MODEL):
+# OM_LLM_OBSERVER_PROVIDER=xai-oauth
+# OM_LLM_REFLECTOR_PROVIDER=openai-chatgpt
+#
+# Observer context budget: how many chars of existing observations.md are
+# re-sent for dedup context each run (0 = send all; default 12000):
+# OM_OBSERVER_CONTEXT_MAX_CHARS=12000
+#
 # Direct provider keys (legacy/default flow):
 # ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
+# XAI_API_KEY=xai-...
+#
+# Subscription providers (preferred for cheap-feeling features; run `om login`):
+# OM_OPENAI_CHATGPT_MODEL=gpt-5.5
+# OM_XAI_OAUTH_MODEL=grok-code-fast-1
+# OM_XAI_MODEL=grok-code-fast-1
+# Endpoint overrides (validated against chatgpt.com / api.x.ai):
+# OM_OPENAI_CHATGPT_BASE_URL=
+# OM_XAI_OAUTH_BASE_URL=
+# OM_XAI_BASE_URL=
+# Client-id overrides (if you mint your own OAuth client):
+# OM_OPENAI_CHATGPT_CLIENT_ID=
+# OM_XAI_OAUTH_CLIENT_ID=
 #
 # Anthropic on Google Vertex AI:
 # OM_VERTEX_PROJECT_ID=my-gcp-project
@@ -165,14 +231,28 @@ class Config:
     # LLM settings
     llm_provider: str = field(
         default_factory=lambda: os.environ.get("OM_LLM_PROVIDER", "auto")
-    )  # auto|anthropic|openai|anthropic-vertex|anthropic-bedrock
+    )  # auto|anthropic|openai|anthropic-vertex|anthropic-bedrock|openai-chatgpt|xai-oauth|xai
     llm_model: str | None = field(default_factory=lambda: os.environ.get("OM_LLM_MODEL"))
     llm_observer_model: str | None = field(default_factory=lambda: os.environ.get("OM_LLM_OBSERVER_MODEL"))
     llm_reflector_model: str | None = field(default_factory=lambda: os.environ.get("OM_LLM_REFLECTOR_MODEL"))
+    # Per-workflow provider overrides. When set, that operation uses the named
+    # provider directly (no model-name inference), and its model resolves from
+    # the per-step model override or that provider's default — NOT the global
+    # OM_LLM_MODEL (which usually belongs to a different provider). Lets you run
+    # e.g. a fast model for observe and a strong model for reflect.
+    llm_observer_provider: str | None = field(default_factory=lambda: os.environ.get("OM_LLM_OBSERVER_PROVIDER"))
+    llm_reflector_provider: str | None = field(default_factory=lambda: os.environ.get("OM_LLM_REFLECTOR_PROVIDER"))
     anthropic_model: str = field(
         default_factory=lambda: os.environ.get("OM_ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
     )
     openai_model: str = field(default_factory=lambda: os.environ.get("OM_OPENAI_MODEL", "gpt-4o-mini"))
+    # The ChatGPT-account Codex allow-list shifts over time (gpt-5-codex was
+    # rejected with HTTP 400 on 2026-05-23; the live /models endpoint listed
+    # gpt-5.5 / gpt-5.4 / gpt-5.3-codex). gpt-5.5 is the current flagship;
+    # override with OM_OPENAI_CHATGPT_MODEL when the allow-list moves.
+    openai_chatgpt_model: str = field(default_factory=lambda: os.environ.get("OM_OPENAI_CHATGPT_MODEL", "gpt-5.5"))
+    xai_oauth_model: str = field(default_factory=lambda: os.environ.get("OM_XAI_OAUTH_MODEL", "grok-code-fast-1"))
+    xai_model: str = field(default_factory=lambda: os.environ.get("OM_XAI_MODEL", "grok-code-fast-1"))
     vertex_project_id: str | None = field(default_factory=lambda: os.environ.get("OM_VERTEX_PROJECT_ID"))
     vertex_region: str | None = field(default_factory=lambda: os.environ.get("OM_VERTEX_REGION"))
     bedrock_region: str | None = field(
@@ -181,6 +261,14 @@ class Config:
 
     # Observer settings
     min_messages: int = 5  # skip if fewer new messages
+    # Cap on how much of the existing observations.md is sent back to the
+    # observer for dedup/continuity context. Without a cap, every observe
+    # re-sends the entire (unboundedly growing) file — the dominant cost on the
+    # most frequent operation. We send only the most recent tail; 0 disables
+    # the cap (legacy behavior: send everything).
+    observer_context_max_chars: int = field(
+        default_factory=lambda: int(os.environ.get("OM_OBSERVER_CONTEXT_MAX_CHARS", "12000"))
+    )
 
     # Reflector settings
     observation_retention_days: int = 7
@@ -223,6 +311,18 @@ class Config:
     @property
     def search_index_dir(self) -> Path:
         return self.memory_dir / ".search-index"
+
+    @property
+    def auth_file(self) -> Path:
+        """Path to the subscription auth store (next to the env file).
+
+        Honors OM_AUTH_FILE for tests; otherwise lives beside the env file so a
+        custom env_file (e.g. a tmp_path in tests) keeps the store local too.
+        """
+        override = os.environ.get("OM_AUTH_FILE")
+        if override:
+            return Path(override).expanduser()
+        return self.env_file.parent / "auth.json"
 
     @property
     def cluster_config_path(self) -> Path:
@@ -373,12 +473,18 @@ class Config:
     def resolve_provider(self) -> str:
         """Resolve active provider using explicit config or legacy key auto-detect."""
         provider = (self.llm_provider or "auto").strip().lower()
-        allowed = {"auto", "anthropic", "openai", "anthropic-vertex", "anthropic-bedrock"}
+        allowed = {
+            "auto",
+            "anthropic",
+            "openai",
+            "anthropic-vertex",
+            "anthropic-bedrock",
+            "openai-chatgpt",
+            "xai-oauth",
+            "xai",
+        }
         if provider not in allowed:
-            raise RuntimeError(
-                "Invalid OM_LLM_PROVIDER="
-                f"{provider!r}. Use one of: auto, anthropic, openai, anthropic-vertex, anthropic-bedrock."
-            )
+            raise RuntimeError(f"Invalid OM_LLM_PROVIDER={provider!r}. Use one of: " + ", ".join(sorted(allowed)) + ".")
 
         if provider != "auto":
             return provider
@@ -387,28 +493,71 @@ class Config:
             return "anthropic"
         if os.environ.get("OPENAI_API_KEY"):
             return "openai"
+        if _has_subscription_tokens("openai-chatgpt", self.auth_file):
+            return "openai-chatgpt"
+        if _has_subscription_tokens("xai-oauth", self.auth_file):
+            return "xai-oauth"
+        if os.environ.get("XAI_API_KEY"):
+            return "xai"
         raise RuntimeError(
             "No LLM provider resolved. Either set OM_LLM_PROVIDER explicitly, "
-            "or add ANTHROPIC_API_KEY / OPENAI_API_KEY "
-            f"to {self.env_file}."
+            "add ANTHROPIC_API_KEY / OPENAI_API_KEY / XAI_API_KEY "
+            f"to {self.env_file}, or run `om login` to authenticate via your "
+            "ChatGPT / xAI subscription."
         )
 
     def detect_provider(self) -> str:
         """Backward-compatible alias for provider resolution."""
         return self.resolve_provider()
 
-    def resolve_model(self, operation: str | None = None, provider: str | None = None) -> str:
-        """Resolve model for observer/reflector with override precedence."""
+    def operation_provider(self, operation: str | None) -> str | None:
+        """Return an explicit per-workflow provider override, if set.
+
+        ``OM_LLM_OBSERVER_PROVIDER`` / ``OM_LLM_REFLECTOR_PROVIDER`` let the user
+        pin a specific provider per workflow. Returns None when no override
+        applies (the caller then falls back to the default + name inference).
+        """
+        override = None
+        if operation == "observer" and self.llm_observer_provider:
+            override = self.llm_observer_provider.strip().lower()
+        elif operation == "reflector" and self.llm_reflector_provider:
+            override = self.llm_reflector_provider.strip().lower()
+        # "auto" is not a real per-workflow target — treat it as no override so
+        # the caller falls back to normal resolution.
+        if not override or override == "auto":
+            return None
+        return override
+
+    def resolve_model(
+        self,
+        operation: str | None = None,
+        provider: str | None = None,
+        *,
+        ignore_global_model: bool = False,
+    ) -> str:
+        """Resolve model for observer/reflector with override precedence.
+
+        ``ignore_global_model`` skips the global ``OM_LLM_MODEL`` so an explicit
+        per-workflow provider falls through to the per-step model override or the
+        provider's own default, rather than a global model meant for a different
+        provider.
+        """
         if operation == "observer" and self.llm_observer_model:
             return self.llm_observer_model
         if operation == "reflector" and self.llm_reflector_model:
             return self.llm_reflector_model
-        if self.llm_model:
+        if self.llm_model and not ignore_global_model:
             return self.llm_model
 
         active_provider = provider or self.resolve_provider()
         if active_provider == "openai":
             return self.openai_model
+        if active_provider == "openai-chatgpt":
+            return self.openai_chatgpt_model
+        if active_provider == "xai-oauth":
+            return self.xai_oauth_model
+        if active_provider == "xai":
+            return self.xai_model
         if active_provider in {"anthropic", "anthropic-vertex", "anthropic-bedrock"}:
             return self.anthropic_model
         raise RuntimeError(f"Unknown provider for model resolution: {active_provider}")
@@ -436,6 +585,17 @@ class Config:
         elif active_provider == "anthropic-bedrock":
             if not self.bedrock_region:
                 raise RuntimeError("Provider 'anthropic-bedrock' requires OM_BEDROCK_REGION (or AWS_REGION).")
+        elif active_provider == "openai-chatgpt":
+            if not _has_subscription_tokens("openai-chatgpt", self.auth_file):
+                raise RuntimeError(
+                    "Provider 'openai-chatgpt' requires ChatGPT subscription tokens. Run `om login openai-chatgpt`."
+                )
+        elif active_provider == "xai-oauth":
+            if not _has_subscription_tokens("xai-oauth", self.auth_file):
+                raise RuntimeError("Provider 'xai-oauth' requires xAI subscription tokens. Run `om login xai-oauth`.")
+        elif active_provider == "xai":
+            if not os.environ.get("XAI_API_KEY"):
+                raise RuntimeError("Provider 'xai' requires XAI_API_KEY.")
         else:
             raise RuntimeError(f"Unknown provider: {active_provider}")
 

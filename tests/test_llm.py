@@ -89,10 +89,13 @@ def test_operation_specific_model_override(monkeypatch):
 
 def test_unknown_provider_raises_value_error():
     class BadConfig:
-        def validate_provider_config(self):
+        def operation_provider(self, operation=None):
+            return None
+
+        def validate_provider_config(self, provider=None):
             return "unknown-provider"
 
-        def resolve_model(self, operation=None, provider=None):
+        def resolve_model(self, operation=None, provider=None, ignore_global_model=False):
             return "model-x"
 
     try:

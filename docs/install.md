@@ -10,8 +10,13 @@ This guide is for people installing Observational Memory for day-to-day use. Mai
 - One LLM provider:
   - Anthropic API key
   - OpenAI API key
+  - **OpenAI ChatGPT subscription** (`om login openai-chatgpt`)
+  - **xAI Grok / SuperGrok subscription** (`om login xai-oauth`)
+  - xAI API key
   - Anthropic on Vertex AI
   - Anthropic on Bedrock
+
+If you already pay for ChatGPT Plus / Pro / Team or SuperGrok, prefer `om login` over an API key — it routes calls through your subscription instead of charging per token. See [configuration.md](configuration.md) for the cost comparison and how the auth flows work.
 
 ## Fast Install
 

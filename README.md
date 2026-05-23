@@ -23,6 +23,8 @@ The current release is `v0.6.4`. It includes:
 - public-safe cluster validation docs
 - Windows, macOS, and Linux install paths
 
+`v0.6.5` adds **`om login` for your ChatGPT or SuperGrok subscription** so the observer and reflector can run off your existing plan instead of a metered API key — see [`docs/configuration.md`](docs/configuration.md) and [`docs/RELEASE-0.6.5.md`](docs/RELEASE-0.6.5.md).
+
 ## Quick Install
 
 macOS with Homebrew:
