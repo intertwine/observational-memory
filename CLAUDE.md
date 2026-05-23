@@ -4,10 +4,11 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.6.4`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.6.5`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
+- `om login` for OpenAI ChatGPT and xAI SuperGrok subscriptions (host-local token store, Codex Responses-API routing, per-workflow provider selection)
 - budgeted startup context with `om context`
 - first-class recall with `om recall`
 - first-class Grok Build TUI hooks and transcript observation

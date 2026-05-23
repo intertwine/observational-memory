@@ -11,8 +11,9 @@
 
 Observational Memory, or `om`, gives Claude Code, Codex, Grok Build TUI, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
 
-The current release is `v0.6.4`. It includes:
+The current release is `v0.6.5`. It includes:
 
+- **`om login` for your ChatGPT or SuperGrok subscription** so the observer and reflector run off your existing plan instead of a metered API key
 - first-class Grok Build TUI hooks and transcript observation
 - budgeted startup context through `om context`
 - compact startup profile projection for long-running memory corpora
@@ -23,7 +24,7 @@ The current release is `v0.6.4`. It includes:
 - public-safe cluster validation docs
 - Windows, macOS, and Linux install paths
 
-`v0.6.5` adds **`om login` for your ChatGPT or SuperGrok subscription** so the observer and reflector can run off your existing plan instead of a metered API key — see [`docs/configuration.md`](docs/configuration.md) and [`docs/RELEASE-0.6.5.md`](docs/RELEASE-0.6.5.md).
+For the subscription-auth details and cost comparison, see [`docs/configuration.md`](docs/configuration.md) and [`docs/RELEASE-0.6.5.md`](docs/RELEASE-0.6.5.md).
 
 ## Quick Install
 
