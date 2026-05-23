@@ -9,6 +9,9 @@ build/
 # Memory files (generated locally)
 memory/
 
+# Machine-local docs
+docs/machine/
+
 # IDE
 .idea/
 .vscode/
