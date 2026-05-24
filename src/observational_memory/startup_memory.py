@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config
@@ -14,7 +16,28 @@ DEFAULT_STARTUP_BUDGET_CHARS = 24000
 MIN_STARTUP_BUDGET_CHARS = 2000
 LARGE_STARTUP_CHUNK_CHARS = 8000
 STARTUP_PROFILE_PREFERENCE_LIMIT = 16
+# Priority boost for a chunk matching the current cwd/task route terms.
+_ROUTE_MATCH_BOOST = 6
+# Operational facts (tool versions, install status) older than this many days are
+# annotated as potentially stale in startup context (OM_STARTUP_FRESHNESS_DAYS).
+DEFAULT_STARTUP_FRESHNESS_DAYS = 14
 _OM_METADATA_COMMENT_RE = re.compile(r"\s*<!--om:.*?-->")
+# Capture an ISO timestamp value, ending on a digit so the trailing "-->" of the
+# metadata comment is never swallowed.
+_LAST_SEEN_RE = re.compile(r"last_seen=(\d{4}-\d{2}-\d{2}(?:[T ][\d:.+\-]*\d)?)")
+# A version-number token or an install/version status word marks a bullet as an
+# "operational" fact whose truth decays (the agent can verify it live).
+_VERSION_TOKEN_RE = re.compile(r"\bv?\d+\.\d+(?:\.\d+)?\b")
+_OPERATIONAL_WORD_RE = re.compile(
+    r"\b(installed|install status|version|upgraded|downgraded|running|available|enabled|disabled|up to date)\b",
+    re.IGNORECASE,
+)
+_FRESHNESS_MARKER = "as of"
+_KIND_RE = re.compile(r"\bkind=(\w+)")
+# Durable fact kinds whose truth does not decay — never freshness-marked even if
+# their visible text happens to contain a version-like token.
+_DURABLE_KINDS = frozenset({"preference", "identity", "policy", "mode", "evergreen"})
+_FRESHNESS_MARKER_RE = re.compile(r"\s*\(as of \d{4}-\d{2}-\d{2} — verify\)")
 
 
 @dataclass(frozen=True)
@@ -36,6 +59,8 @@ class StartupPayload:
     budget_chars: int
     included_handles: list[str]
     overflow: list[dict[str, str | int]]
+    # Post-annotation char size of each selected section (accurate budget usage).
+    included_sections: list[dict[str, str | int]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -43,6 +68,7 @@ class StartupPayload:
             "budget_chars": self.budget_chars,
             "included_handles": self.included_handles,
             "overflow": self.overflow,
+            "included_sections": self.included_sections,
         }
 
 
@@ -82,14 +108,42 @@ def build_startup_payload(
     """Build a deterministic, budgeted startup payload with recall handles."""
     ensure_startup_memory(config)
     budget = max(int(budget_chars or DEFAULT_STARTUP_BUDGET_CHARS), MIN_STARTUP_BUDGET_CHARS)
-    chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=True)
+    # Keep metadata so freshness can be computed before stripping. Freshness keying
+    # mirrors the dedup decision: facts that dedup collapses share one freshness
+    # entry (freshest sighting wins), but per-project subsections — which dedup
+    # treats as distinct — get per-chunk freshness so one project can't refresh
+    # another's identical-looking fact.
+    chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=False)
+    shared_map = _operational_freshness_map([c for c in chunks if not _is_project_subsection(c)])
     header = _startup_header(budget=budget, cwd=cwd, task=task, agent=agent)
     footer = _recall_footer(task=task, cwd=cwd)
+
+    # De-duplicate bullets across sections in priority order (the highest-priority
+    # section keeps each bullet) before spending budget on repeats; then annotate
+    # freshness and strip metadata.
+    ordered = sorted(chunks, key=lambda item: (-item.priority, item.source, item.heading, item.handle))
+    ordered, _removed = _dedupe_startup_chunks(ordered)
+    now = datetime.now(timezone.utc)
+    days = _freshness_days()
+    ordered = [
+        replace(
+            chunk,
+            body=_annotate_and_strip(
+                chunk.body,
+                _operational_freshness_map([chunk]) if _is_project_subsection(chunk) else shared_map,
+                now=now,
+                freshness_days=days,
+            ),
+        )
+        for chunk in ordered
+    ]
 
     used = len(header) + len(footer)
     selected: list[StartupChunk] = []
     overflow: list[StartupChunk] = []
-    for chunk in sorted(chunks, key=lambda item: (-item.priority, item.source, item.heading, item.handle)):
+    for chunk in ordered:
+        if not _has_visible_content(chunk.body):
+            continue  # emptied by dedup — nothing left to show
         chunk_text = "\n\n" + chunk.body.strip()
         if used + len(chunk_text) <= budget:
             selected.append(chunk)
@@ -113,6 +167,9 @@ def build_startup_payload(
         overflow=[
             {"handle": chunk.handle, "heading": chunk.heading, "source": chunk.source, "chars": chunk.size}
             for chunk in overflow
+        ],
+        included_sections=[
+            {"handle": chunk.handle, "heading": chunk.heading, "chars": len(chunk.body.strip())} for chunk in selected
         ],
     )
 
@@ -169,6 +226,8 @@ def _build_profile(reflections: str) -> str:
         if filtered:
             parts.extend(["", filtered.strip()])
 
+    # Materialized files stay raw (with metadata); freshness is applied at
+    # payload-build time so it always reflects the current OM_STARTUP_FRESHNESS_DAYS.
     return "\n".join(parts)
 
 
@@ -205,6 +264,267 @@ def _extract_h3_subsection(text: str, heading: str) -> str:
     pattern = _SUBSECTION_RE_TEMPLATE.format(heading=re.escape(heading))
     match = re.search(pattern, text)
     return match.group(1).rstrip() if match else ""
+
+
+# --- #50 startup quality: freshness, dedup, quality report ---
+
+
+def _freshness_days() -> int:
+    try:
+        days = int(os.environ.get("OM_STARTUP_FRESHNESS_DAYS", str(DEFAULT_STARTUP_FRESHNESS_DAYS)))
+    except ValueError:
+        return DEFAULT_STARTUP_FRESHNESS_DAYS
+    return days if days >= 0 else DEFAULT_STARTUP_FRESHNESS_DAYS
+
+
+def _parse_iso_ts(value: str) -> datetime | None:
+    raw = value.strip().replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _looks_operational(visible: str) -> bool:
+    """True for tool-version / install-status style facts whose truth decays."""
+    return bool(_VERSION_TOKEN_RE.search(visible) or _OPERATIONAL_WORD_RE.search(visible))
+
+
+def _split_visible_and_metadata(line: str) -> tuple[str, str]:
+    match = _OM_METADATA_COMMENT_RE.search(line)
+    if not match:
+        return line, ""
+    return line[: match.start()], line[match.start() :]
+
+
+def _operational_last_seen(line: str) -> datetime | None:
+    """Return the last_seen of a non-durable operational bullet, else None."""
+    if not _is_bullet(line):
+        return None
+    seen = _LAST_SEEN_RE.search(line)
+    if not seen:
+        return None
+    # Respect the authoritative kind= tag: durable facts never decay, even if
+    # their text contains a version-like token (e.g. "prefers Python 3.11").
+    kind = _KIND_RE.search(line)
+    if kind and kind.group(1).lower() in _DURABLE_KINDS:
+        return None
+    visible, _metadata = _split_visible_and_metadata(line)
+    if not _looks_operational(visible):
+        return None
+    return _parse_iso_ts(seen.group(1))
+
+
+def _operational_freshness_map(chunks: list[StartupChunk]) -> dict[str, datetime]:
+    """Map each operational fact (normalized) to its FRESHEST last_seen across sections.
+
+    Cross-section duplicates of the same fact may carry different last_seen
+    values; the fact is only as stale as its most recent sighting anywhere.
+    """
+    fresh: dict[str, datetime] = {}
+    for chunk in chunks:
+        for line in chunk.body.split("\n"):
+            last_seen = _operational_last_seen(line)
+            if last_seen is None:
+                continue
+            key = _normalize_bullet(line)
+            if key and (key not in fresh or last_seen > fresh[key]):
+                fresh[key] = last_seen
+    return fresh
+
+
+def _annotate_and_strip(body: str, fresh_map: dict[str, datetime], *, now: datetime, freshness_days: int) -> str:
+    """Annotate stale operational bullets (using the global freshest last_seen) and strip metadata."""
+    out: list[str] = []
+    for line in body.split("\n"):
+        out.append(_annotate_line_with_map(line, fresh_map, now=now, freshness_days=freshness_days))
+    return _strip_om_metadata("\n".join(out))
+
+
+def _annotate_line_with_map(line: str, fresh_map: dict[str, datetime], *, now: datetime, freshness_days: int) -> str:
+    if not _is_bullet(line):
+        return line
+    # The surviving line's own kind= is authoritative: a durable fact that won
+    # dedup is never marked, even if a duplicate snapshot put its key in the map.
+    kind = _KIND_RE.search(line)
+    if kind and kind.group(1).lower() in _DURABLE_KINDS:
+        return line
+    visible, metadata = _split_visible_and_metadata(line)
+    if _FRESHNESS_MARKER in visible.lower() or not _looks_operational(visible):
+        return line
+    last_seen = fresh_map.get(_normalize_bullet(line))
+    if last_seen is None or (now - last_seen).days < freshness_days:
+        return line
+    marker = f" ({_FRESHNESS_MARKER} {last_seen.strftime('%Y-%m-%d')} — verify)"
+    return visible.rstrip() + marker + metadata
+
+
+def _normalize_bullet(line: str) -> str:
+    """Normalize a bullet for cross-section duplicate detection.
+
+    Strips the list marker, priority emoji, markdown emphasis, any metadata
+    comment, and the freshness marker, then casefolds and collapses whitespace.
+    The freshness marker is stripped so the same fact dedupes whether or not one
+    copy was annotated stale (different last_seen across sections).
+    """
+    visible, _metadata = _split_visible_and_metadata(line)
+    text = _FRESHNESS_MARKER_RE.sub("", visible).strip()
+    text = re.sub(r"^[-*]\s+", "", text)  # list marker
+    text = re.sub(r"[🔴🟡🟢⚪️🔵🟠]", "", text)  # priority dots
+    text = text.replace("*", "").replace("`", "")  # markdown emphasis/code
+    text = re.sub(r"\s+", " ", text)
+    return text.strip().casefold()
+
+
+def _display_bullet(line: str) -> str:
+    """Human-readable bullet text for the report (list marker + freshness marker stripped, case kept)."""
+    visible, _metadata = _split_visible_and_metadata(line)
+    text = _FRESHNESS_MARKER_RE.sub("", visible).strip()
+    return re.sub(r"^[-*]\s+", "", text).strip()
+
+
+def _is_bullet(line: str) -> bool:
+    return line.lstrip().startswith(("- ", "* "))
+
+
+def _has_visible_content(body: str) -> bool:
+    """True if the body has any non-heading, non-comment, non-blank line (survives dedup)."""
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and not stripped.startswith("<!--"):
+            return True
+    return False
+
+
+def _stale_facts_from_payload(text: str, *, now: datetime) -> list[dict]:
+    """Extract the operational facts the payload actually marked stale.
+
+    Parsing the emitted payload keeps the report consistent with injected context
+    by construction — it honors dedup, the durable-kind guard, and the
+    freshest-across-sections logic without re-deriving any of them.
+    """
+    facts: list[dict] = []
+    section = ""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            section = stripped.lstrip("#").strip()
+            continue
+        if not _is_bullet(line) or not _FRESHNESS_MARKER_RE.search(line):
+            continue
+        date_match = re.search(r"as of (\d{4}-\d{2}-\d{2})", line)
+        as_of = date_match.group(1) if date_match else ""
+        ts = _parse_iso_ts(as_of) if as_of else None
+        clean = re.sub(r"^[-*]\s+", "", _FRESHNESS_MARKER_RE.sub("", line).strip()).strip()
+        clean = re.sub(r"^[🔴🟡🟢⚪️🔵🟠]\s*", "", clean).strip()
+        facts.append(
+            {
+                "section": section,
+                "text": clean,
+                "as_of": as_of,
+                "age_days": (now - ts).days if ts else None,
+            }
+        )
+    return facts
+
+
+def startup_quality_report(
+    config: Config,
+    *,
+    budget_chars: int | None = None,
+    cwd: str | None = None,
+    task: str | None = None,
+    agent: str | None = None,
+) -> dict:
+    """Diagnostic for ``om context --quality-report``.
+
+    Reports cross-section duplicate bullets dropped from the payload, operational
+    facts (tool versions / install status) that look stale, and budget usage per
+    included section.
+    """
+    ensure_startup_memory(config)
+    budget = max(int(budget_chars or DEFAULT_STARTUP_BUDGET_CHARS), MIN_STARTUP_BUDGET_CHARS)
+    payload = build_startup_payload(config, budget_chars=budget, cwd=cwd, task=task, agent=agent)
+
+    stripped = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=True)
+    ordered = sorted(stripped, key=lambda item: (-item.priority, item.source, item.heading, item.handle))
+    _deduped, removed = _dedupe_startup_chunks(ordered)
+
+    # Derive stale facts from the payload's actual freshness markers, so the
+    # report is consistent with the emitted context by construction (it honors
+    # dedup, the durable-kind guard, and the freshest-across-sections logic).
+    stale = _stale_facts_from_payload(payload.text, now=datetime.now(timezone.utc))
+
+    return {
+        "budget_chars": budget,
+        "used_chars": len(payload.text),
+        "duplicate_bullets": sorted(set(removed)),
+        "duplicate_count": len(removed),
+        "stale_operational_facts": stale,
+        # Accurate post-annotation section sizes straight from the emitted payload.
+        "budget_by_section": payload.included_sections,
+        "overflow_handles": [item["handle"] for item in payload.overflow],
+    }
+
+
+def _line_indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _next_nonblank_indent(lines: list[str], idx: int) -> int:
+    for j in range(idx + 1, len(lines)):
+        if lines[j].strip():
+            return _line_indent(lines[j])
+    return 0
+
+
+def _is_project_subsection(chunk: StartupChunk) -> bool:
+    """True for a per-project Active Projects SUBSECTION (e.g. startup:active:active-projects:alpha).
+
+    Only subsection chunks (with a project slug) are exempt — their identical
+    short fields are distinct per-project facts. The flat "## Active Projects"
+    chunk (handle without a trailing project slug) still de-dupes normally.
+    """
+    return chunk.handle.startswith("startup:active:active-projects:")
+
+
+def _dedupe_startup_chunks(chunks: list[StartupChunk]) -> tuple[list[StartupChunk], list[str]]:
+    """Drop bullets already shown in an earlier (higher-priority) chunk.
+
+    ``chunks`` must be in selection order (highest priority first). Returns the
+    de-duplicated chunks plus the list of removed (normalized) duplicate bullets
+    for the quality report. Only *top-level leaf* bullets are de-duplicated:
+    bullets with nested children are kept intact so dedup can never orphan a
+    sub-bullet. Headings, prose, and nested bullets are preserved.
+
+    Active-project subsections are EXEMPT: sibling projects routinely carry
+    identical short structured fields ("- Status: Active", "- Owner: Bryan") that
+    are distinct facts about distinct projects, not repeated guidance. Deduping
+    them would erase project fields (or vanish a whole project). Dedup targets
+    repeated profile/working-contract guidance, not per-project fields.
+    """
+    seen: set[str] = set()
+    removed: list[str] = []
+    out: list[StartupChunk] = []
+    for chunk in chunks:
+        if _is_project_subsection(chunk):
+            out.append(chunk)  # keep verbatim; don't dedup distinct project fields
+            continue
+        kept_lines: list[str] = []
+        lines = chunk.body.split("\n")
+        for i, line in enumerate(lines):
+            if _is_bullet(line) and _line_indent(line) == 0 and _next_nonblank_indent(lines, i) == 0:
+                # top-level leaf bullet (no nested children)
+                norm = _normalize_bullet(line)
+                if norm and norm in seen:
+                    removed.append(_display_bullet(line))  # readable text for the report
+                    continue
+                if norm:
+                    seen.add(norm)
+            kept_lines.append(line)
+        out.append(replace(chunk, body="\n".join(kept_lines)))
+    return out, removed
 
 
 def _filter_priority_bullets(section: str, allowed_prefixes: tuple[str, ...]) -> str:
@@ -525,9 +845,19 @@ def _chunk_priority(
     if "creative & professional" in lower_heading:
         priority = 3
     route_terms = _route_terms(cwd=cwd, task=task, agent=agent)
-    if route_terms and any(term in lower_body or term in lower_heading for term in route_terms):
-        priority += 5
+    # Match with separators normalized to spaces on both sides, so a cwd slug like
+    # "observational-memory" matches a human heading like "Observational Memory".
+    hay = _normalize_route_text(lower_heading + " " + lower_body)
+    if route_terms and any(_normalize_route_text(term) in hay for term in route_terms):
+        # The project/section matching the current cwd/task gets first claim on
+        # budget; unmatched active-project inventory overflows to recall handles.
+        priority += _ROUTE_MATCH_BOOST
     return priority
+
+
+def _normalize_route_text(text: str) -> str:
+    """Lowercase and collapse separators so hyphen/underscore slugs match spaced text."""
+    return re.sub(r"[\s_\-.]+", " ", text.lower()).strip()
 
 
 def _selected_chunk_order(chunk: StartupChunk) -> tuple[int, int, str, str]:
@@ -557,6 +887,50 @@ def _selected_chunk_order(chunk: StartupChunk) -> tuple[int, int, str, str]:
     return (source_order, section_order, chunk.heading, chunk.handle)
 
 
+# Generic directory / filler words that would match almost anything and must not
+# drive cwd/task routing.
+_GENERIC_ROUTE_TERMS = frozenset(
+    {
+        "code",
+        "src",
+        "lib",
+        "app",
+        "apps",
+        "project",
+        "projects",
+        "experiments",
+        "experiment",
+        "repo",
+        "repos",
+        "work",
+        "dev",
+        "tmp",
+        "temp",
+        "home",
+        "users",
+        "user",
+        "documents",
+        "desktop",
+        "github",
+        "gitlab",
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "this",
+        "that",
+        "into",
+        "issue",
+        "issues",
+        "task",
+        "work",
+        "main",
+        "master",
+    }
+)
+
+
 def _route_terms(*, cwd: str | None, task: str | None, agent: str | None) -> list[str]:
     terms: list[str] = []
     if cwd:
@@ -566,12 +940,15 @@ def _route_terms(*, cwd: str | None, task: str | None, agent: str | None) -> lis
         terms.extend(_keyword_terms(task))
     if agent:
         terms.append(agent.lower())
-    return [term for term in terms if len(term) >= 3]
+    return [term for term in terms if len(term) >= 3 and term not in _GENERIC_ROUTE_TERMS]
 
 
 def _keyword_terms(value: str) -> list[str]:
-    stop = {"the", "and", "for", "with", "from", "this", "that", "into", "issue", "issues"}
-    return [term for term in re.findall(r"[a-zA-Z0-9_.-]+", value.lower()) if len(term) >= 3 and term not in stop]
+    return [
+        term
+        for term in re.findall(r"[a-zA-Z0-9_.-]+", value.lower())
+        if len(term) >= 3 and term not in _GENERIC_ROUTE_TERMS
+    ]
 
 
 def _startup_header(*, budget: int, cwd: str | None, task: str | None, agent: str | None) -> str:
@@ -632,8 +1009,6 @@ def _shell_safe_hint(value: str) -> str:
 
 
 def _enabled_profile_section_keys() -> set[str]:
-    import os
-
     explicit = os.environ.get("OM_PROFILE_SECTIONS")
     if explicit:
         return {item.strip().lower() for item in explicit.split(",") if item.strip()}
