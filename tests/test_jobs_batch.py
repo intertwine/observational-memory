@@ -54,6 +54,8 @@ def _install_fake_openai(monkeypatch, state):
             )
 
         def cancel(self, batch_id):
+            if state.get("cancel_raises"):
+                raise RuntimeError("transient cancel failure")
             state["cancelled"] = batch_id
             return SimpleNamespace(id=batch_id, status="cancelling")
 
@@ -298,3 +300,57 @@ def test_explicit_async_raises_on_provider_error(cfg, monkeypatch):
     monkeypatch.setattr("observational_memory.jobs.submit_reflect_batch", boom)
     with pytest.raises(click.ClickException):
         cli._reflect_async(cfg, explicit=True)
+
+
+def test_submit_blocked_by_hard_budget_before_upload(cfg, tmp_path, monkeypatch):
+    from observational_memory.usage.budgets import BudgetExceededError
+    from observational_memory.usage.tracker import UsageTracker
+
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    monkeypatch.setenv("OM_USAGE_TRACKING", "1")
+    monkeypatch.setenv("OM_USAGE_DB", str(tmp_path / "usage.sqlite"))
+    monkeypatch.setenv("OM_LLM_MODEL", "gpt-4o-mini")  # priced model, regardless of any leaked global model
+    # Token cap blocks regardless of pricing; USD cap also set for completeness.
+    monkeypatch.setenv("OM_BUDGET_DAILY_TOKENS", "1")
+    monkeypatch.setenv("OM_BUDGET_DAILY_USD", "0.0000001")
+    monkeypatch.setenv("OM_BUDGET_MODE", "hard")
+    monkeypatch.delenv("OM_BUDGET_BYPASS", raising=False)
+    config = Config(memory_dir=cfg.memory_dir, env_file=cfg.env_file)
+
+    with pytest.raises(BudgetExceededError):
+        submit_reflect_batch(config)
+    # The cost-incurring calls must never have been reached.
+    assert "uploaded" not in state
+    assert "created" not in state
+    # A blocked row was recorded (parity with the sync path).
+    tracker = UsageTracker(config.usage_db_path)
+    with tracker.connect() as conn:
+        summary = tracker.summary(conn)
+    assert summary["blocked_calls"] == 1
+
+
+def test_async_model_honors_reflector_provider_override(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    # Global model belongs to a different provider; the openai reflector override
+    # must ignore it (mirrors the sync ignore_global_model rule).
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai-chatgpt")
+    monkeypatch.setenv("OM_LLM_MODEL", "claude-sonnet-4-5-20250929")
+    monkeypatch.setenv("OM_LLM_REFLECTOR_PROVIDER", "openai")
+    config = Config(memory_dir=cfg.memory_dir, env_file=cfg.env_file)
+
+    record = submit_reflect_batch(config)
+    assert record is not None
+    assert record.model == config.openai_model  # openai default, not the global claude model
+    assert record.model != "claude-sonnet-4-5-20250929"
+
+
+def test_cancel_leaves_job_pending_on_failure(cfg, monkeypatch):
+    state: dict = {"cancel_raises": True}
+    _install_fake_openai(monkeypatch, state)
+    record = submit_reflect_batch(cfg)
+    result = cancel_job(cfg, record.job_id)
+    assert result.status == "submitted"  # still pending, retryable
+    assert result.error and "cancel request failed" in result.error
+    assert ProviderJobStore(cfg.openai_batch_jobs_dir).load(record.job_id).pending

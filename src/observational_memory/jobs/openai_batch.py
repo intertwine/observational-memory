@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -54,6 +55,70 @@ def _resolve_openai_provider(config: Config) -> str:
     return provider
 
 
+def _enforce_batch_budget(config: Config, model: str, system_prompt: str, user_content: str, max_output: int) -> None:
+    """Run the pre-submit budget gate, mirroring llm.compress's pre-call gate.
+
+    Estimates the call at the Batch (50%) price and checks it before the Batch
+    job is created. A hard cap records a blocked row and raises
+    ``BudgetExceededError`` (one-shot ``OM_BUDGET_BYPASS=1`` overrides); a soft
+    cap warns. Never let estimation failures block a submit.
+    """
+    if not config.usage_tracking:
+        return
+    try:
+        from ..config import _env_flag
+        from ..usage import check_budget, record_call
+        from ..usage.budgets import BudgetExceededError
+        from ..usage.pricing import load_pricing
+    except Exception:  # pragma: no cover - usage subsystem optional
+        return
+
+    prompt_tokens = (len(system_prompt) // 4) + (len(user_content) // 4)
+    est_tokens = prompt_tokens + max(max_output, 0)
+    try:
+        pricing = load_pricing(config.pricing_overrides_path)
+        est = pricing.estimate(
+            provider="openai", model=model, prompt_tokens=prompt_tokens, completion_tokens=max_output
+        )
+        est_usd = round(est.total_usd * 0.5, 6) if est.total_usd is not None else None
+        decision = check_budget(config, operation="reflector", est_usd=est_usd, est_tokens=est_tokens)
+    except Exception:  # pragma: no cover - never let estimation break a submit
+        return
+
+    for warning in decision.warnings:
+        print(f"om: budget warning — {warning}", file=sys.stderr)
+    if not decision.blocked:
+        return
+    if _env_flag("OM_BUDGET_BYPASS"):
+        print(f"om: budget BYPASS (OM_BUDGET_BYPASS=1) — {decision.block_reason}", file=sys.stderr)
+        return
+
+    try:
+        record_call(
+            config,
+            provider="openai",
+            model=model,
+            operation="reflector",
+            prompt_tokens=None,
+            completion_tokens=None,
+            total_tokens=None,
+            est_input_usd=round((est.input_usd or 0.0) * 0.5, 6) if est.input_usd is not None else None,
+            est_output_usd=round((est.output_usd or 0.0) * 0.5, 6) if est.output_usd is not None else None,
+            est_total_usd=est_usd,
+            latency_ms=0,
+            retries=0,
+            status="blocked_by_budget",
+            token_source="estimate",
+            pricing_source=est.source,
+        )
+    except Exception:  # pragma: no cover - recording the block is best-effort
+        pass
+    raise BudgetExceededError(
+        f"refusing to submit a Batch job for openai/{model} — {decision.block_reason}. "
+        f"Override once with OM_BUDGET_BYPASS=1."
+    )
+
+
 def submit_reflect_batch(config: Config) -> JobRecord | None:
     """Submit a single-pass reflection as a Batch job.
 
@@ -71,7 +136,15 @@ def submit_reflect_batch(config: Config) -> JobRecord | None:
     if prepared is None:
         return None
     system_prompt, user_content, max_output, inputs = prepared
-    model = config.resolve_model(operation="reflector", provider="openai")
+    # Mirror the sync resolution rule: when an explicit reflector provider is
+    # pinned, ignore the global OM_LLM_MODEL (which usually belongs to another
+    # provider) so a pinned `openai` job doesn't submit a foreign model.
+    ignore_global = bool(config.operation_provider("reflector"))
+    model = config.resolve_model(operation="reflector", provider="openai", ignore_global_model=ignore_global)
+
+    # Gate on budgets BEFORE creating the (cost-incurring) Batch job, exactly as
+    # the synchronous path gates before dispatch — at the Batch-discounted price.
+    _enforce_batch_budget(config, model, system_prompt, user_content, max_output)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     custom_id = f"reflector:{ts}:{_sha256(user_content)[:8]}"
@@ -225,12 +298,18 @@ def cancel_job(config: Config, job_id: str) -> JobRecord:
     record = store.load(job_id)
     if record is None:
         raise BatchProviderError(f"No job '{job_id}'.")
-    if record.batch_id and record.pending:
+    if not record.pending:
+        return record  # already terminal — nothing to cancel
+    if record.batch_id:
         try:
             _client().batches.cancel(record.batch_id)
         except Exception as exc:
+            # Leave the job pending so the cancel can be retried (and so a still-
+            # running remote batch is still polled/applied/cleaned up).
             record.error = f"cancel request failed: {exc}"
+            return store.save(record)
     record.status = "cancelled"
+    record.error = None
     return store.save(record)
 
 
