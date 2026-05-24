@@ -105,14 +105,24 @@ def build_startup_payload(
     """Build a deterministic, budgeted startup payload with recall handles."""
     ensure_startup_memory(config)
     budget = max(int(budget_chars or DEFAULT_STARTUP_BUDGET_CHARS), MIN_STARTUP_BUDGET_CHARS)
-    chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=True)
+    # Keep metadata so freshness can be computed across all sections, then applied
+    # to the surviving (de-duplicated) copy using the freshest last_seen anywhere.
+    chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=False)
+    fresh_map = _operational_freshness_map(chunks)
     header = _startup_header(budget=budget, cwd=cwd, task=task, agent=agent)
     footer = _recall_footer(task=task, cwd=cwd)
 
     # De-duplicate bullets across sections in priority order (the highest-priority
-    # section keeps each bullet) before spending budget on repeats.
+    # section keeps each bullet) before spending budget on repeats; then annotate
+    # freshness and strip metadata.
     ordered = sorted(chunks, key=lambda item: (-item.priority, item.source, item.heading, item.handle))
     ordered, _removed = _dedupe_startup_chunks(ordered)
+    now = datetime.now(timezone.utc)
+    days = _freshness_days()
+    ordered = [
+        replace(chunk, body=_annotate_and_strip(chunk.body, fresh_map, now=now, freshness_days=days))
+        for chunk in ordered
+    ]
 
     used = len(header) + len(footer)
     selected: list[StartupChunk] = []
@@ -271,36 +281,61 @@ def _split_visible_and_metadata(line: str) -> tuple[str, str]:
     return line[: match.start()], line[match.start() :]
 
 
-def _annotate_operational_line(line: str, *, now: datetime, freshness_days: int) -> str:
-    """Append an "(as of <date> — verify)" marker to a stale operational bullet."""
+def _operational_last_seen(line: str) -> datetime | None:
+    """Return the last_seen of a non-durable operational bullet, else None."""
     if not _is_bullet(line):
-        return line
+        return None
     seen = _LAST_SEEN_RE.search(line)
     if not seen:
-        return line
+        return None
     # Respect the authoritative kind= tag: durable facts never decay, even if
     # their text contains a version-like token (e.g. "prefers Python 3.11").
     kind = _KIND_RE.search(line)
     if kind and kind.group(1).lower() in _DURABLE_KINDS:
+        return None
+    visible, _metadata = _split_visible_and_metadata(line)
+    if not _looks_operational(visible):
+        return None
+    return _parse_iso_ts(seen.group(1))
+
+
+def _operational_freshness_map(chunks: list[StartupChunk]) -> dict[str, datetime]:
+    """Map each operational fact (normalized) to its FRESHEST last_seen across sections.
+
+    Cross-section duplicates of the same fact may carry different last_seen
+    values; the fact is only as stale as its most recent sighting anywhere.
+    """
+    fresh: dict[str, datetime] = {}
+    for chunk in chunks:
+        for line in chunk.body.split("\n"):
+            last_seen = _operational_last_seen(line)
+            if last_seen is None:
+                continue
+            key = _normalize_bullet(line)
+            if key and (key not in fresh or last_seen > fresh[key]):
+                fresh[key] = last_seen
+    return fresh
+
+
+def _annotate_and_strip(body: str, fresh_map: dict[str, datetime], *, now: datetime, freshness_days: int) -> str:
+    """Annotate stale operational bullets (using the global freshest last_seen) and strip metadata."""
+    out: list[str] = []
+    for line in body.split("\n"):
+        out.append(_annotate_line_with_map(line, fresh_map, now=now, freshness_days=freshness_days))
+    return _strip_om_metadata("\n".join(out))
+
+
+def _annotate_line_with_map(line: str, fresh_map: dict[str, datetime], *, now: datetime, freshness_days: int) -> str:
+    if not _is_bullet(line):
         return line
     visible, metadata = _split_visible_and_metadata(line)
     if _FRESHNESS_MARKER in visible.lower() or not _looks_operational(visible):
         return line
-    last_seen = _parse_iso_ts(seen.group(1))
+    last_seen = fresh_map.get(_normalize_bullet(line))
     if last_seen is None or (now - last_seen).days < freshness_days:
         return line
     marker = f" ({_FRESHNESS_MARKER} {last_seen.strftime('%Y-%m-%d')} — verify)"
     return visible.rstrip() + marker + metadata
-
-
-def _annotate_stale_operational_facts(
-    text: str, *, now: datetime | None = None, freshness_days: int | None = None
-) -> str:
-    if not text:
-        return text
-    now = now or datetime.now(timezone.utc)
-    days = freshness_days if freshness_days is not None else _freshness_days()
-    return "\n".join(_annotate_operational_line(line, now=now, freshness_days=days) for line in text.split("\n"))
 
 
 def _normalize_bullet(line: str) -> str:
@@ -358,31 +393,32 @@ def startup_quality_report(
     now = datetime.now(timezone.utc)
     days = _freshness_days()
     raw_chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=False)
+    # Use the same global freshest-last_seen logic as the payload, so the report
+    # agrees with what's actually annotated, and list each fact once.
+    fresh_map = _operational_freshness_map(raw_chunks)
     stale: list[dict] = []
+    reported: set[str] = set()
     for chunk in raw_chunks:
         for line in chunk.body.split("\n"):
-            if not _is_bullet(line):
+            if _operational_last_seen(line) is None:
                 continue
-            seen = _LAST_SEEN_RE.search(line)
-            if not seen:
+            key = _normalize_bullet(line)
+            if not key or key in reported:
                 continue
-            kind = _KIND_RE.search(line)
-            if kind and kind.group(1).lower() in _DURABLE_KINDS:
-                continue  # mirror the annotation path: durable facts aren't stale
+            freshest = fresh_map.get(key)
+            if freshest is None or (now - freshest).days < days:
+                continue
+            reported.add(key)
             visible, _metadata = _split_visible_and_metadata(line)
-            if not _looks_operational(visible):
-                continue
-            last_seen = _parse_iso_ts(seen.group(1))
-            if last_seen is not None and (now - last_seen).days >= days:
-                clean = _FRESHNESS_MARKER_RE.sub("", re.sub(r"^[-*]\s+", "", visible.strip())).strip()
-                stale.append(
-                    {
-                        "section": chunk.heading,
-                        "text": clean,
-                        "as_of": last_seen.strftime("%Y-%m-%d"),
-                        "age_days": (now - last_seen).days,
-                    }
-                )
+            clean = _FRESHNESS_MARKER_RE.sub("", re.sub(r"^[-*]\s+", "", visible.strip())).strip()
+            stale.append(
+                {
+                    "section": chunk.heading,
+                    "text": clean,
+                    "as_of": freshest.strftime("%Y-%m-%d"),
+                    "age_days": (now - freshest).days,
+                }
+            )
 
     included = set(payload.included_handles)
     by_section = [
@@ -520,9 +556,6 @@ def _startup_chunks(
             ]
         for heading, body, handle in chunk_parts:
             if strip_metadata:
-                # Annotate stale operational facts from metadata (env-aware, at
-                # build time) before the metadata comments are stripped.
-                body = _annotate_stale_operational_facts(body)
                 body = _strip_om_metadata(body)
             if project_startup and _is_empty_startup_chunk(body):
                 continue

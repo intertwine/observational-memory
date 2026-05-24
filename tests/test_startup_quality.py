@@ -58,6 +58,26 @@ def test_freshness_marker_does_not_defeat_dedup(cfg):
     assert payload.text.lower().count("tool version 1.2.3 installed") == 1
 
 
+def test_fact_seen_recently_elsewhere_is_not_marked_stale(cfg):
+    # Same fact: old copy in a higher-priority section, recent copy elsewhere.
+    # The surviving (deduped) copy must NOT be marked stale — freshness uses the
+    # freshest last_seen across all sections.
+    reflections = (
+        "# Reflections\n\n"
+        "## Preferences & Opinions\n"  # higher priority, OLD copy
+        f"- 🔴 tool version 1.2.3 installed <!--om: id=ome_1 kind=snapshot last_seen={_iso(40)}-->\n"
+        "## Active Projects\n"  # lower priority, RECENT copy
+        f"- 🔴 tool version 1.2.3 installed <!--om: id=ome_2 kind=snapshot last_seen={_iso(1)}-->\n"
+    )
+    _write(cfg, reflections)
+    payload = sm.build_startup_payload(cfg, budget_chars=24000)
+    assert payload.text.lower().count("tool version 1.2.3 installed") == 1
+    assert "verify" not in payload.text  # freshest sighting (1d) is within the window
+    # Report agrees with the payload.
+    report = sm.startup_quality_report(cfg, budget_chars=24000)
+    assert report["stale_operational_facts"] == []
+
+
 def test_dedupe_keeps_higher_priority_instance():
     high = sm.StartupChunk("profile", "Preferences & Opinions", "## Preferences\n- 🔴 Be direct", "h1", priority=10)
     low = sm.StartupChunk("active", "Recent Themes", "## Recent Themes\n- Be direct", "h2", priority=4)
