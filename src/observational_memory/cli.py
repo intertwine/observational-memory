@@ -219,6 +219,7 @@ def _reflect_async(config: Config, explicit: bool) -> None:
     """
     from .jobs import BatchProviderError, submit_reflect_batch
     from .reflect import ChunkingRequired
+    from .usage.budgets import BudgetExceededError
 
     try:
         record = submit_reflect_batch(config)
@@ -226,6 +227,9 @@ def _reflect_async(config: Config, explicit: bool) -> None:
         click.echo(f"Input too large for a single Batch request ({exc}); running synchronously instead.", err=True)
         _run_reflector_sync(config)
         return
+    except BudgetExceededError as exc:
+        # A budget block is terminal: a synchronous fallback would hit the same cap.
+        raise click.ClickException(str(exc)) from exc
     except BatchProviderError as exc:
         if explicit:
             raise click.ClickException(str(exc)) from exc

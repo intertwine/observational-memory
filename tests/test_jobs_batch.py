@@ -346,6 +346,22 @@ def test_async_model_honors_reflector_provider_override(cfg, monkeypatch):
     assert record.model != "claude-sonnet-4-5-20250929"
 
 
+def test_budget_block_is_clean_clickexception_both_modes(cfg, monkeypatch):
+    import click
+
+    from observational_memory import cli
+    from observational_memory.usage.budgets import BudgetExceededError
+
+    def blocked(config):
+        raise BudgetExceededError("daily budget exceeded")
+
+    monkeypatch.setattr("observational_memory.jobs.submit_reflect_batch", blocked)
+    # A budget block is terminal in BOTH modes (a sync fallback would also block).
+    for explicit in (True, False):
+        with pytest.raises(click.ClickException):
+            cli._reflect_async(cfg, explicit=explicit)
+
+
 def test_cancel_leaves_job_pending_on_failure(cfg, monkeypatch):
     state: dict = {"cancel_raises": True}
     _install_fake_openai(monkeypatch, state)
