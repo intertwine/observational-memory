@@ -76,6 +76,32 @@ def test_reflect_chunked_keeps_each_fold_under_input_budget(monkeypatch):
     assert any("truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS" in uc for _, uc in captured)
 
 
+def test_reflect_chunked_single_oversized_section_stays_under_budget(monkeypatch):
+    from observational_memory.reflect import _MAX_INPUT_CHARS
+
+    captured: list[tuple[str, str]] = []
+
+    def fake_compress(system_prompt, user_content, config, **kwargs):
+        captured.append((system_prompt, user_content))
+        return "# Reflections\n\nout"
+
+    monkeypatch.setattr(reflect, "compress", fake_compress)
+    cfg = Config()
+    # A SINGLE date section whose body dwarfs the per-call budget. The chunker
+    # must split within the day rather than emit one oversized fold (or a
+    # spurious header-only chunk).
+    observations = "# Observations\n\n## 2026-05-20\n\n" + ("- a line of observation\n" * 4000)
+    reflect._reflect_chunked("S" * 200, "R" * 5000, observations, cfg)
+
+    assert len(captured) >= 2, "oversized single section should split across folds"
+    for sys_prompt, user_content in captured:
+        assert len(sys_prompt) + len(user_content) <= _MAX_INPUT_CHARS, (
+            f"fold exceeded budget: {len(sys_prompt) + len(user_content)} > {_MAX_INPUT_CHARS}"
+        )
+        # No header-only / empty observation chunk — each fold carries real content.
+        assert "a line of observation" in user_content
+
+
 def test_bound_reflections_context_keeps_head_and_marks_truncation():
     big = "HEAD" + "x" * 50_000
     out = _bound_reflections_context(big, 1000)
