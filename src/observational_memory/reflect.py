@@ -384,23 +384,51 @@ def _reflect_chunked(
     return running_reflections
 
 
-def _chunk_observations(observations: str, budget_chars: int | None = None) -> list[str]:
-    """Split observations by date headers into chunks that fit within token limits.
+def _split_to_width(text: str, max_len: int) -> list[str]:
+    """Split text into pieces no longer than ``max_len``, preferring line breaks.
 
-    Groups consecutive date sections until adding another would exceed the
-    per-chunk budget. ``budget_chars`` is the room left for observations after
-    the reflections context and system prompt are reserved (see
-    ``_reflector_budgets``); when omitted it falls back to a conservative
-    standalone default. A single date section larger than the budget is kept
-    whole (we never split within a day) and may exceed it — a rare edge case.
+    A line longer than ``max_len`` is hard-split. Guarantees every piece is
+    ``<= max_len`` so a single oversized date section can't blow the budget.
+    """
+    if max_len <= 0 or len(text) <= max_len:
+        return [text]
+    pieces: list[str] = []
+    cur = ""
+    for line in text.splitlines(keepends=True):
+        if len(line) > max_len:
+            if cur:
+                pieces.append(cur)
+                cur = ""
+            for j in range(0, len(line), max_len):
+                pieces.append(line[j : j + max_len])
+            continue
+        if cur and len(cur) + len(line) > max_len:
+            pieces.append(cur)
+            cur = ""
+        cur += line
+    if cur:
+        pieces.append(cur)
+    return pieces
+
+
+def _chunk_observations(observations: str, budget_chars: int | None = None) -> list[str]:
+    """Split observations into chunks that each fit within ``budget_chars``.
+
+    Splits on ``## YYYY-MM-DD`` date headers and packs whole days into chunks,
+    re-prepending the ``# Observations`` header to each chunk for context.
+    ``budget_chars`` is the room left for observations after the reflections
+    context and system prompt are reserved (see ``_reflector_budgets``); when
+    omitted it falls back to a conservative standalone default.
+
+    A single date section larger than the budget is split within the day (on line
+    boundaries, hard-splitting if needed) so every emitted chunk — header
+    included — stays ``<= budget_chars``. We never emit a header-only chunk.
     """
     if budget_chars is None:
         budget_chars = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN * 0.6)
 
-    # Split by date headers, keeping each "## YYYY-MM-DD" section together
     sections = re.split(r"(?=^## \d{4}-\d{2}-\d{2})", observations, flags=re.MULTILINE)
 
-    # First element may be the "# Observations" header — prepend to first date section
     header = ""
     date_sections = []
     for section in sections:
@@ -410,19 +438,24 @@ def _chunk_observations(observations: str, budget_chars: int | None = None) -> l
             header = section
 
     if not date_sections:
-        # No date sections found — return as single chunk
-        return [observations]
+        # No date structure — return whole if it fits, else hard-split to width.
+        return [observations] if len(observations) <= budget_chars else _split_to_width(observations, budget_chars)
+
+    # Every chunk re-carries the header, so content must fit in the remainder.
+    max_content = max(budget_chars - len(header), 1)
+    pieces: list[str] = []
+    for section in date_sections:
+        pieces.extend(_split_to_width(section, max_content))
 
     chunks: list[str] = []
-    current_chunk = header
-    for section in date_sections:
-        if len(current_chunk) + len(section) > budget_chars and current_chunk.strip():
-            chunks.append(current_chunk)
-            current_chunk = header  # restart with header for context
-        current_chunk += section
-
-    if current_chunk.strip():
-        chunks.append(current_chunk)
+    current = ""  # content only; header is added at flush
+    for piece in pieces:
+        if current and len(header) + len(current) + len(piece) > budget_chars:
+            chunks.append(header + current)
+            current = ""
+        current += piece
+    if current:
+        chunks.append(header + current)
 
     return chunks if chunks else [observations]
 
