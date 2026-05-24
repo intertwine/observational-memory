@@ -13,6 +13,7 @@ Example:
     python scripts/bump_version.py pyproject.toml patch
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -108,6 +109,13 @@ def update_package_init_version(init_path: Path, old_version: str, new_version: 
     init_path.write_text(content.replace(old_line, new_line, 1))
 
 
+def update_cowork_plugin_version(version_json_path: Path, new_version: str) -> None:
+    """Keep the Cowork plugin manifest version in step with the package version."""
+    if not version_json_path.exists():
+        return
+    version_json_path.write_text(json.dumps({"version": new_version}) + "\n")
+
+
 def main():
     if len(sys.argv) != 3:
         print(__doc__, file=sys.stderr)
@@ -125,8 +133,9 @@ def main():
 
     try:
         old_version, new_version = update_pyproject_version(pyproject_path, bump_type)
-        init_path = pyproject_path.parent / "src" / "observational_memory" / "__init__.py"
-        update_package_init_version(init_path, old_version, new_version)
+        pkg_dir = pyproject_path.parent / "src" / "observational_memory"
+        update_package_init_version(pkg_dir / "__init__.py", old_version, new_version)
+        update_cowork_plugin_version(pkg_dir / "cowork_plugin" / "version.json", new_version)
         print(f"{old_version} → {new_version}")
         sys.exit(0)
     except Exception as e:
