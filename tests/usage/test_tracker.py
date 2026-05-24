@@ -77,6 +77,25 @@ def test_summary_status_and_tail_agree(cfg):
     assert round(sum(r.est_total_usd for r in rows), 6) == 0.10
 
 
+def test_blocked_rows_excluded_from_cost_and_token_totals(cfg):
+    # A blocked row carries a pre-call estimate that was never spent; it must
+    # count toward call counts but NOT toward cost/token totals (matches tail).
+    _record(cfg, usd=0.02, tokens=2000, status="ok")
+    _record(cfg, usd=0.42, tokens=99999, status="blocked_by_budget")
+    t = UsageTracker(cfg.usage_db_path)
+    with t.connect() as conn:
+        summary = t.summary(conn)
+    assert summary["calls"] == 2
+    assert summary["ok_calls"] == 1
+    assert summary["blocked_calls"] == 1
+    assert summary["total_usd"] == 0.02
+    assert summary["total_tokens"] == 2000
+    # by_operation cost/tokens are also ok-only.
+    refl = next(op for op in summary["by_operation"] if op["operation"] == "reflector")
+    assert refl["total_usd"] == 0.02
+    assert refl["total_tokens"] == 2000
+
+
 def test_operation_filter(cfg):
     _record(cfg, operation="observer", usd=0.01, tokens=100)
     _record(cfg, operation="reflector", usd=0.05, tokens=500)

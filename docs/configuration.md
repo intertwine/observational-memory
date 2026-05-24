@@ -199,6 +199,8 @@ A budget is named `OM_BUDGET_[<OPERATION>_]<WINDOW>_<UNIT>`:
 
 Before each call, OM estimates its cost (prompt `chars/4` plus the requested output cap) and checks it against current spend. A **hard** cap refuses the call with a clear message; a **soft** cap proceeds but warns. To push one call through a hard cap, prefix it: `OM_BUDGET_BYPASS=1 om reflect …`. `recall` makes no LLM call today, so it carries no budget.
 
+A model with no price (not in the snapshot or your overrides) has no dollar estimate, so a **USD** cap can't gate it — use a **token** cap (enforced from token counts regardless of pricing) if you want a hard ceiling on unpriced models.
+
 ### Pricing
 
 Cost estimates use a dated pricing snapshot shipped in the package. Override any model per host — overrides win and are easy to keep current.

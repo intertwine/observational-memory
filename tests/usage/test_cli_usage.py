@@ -97,5 +97,9 @@ def test_budget_set_requires_a_cap(env):
 
 
 def test_doctor_reports_usage_subsystem(env):
-    result = CliRunner().invoke(cli, ["doctor"])
+    runner = CliRunner()
+    runner.invoke(cli, ["usage", "budget", "set", "--daily-usd", "5.00"])
+    result = runner.invoke(cli, ["doctor"])
     assert "Usage tracking" in result.output
+    assert "Usage budgets" in result.output
+    assert "configured" in result.output

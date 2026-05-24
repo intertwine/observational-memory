@@ -186,19 +186,22 @@ class UsageTracker:
             params.append(since_utc)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
 
+        # Cost and token sums count only ``ok`` rows: blocked/error rows carry a
+        # pre-call estimate that was never actually spent. Call counts include
+        # every row so blocked/error attempts remain visible.
         totals = conn.execute(
             f"SELECT COUNT(*) AS calls, "
             f"COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END), 0) AS ok_calls, "
             f"COALESCE(SUM(CASE WHEN status='blocked_by_budget' THEN 1 ELSE 0 END), 0) AS blocked_calls, "
-            f"COALESCE(SUM(total_tokens), 0) AS tokens, "
-            f"COALESCE(SUM(est_total_usd), 0.0) AS usd FROM calls{where}",
+            f"COALESCE(SUM(CASE WHEN status='ok' THEN total_tokens ELSE 0 END), 0) AS tokens, "
+            f"COALESCE(SUM(CASE WHEN status='ok' THEN est_total_usd ELSE 0 END), 0.0) AS usd FROM calls{where}",
             params,
         ).fetchone()
 
         per_op = conn.execute(
             f"SELECT operation, COUNT(*) AS calls, "
-            f"COALESCE(SUM(total_tokens), 0) AS tokens, "
-            f"COALESCE(SUM(est_total_usd), 0.0) AS usd FROM calls{where} "
+            f"COALESCE(SUM(CASE WHEN status='ok' THEN total_tokens ELSE 0 END), 0) AS tokens, "
+            f"COALESCE(SUM(CASE WHEN status='ok' THEN est_total_usd ELSE 0 END), 0.0) AS usd FROM calls{where} "
             f"GROUP BY operation ORDER BY usd DESC",
             params,
         ).fetchall()

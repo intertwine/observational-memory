@@ -113,7 +113,7 @@ def compress(
         system_prompt=system_prompt,
         user_content=user_content,
         started=started,
-        retries=_MAX_RETRIES,
+        retries=attempt,
         status="error",
     )
     raise RuntimeError(
@@ -170,9 +170,7 @@ def _enforce_budget(
             provider=provider, model=model, prompt_tokens=prompt_tokens, completion_tokens=max_tokens
         )
         decision = check_budget(config, operation=operation, est_usd=est.total_usd, est_tokens=est_tokens)
-    except BudgetExceededError:
-        raise
-    except Exception:  # pragma: no cover - never let budgeting break the call
+    except Exception:  # pragma: no cover - never let pricing/estimation break the call
         return
 
     for warning in decision.warnings:

@@ -135,7 +135,7 @@ def _safe_float(value: str | None, default: float) -> float:
     if value is None:
         return default
     try:
-        return float(value.strip())
+        return float(value.strip().replace("_", "").replace(",", ""))
     except (AttributeError, ValueError):
         return default
 
