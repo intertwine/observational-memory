@@ -194,7 +194,9 @@ class UsageTracker:
             f"COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END), 0) AS ok_calls, "
             f"COALESCE(SUM(CASE WHEN status='blocked_by_budget' THEN 1 ELSE 0 END), 0) AS blocked_calls, "
             f"COALESCE(SUM(CASE WHEN status='ok' THEN total_tokens ELSE 0 END), 0) AS tokens, "
-            f"COALESCE(SUM(CASE WHEN status='ok' THEN est_total_usd ELSE 0 END), 0.0) AS usd FROM calls{where}",
+            f"COALESCE(SUM(CASE WHEN status='ok' THEN est_total_usd ELSE 0 END), 0.0) AS usd, "
+            f"COALESCE(SUM(CASE WHEN status='ok' AND est_total_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced "
+            f"FROM calls{where}",
             params,
         ).fetchone()
 
@@ -212,6 +214,8 @@ class UsageTracker:
             "blocked_calls": int(totals["blocked_calls"]),
             "total_tokens": int(totals["tokens"]),
             "total_usd": round(float(totals["usd"] or 0.0), 6),
+            # ok calls whose model had no price: their cost is unknown, not $0.
+            "unpriced_calls": int(totals["unpriced"]),
             "by_operation": [
                 {
                     "operation": r["operation"],

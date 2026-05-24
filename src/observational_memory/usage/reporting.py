@@ -113,9 +113,14 @@ def format_status(config: "Config", *, since_utc: str | None = None) -> str:
     lines: list[str] = []
     window = f"since {data['since']}" if data["since"] else "all time"
     lines.append(f"Usage ({window})")
+    unpriced = s.get("unpriced_calls", 0)
+    cost_str = _usd(s["total_usd"])
+    if unpriced:
+        # The total covers only priced calls; flag that some cost is unknown, not $0.
+        cost_str += f" (+{unpriced} unpriced)"
     lines.append(
         f"  calls: {s['calls']}  (ok {s['ok_calls']}, blocked {s['blocked_calls']})   "
-        f"tokens: {s['total_tokens']:,}   cost: {_usd(s['total_usd'])}"
+        f"tokens: {s['total_tokens']:,}   cost: {cost_str}"
     )
     if s["by_operation"]:
         lines.append("  by operation:")

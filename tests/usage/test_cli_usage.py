@@ -96,6 +96,22 @@ def test_budget_set_requires_a_cap(env):
     assert "at least one cap" in result.output
 
 
+def test_budget_set_rejects_unenforceable_caps(env):
+    runner = CliRunner()
+    env_path = env / "observational-memory" / "env"
+
+    bad = runner.invoke(cli, ["usage", "budget", "set", "--daily-usd", "nope"])
+    assert bad.exit_code != 0
+    assert "Invalid" in bad.output
+
+    zero = runner.invoke(cli, ["usage", "budget", "set", "--daily-usd", "0"])
+    assert zero.exit_code != 0
+
+    # Nothing unenforceable should have been written to the env file.
+    if env_path.exists():
+        assert "OM_BUDGET_DAILY_USD=nope" not in env_path.read_text()
+
+
 def test_doctor_reports_usage_subsystem(env):
     runner = CliRunner()
     runner.invoke(cli, ["usage", "budget", "set", "--daily-usd", "5.00"])

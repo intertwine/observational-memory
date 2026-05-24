@@ -5370,6 +5370,19 @@ def usage_tail(ctx: click.Context, limit: int, as_json: bool) -> None:
         click.echo(format_tail(config, limit=limit))
 
 
+def _validate_cap(label: str, raw: str) -> str:
+    """Reject caps that resolve_budgets() would silently drop (unparsable or <= 0).
+
+    Uses the same parser as enforcement so a written budget is always enforceable.
+    """
+    from .usage.budgets import _parse_number
+
+    parsed = _parse_number(raw)
+    if parsed is None or parsed <= 0:
+        raise click.ClickException(f"Invalid {label} cap {raw!r}: must be a positive number.")
+    return raw
+
+
 @usage.group("budget", invoke_without_command=True)
 @click.pass_context
 def usage_budget(ctx: click.Context) -> None:
@@ -5388,6 +5401,11 @@ def _usage_budget_wizard(config: Config) -> None:
     if not usd and not tokens:
         raise click.ClickException("Set at least one of USD cap / token cap.")
     mode = click.prompt("Enforcement", type=click.Choice(["hard", "soft"]), default="hard")
+
+    if usd:
+        usd = _validate_cap("USD", usd)
+    if tokens:
+        tokens = _validate_cap("token", tokens)
 
     operation = None if scope == "global" else scope
     prefix = f"{operation.upper()}_" if operation else ""
@@ -5444,7 +5462,7 @@ def usage_budget_set(
         if value is None:
             continue
         key = f"OM_BUDGET_{prefix}{win}_{unit}"
-        updates[key] = value
+        updates[key] = _validate_cap(f"--{win.lower()}-{unit.lower()}", value)
         if soft is not None:
             updates[f"{key}_MODE"] = "soft" if soft else "hard"
     if not updates:

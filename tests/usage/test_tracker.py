@@ -96,6 +96,36 @@ def test_blocked_rows_excluded_from_cost_and_token_totals(cfg):
     assert refl["total_tokens"] == 2000
 
 
+def test_unknown_priced_ok_calls_are_counted_not_zeroed(cfg):
+    # An ok call with no price (est_total_usd=NULL) must surface as unpriced,
+    # not silently fold into a $0.00 total.
+    _record(cfg, usd=0.02, tokens=1000, status="ok")
+    record_call(
+        cfg,
+        provider="openai",
+        model="some-unpriced-model",
+        operation="reflector",
+        prompt_tokens=100,
+        completion_tokens=50,
+        total_tokens=150,
+        est_input_usd=None,
+        est_output_usd=None,
+        est_total_usd=None,
+        latency_ms=10,
+        retries=0,
+        status="ok",
+        token_source="provider",
+        pricing_source="unknown",
+    )
+    t = UsageTracker(cfg.usage_db_path)
+    with t.connect() as conn:
+        summary = t.summary(conn)
+    assert summary["ok_calls"] == 2
+    assert summary["unpriced_calls"] == 1
+    assert summary["total_usd"] == 0.02  # only the priced row contributes
+    assert summary["total_tokens"] == 1150  # tokens still recorded for both
+
+
 def test_operation_filter(cfg):
     _record(cfg, operation="observer", usd=0.01, tokens=100)
     _record(cfg, operation="reflector", usd=0.05, tokens=500)
