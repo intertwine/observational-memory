@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,8 @@ from pathlib import Path
 from .config import Config
 from .llm import compress
 from .reflection_metadata import ensure_reflection_metadata, prune_stale_snapshots
+
+_LOGGER = logging.getLogger(__name__)
 
 REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
 
@@ -241,6 +244,33 @@ def _auto_memory_section(auto_memory: str, amem_changed: bool) -> str:
     return ""
 
 
+def _bound_reflections_context(reflections: str, max_chars: int) -> str:
+    """Cap the reflections.md context fed back to the reflector.
+
+    This bounds *input* size only — the reflector still emits a complete
+    document, so a single bounded pass doesn't shrink stored memory. In the
+    chunked path it also stops the running document from being re-sent in full
+    on every fold (the O(chunks x size) cost the issue calls out).
+
+    The default cap (see ``Config.reflector_context_max_chars``) is generous, so
+    this only trims pathologically large documents. When it does, it keeps the
+    head — durable identity/projects sit at the top of the reflections format —
+    appends a marker, and logs a warning so the operator can raise the cap or
+    compress the document. ``max_chars <= 0`` disables the bound.
+    """
+    if max_chars <= 0 or len(reflections) <= max_chars:
+        return reflections
+    marker = "\n\n[... older reflections truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS ...]\n"
+    head = reflections[: max(max_chars - len(marker), 0)]
+    _LOGGER.warning(
+        "reflections.md context (%d chars) exceeds OM_REFLECTOR_CONTEXT_MAX_CHARS=%d; "
+        "sending the head only. Raise the cap or compress reflections to avoid dropping older sections.",
+        len(reflections),
+        max_chars,
+    )
+    return head + marker
+
+
 def _reflect_single(
     system_prompt: str,
     reflections: str,
@@ -252,7 +282,8 @@ def _reflect_single(
     """Single-pass reflection for small observation sets."""
     amem_section = _auto_memory_section(auto_memory, amem_changed)
     obs_section = f"## Current observations\n\n{observations}" if observations.strip() else "(no new observations)"
-    user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n{obs_section}{amem_section}"
+    bounded = _bound_reflections_context(reflections, config.reflector_context_max_chars)
+    user_content = f"## Current reflections\n\n{bounded}\n\n---\n\n{obs_section}{amem_section}"
     return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
 
 
@@ -285,8 +316,12 @@ def _reflect_chunked(
         if is_last:
             amem_section = _auto_memory_section(auto_memory, amem_changed)
 
+        # Bound the *re-sent* running document so the chunked fold isn't
+        # O(chunks x reflections_size). running_reflections itself keeps the
+        # full latest output; only the per-fold context is capped.
+        bounded = _bound_reflections_context(running_reflections, config.reflector_context_max_chars)
         user_content = (
-            f"## Current reflections\n\n{running_reflections}\n\n"
+            f"## Current reflections\n\n{bounded}\n\n"
             f"---\n\n"
             f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}{amem_section}"
         )
