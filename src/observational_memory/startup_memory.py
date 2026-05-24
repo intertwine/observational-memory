@@ -33,6 +33,11 @@ _OPERATIONAL_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 _FRESHNESS_MARKER = "as of"
+_KIND_RE = re.compile(r"\bkind=(\w+)")
+# Durable fact kinds whose truth does not decay — never freshness-marked even if
+# their visible text happens to contain a version-like token.
+_DURABLE_KINDS = frozenset({"preference", "identity", "policy", "mode", "evergreen"})
+_FRESHNESS_MARKER_RE = re.compile(r"\s*\(as of \d{4}-\d{2}-\d{2} — verify\)")
 
 
 @dataclass(frozen=True)
@@ -237,9 +242,10 @@ def _extract_h3_subsection(text: str, heading: str) -> str:
 
 def _freshness_days() -> int:
     try:
-        return int(os.environ.get("OM_STARTUP_FRESHNESS_DAYS", str(DEFAULT_STARTUP_FRESHNESS_DAYS)))
+        days = int(os.environ.get("OM_STARTUP_FRESHNESS_DAYS", str(DEFAULT_STARTUP_FRESHNESS_DAYS)))
     except ValueError:
         return DEFAULT_STARTUP_FRESHNESS_DAYS
+    return days if days >= 0 else DEFAULT_STARTUP_FRESHNESS_DAYS
 
 
 def _parse_iso_ts(value: str) -> datetime | None:
@@ -265,10 +271,15 @@ def _split_visible_and_metadata(line: str) -> tuple[str, str]:
 
 def _annotate_operational_line(line: str, *, now: datetime, freshness_days: int) -> str:
     """Append an "(as of <date> — verify)" marker to a stale operational bullet."""
-    if not line.lstrip().startswith("-"):
+    if not _is_bullet(line):
         return line
     seen = _LAST_SEEN_RE.search(line)
     if not seen:
+        return line
+    # Respect the authoritative kind= tag: durable facts never decay, even if
+    # their text contains a version-like token (e.g. "prefers Python 3.11").
+    kind = _KIND_RE.search(line)
+    if kind and kind.group(1).lower() in _DURABLE_KINDS:
         return line
     visible, metadata = _split_visible_and_metadata(line)
     if _FRESHNESS_MARKER in visible.lower() or not _looks_operational(visible):
@@ -356,10 +367,11 @@ def startup_quality_report(
                 continue
             last_seen = _parse_iso_ts(seen.group(1))
             if last_seen is not None and (now - last_seen).days >= days:
+                clean = _FRESHNESS_MARKER_RE.sub("", re.sub(r"^[-*]\s+", "", visible.strip())).strip()
                 stale.append(
                     {
                         "section": chunk.heading,
-                        "text": re.sub(r"^[-*]\s+", "", visible.strip()),
+                        "text": clean,
                         "as_of": last_seen.strftime("%Y-%m-%d"),
                         "age_days": (now - last_seen).days,
                     }
@@ -382,20 +394,35 @@ def startup_quality_report(
     }
 
 
+def _line_indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _next_nonblank_indent(lines: list[str], idx: int) -> int:
+    for j in range(idx + 1, len(lines)):
+        if lines[j].strip():
+            return _line_indent(lines[j])
+    return 0
+
+
 def _dedupe_startup_chunks(chunks: list[StartupChunk]) -> tuple[list[StartupChunk], list[str]]:
     """Drop bullets already shown in an earlier (higher-priority) chunk.
 
     ``chunks`` must be in selection order (highest priority first). Returns the
     de-duplicated chunks plus the list of removed (normalized) duplicate bullets
-    for the quality report. Non-bullet lines and headings are preserved.
+    for the quality report. Only *top-level leaf* bullets are de-duplicated:
+    bullets with nested children are kept intact so dedup can never orphan a
+    sub-bullet. Headings, prose, and nested bullets are preserved.
     """
     seen: set[str] = set()
     removed: list[str] = []
     out: list[StartupChunk] = []
     for chunk in chunks:
         kept_lines: list[str] = []
-        for line in chunk.body.split("\n"):
-            if _is_bullet(line):
+        lines = chunk.body.split("\n")
+        for i, line in enumerate(lines):
+            if _is_bullet(line) and _line_indent(line) == 0 and _next_nonblank_indent(lines, i) == 0:
+                # top-level leaf bullet (no nested children)
                 norm = _normalize_bullet(line)
                 if norm and norm in seen:
                     removed.append(norm)
@@ -759,6 +786,50 @@ def _selected_chunk_order(chunk: StartupChunk) -> tuple[int, int, str, str]:
     return (source_order, section_order, chunk.heading, chunk.handle)
 
 
+# Generic directory / filler words that would match almost anything and must not
+# drive cwd/task routing.
+_GENERIC_ROUTE_TERMS = frozenset(
+    {
+        "code",
+        "src",
+        "lib",
+        "app",
+        "apps",
+        "project",
+        "projects",
+        "experiments",
+        "experiment",
+        "repo",
+        "repos",
+        "work",
+        "dev",
+        "tmp",
+        "temp",
+        "home",
+        "users",
+        "user",
+        "documents",
+        "desktop",
+        "github",
+        "gitlab",
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "this",
+        "that",
+        "into",
+        "issue",
+        "issues",
+        "task",
+        "work",
+        "main",
+        "master",
+    }
+)
+
+
 def _route_terms(*, cwd: str | None, task: str | None, agent: str | None) -> list[str]:
     terms: list[str] = []
     if cwd:
@@ -768,12 +839,15 @@ def _route_terms(*, cwd: str | None, task: str | None, agent: str | None) -> lis
         terms.extend(_keyword_terms(task))
     if agent:
         terms.append(agent.lower())
-    return [term for term in terms if len(term) >= 3]
+    return [term for term in terms if len(term) >= 3 and term not in _GENERIC_ROUTE_TERMS]
 
 
 def _keyword_terms(value: str) -> list[str]:
-    stop = {"the", "and", "for", "with", "from", "this", "that", "into", "issue", "issues"}
-    return [term for term in re.findall(r"[a-zA-Z0-9_.-]+", value.lower()) if len(term) >= 3 and term not in stop]
+    return [
+        term
+        for term in re.findall(r"[a-zA-Z0-9_.-]+", value.lower())
+        if len(term) >= 3 and term not in _GENERIC_ROUTE_TERMS
+    ]
 
 
 def _startup_header(*, budget: int, cwd: str | None, task: str | None, agent: str | None) -> str:

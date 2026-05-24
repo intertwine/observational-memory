@@ -127,3 +127,51 @@ def test_quality_report_shape(cfg):
     assert report["stale_operational_facts"][0]["age_days"] >= 99
     assert report["budget_by_section"]  # at least one included section sized
     assert report["used_chars"] <= report["budget_chars"]
+    # The reported stale text must not carry the baked-in marker (no double "as of").
+    assert all("verify" not in fact["text"] for fact in report["stale_operational_facts"])
+
+
+# --- review fixes ---
+
+
+def test_dedup_does_not_orphan_nested_children():
+    # A parent bullet with children is NOT deduped (would orphan the children);
+    # a top-level leaf duplicate still is.
+    high = sm.StartupChunk("profile", "A", "## A\n- Tooling\n  - uses pytest\n- Be direct", "h1", priority=10)
+    low = sm.StartupChunk("active", "B", "## B\n- Tooling\n  - uses pytest\n- Be direct", "h2", priority=4)
+    deduped, _removed = sm._dedupe_startup_chunks([high, low])
+    low_body = deduped[1].body
+    # The leaf "Be direct" is deduped away from the lower chunk...
+    assert "- Be direct" not in low_body
+    # ...but the parent "Tooling" (with a child) is preserved, child intact.
+    assert "- Tooling" in low_body
+    assert "uses pytest" in low_body
+
+
+def test_durable_kind_not_freshness_marked(cfg):
+    # Operational-looking text (version token) but kind=preference -> never marked.
+    reflections = (
+        "# Reflections\n\n"
+        "## Preferences & Opinions\n"
+        f"- 🔴 Prefers Python 3.11 for new projects <!--om: id=ome_p kind=preference last_seen={_iso(90)}-->\n"
+    )
+    _write(cfg, reflections)
+    assert "as of" not in cfg.profile_path.read_text()
+
+
+def test_route_terms_filter_generic_directory_and_filler():
+    terms = sm._route_terms(cwd="/Users/me/code/alpha-service", task="the migration work", agent=None)
+    assert "alpha-service" in terms
+    assert "migration" in terms
+    assert "code" not in terms  # generic container dir
+    assert "work" not in terms  # generic filler
+    assert "the" not in terms
+
+
+def test_freshness_days_rejects_negative(monkeypatch):
+    monkeypatch.setenv("OM_STARTUP_FRESHNESS_DAYS", "-5")
+    assert sm._freshness_days() == sm.DEFAULT_STARTUP_FRESHNESS_DAYS
+    monkeypatch.setenv("OM_STARTUP_FRESHNESS_DAYS", "nonsense")
+    assert sm._freshness_days() == sm.DEFAULT_STARTUP_FRESHNESS_DAYS
+    monkeypatch.setenv("OM_STARTUP_FRESHNESS_DAYS", "0")
+    assert sm._freshness_days() == 0
