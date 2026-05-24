@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import logging
 import random
+import sys
 import time
+from typing import TYPE_CHECKING
 
-from .config import Config
+from .config import Config, _env_flag
+
+if TYPE_CHECKING:
+    from .usage.models import LLMUsage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,10 +64,30 @@ def compress(
 
     _LOGGER.debug("LLM call: provider=%s model=%s operation=%s", effective_provider, model, operation or "default")
 
+    # Pre-call budget gate (may raise BudgetExceededError on a hard cap). Token
+    # and cost recording happens after the call returns / finally fails.
+    _enforce_budget(config, operation, effective_provider, model, system_prompt, user_content, max_tokens)
+
     last_error: Exception | None = None
+    started = time.monotonic()
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            return fn(system_prompt, user_content, model, max_tokens, config)
+            result = fn(system_prompt, user_content, model, max_tokens, config)
+            text, usage = _coerce_result(result)
+            _record_usage(
+                config,
+                provider=effective_provider,
+                model=model,
+                operation=operation,
+                usage=usage,
+                response_text=text,
+                system_prompt=system_prompt,
+                user_content=user_content,
+                started=started,
+                retries=attempt,
+                status="ok",
+            )
+            return text
         except Exception as e:
             last_error = e
             if attempt < _MAX_RETRIES and _is_retryable(e):
@@ -78,9 +103,183 @@ def compress(
             else:
                 break
 
+    _record_usage(
+        config,
+        provider=effective_provider,
+        model=model,
+        operation=operation,
+        usage=None,
+        response_text="",
+        system_prompt=system_prompt,
+        user_content=user_content,
+        started=started,
+        retries=_MAX_RETRIES,
+        status="error",
+    )
     raise RuntimeError(
         f"LLM request failed for provider '{effective_provider}' using model '{model}': {last_error}"
     ) from last_error
+
+
+def _estimate_tokens(text: str) -> int:
+    """Cheap prompt/completion token estimate (~4 chars/token) with no tokenizer dep."""
+    return max(len(text or "") // 4, 0)
+
+
+def _coerce_result(result: object) -> tuple[str, object | None]:
+    """Normalize a provider helper's return into (text, usage|None).
+
+    Provider helpers return ``(text, LLMUsage | None)``. Bare strings (e.g. from
+    monkeypatched test fakes or third-party shims) are tolerated as text-only.
+    """
+    if isinstance(result, tuple) and len(result) == 2:
+        return result[0], result[1]
+    return result, None  # type: ignore[return-value]
+
+
+def _enforce_budget(
+    config: Config,
+    operation: str | None,
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_content: str,
+    max_tokens: int,
+) -> None:
+    """Check budgets before dispatch. Raises BudgetExceededError on a hard cap.
+
+    Estimation is intentionally dependency-free: prompt tokens ≈ chars//4 plus
+    the requested ``max_tokens`` for the completion. A one-shot ``OM_BUDGET_BYPASS=1``
+    downgrades a hard block to a warning. All non-block failures are swallowed so
+    budgeting can never break an LLM call.
+    """
+    if not config.usage_tracking:
+        return
+    try:
+        from .usage import check_budget, record_call
+        from .usage.budgets import BudgetExceededError
+        from .usage.pricing import load_pricing
+    except Exception:  # pragma: no cover - usage subsystem optional/defensive
+        return
+
+    prompt_tokens = _estimate_tokens(system_prompt) + _estimate_tokens(user_content)
+    est_tokens = prompt_tokens + max(max_tokens, 0)
+    try:
+        pricing = load_pricing(config.pricing_overrides_path)
+        est = pricing.estimate(
+            provider=provider, model=model, prompt_tokens=prompt_tokens, completion_tokens=max_tokens
+        )
+        decision = check_budget(config, operation=operation, est_usd=est.total_usd, est_tokens=est_tokens)
+    except BudgetExceededError:
+        raise
+    except Exception:  # pragma: no cover - never let budgeting break the call
+        return
+
+    for warning in decision.warnings:
+        _LOGGER.warning("budget: %s", warning)
+        print(f"om: budget warning — {warning}", file=sys.stderr)
+
+    if not decision.blocked:
+        return
+
+    if _env_flag("OM_BUDGET_BYPASS"):
+        _LOGGER.warning("budget: bypassing hard cap (OM_BUDGET_BYPASS=1) — %s", decision.block_reason)
+        print(f"om: budget BYPASS (OM_BUDGET_BYPASS=1) — {decision.block_reason}", file=sys.stderr)
+        return
+
+    try:
+        record_call(
+            config,
+            provider=provider,
+            model=model,
+            operation=operation,
+            prompt_tokens=None,
+            completion_tokens=None,
+            total_tokens=None,
+            est_input_usd=est.input_usd,
+            est_output_usd=est.output_usd,
+            est_total_usd=est.total_usd,
+            latency_ms=0,
+            retries=0,
+            status="blocked_by_budget",
+            token_source="estimate",
+            pricing_source=est.source,
+        )
+    except Exception:  # pragma: no cover - recording the block is best-effort
+        pass
+    raise BudgetExceededError(
+        f"refusing to call {provider}/{model} — {decision.block_reason}. Override once with OM_BUDGET_BYPASS=1."
+    )
+
+
+def _record_usage(
+    config: Config,
+    *,
+    provider: str,
+    model: str,
+    operation: str | None,
+    usage: object | None,
+    response_text: str,
+    system_prompt: str,
+    user_content: str,
+    started: float,
+    retries: int,
+    status: str,
+) -> None:
+    """Persist a usage row for a completed (ok) or failed (error) call.
+
+    Fully defensive: any failure here is logged at debug level and swallowed so
+    recording can never break or mask the underlying LLM result.
+    """
+    if not config.usage_tracking:
+        return
+    try:
+        from .usage import record_call
+        from .usage.models import LLMUsage
+        from .usage.pricing import load_pricing
+
+        latency_ms = int((time.monotonic() - started) * 1000)
+
+        if usage is None:
+            if status == "ok":
+                prompt_tokens = _estimate_tokens(system_prompt) + _estimate_tokens(user_content)
+                completion_tokens = _estimate_tokens(response_text)
+                usage = LLMUsage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=prompt_tokens + completion_tokens,
+                    token_source="estimate",
+                )
+            else:
+                usage = LLMUsage(token_source="estimate")
+        usage = usage.normalized()  # type: ignore[union-attr]
+
+        pricing = load_pricing(config.pricing_overrides_path)
+        est = pricing.estimate(
+            provider=provider,
+            model=model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+        )
+        record_call(
+            config,
+            provider=provider,
+            model=model,
+            operation=operation,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            est_input_usd=est.input_usd,
+            est_output_usd=est.output_usd,
+            est_total_usd=est.total_usd,
+            latency_ms=latency_ms,
+            retries=retries,
+            status=status,
+            token_source=usage.token_source,
+            pricing_source=est.source,
+        )
+    except Exception as exc:  # pragma: no cover - recording is best-effort
+        _LOGGER.debug("usage recording failed: %s", exc)
 
 
 def _config_auth_file(config: Config):
@@ -180,7 +379,7 @@ def _call_anthropic_direct(
     model: str,
     max_tokens: int,
     config: Config,
-) -> str:
+) -> tuple[str, "LLMUsage | None"]:
     import anthropic
 
     client = anthropic.Anthropic()
@@ -190,7 +389,7 @@ def _call_anthropic_direct(
         system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
     )
-    return _extract_anthropic_text(message)
+    return _extract_anthropic_text(message), _anthropic_usage(message)
 
 
 def _call_anthropic_vertex(
@@ -199,7 +398,7 @@ def _call_anthropic_vertex(
     model: str,
     max_tokens: int,
     config: Config,
-) -> str:
+) -> tuple[str, "LLMUsage | None"]:
     import anthropic
 
     client = anthropic.AnthropicVertex(project_id=config.vertex_project_id, region=config.vertex_region)
@@ -209,7 +408,7 @@ def _call_anthropic_vertex(
         system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
     )
-    return _extract_anthropic_text(message)
+    return _extract_anthropic_text(message), _anthropic_usage(message)
 
 
 def _call_anthropic_bedrock(
@@ -218,7 +417,7 @@ def _call_anthropic_bedrock(
     model: str,
     max_tokens: int,
     config: Config,
-) -> str:
+) -> tuple[str, "LLMUsage | None"]:
     import anthropic
 
     client = anthropic.AnthropicBedrock(aws_region=config.bedrock_region)
@@ -228,7 +427,7 @@ def _call_anthropic_bedrock(
         system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
     )
-    return _extract_anthropic_text(message)
+    return _extract_anthropic_text(message), _anthropic_usage(message)
 
 
 def _call_openai_direct(
@@ -237,7 +436,7 @@ def _call_openai_direct(
     model: str,
     max_tokens: int,
     config: Config,
-) -> str:
+) -> tuple[str, "LLMUsage | None"]:
     import openai
 
     client = openai.OpenAI(timeout=300.0)
@@ -251,12 +450,11 @@ def _call_openai_direct(
         ],
     )
     content = response.choices[0].message.content
-    if isinstance(content, str):
-        return content
     if content is None:
         raise RuntimeError("OpenAI response contained empty content.")
     # OpenAI can return non-string content arrays in newer SDK response variants.
-    return str(content)
+    text = content if isinstance(content, str) else str(content)
+    return text, _openai_usage(response)
 
 
 def _openai_token_limit_arg(model: str, max_tokens: int) -> dict[str, int]:
@@ -275,7 +473,7 @@ def _call_openai_compatible(
     model: str,
     max_tokens: int,
     default_headers: dict | None = None,
-) -> str:
+) -> tuple[str, "LLMUsage | None"]:
     """Shared OpenAI-compatible chat-completions call for chatgpt/xai-oauth/xai."""
     import openai
 
@@ -295,11 +493,10 @@ def _call_openai_compatible(
         ],
     )
     content = response.choices[0].message.content
-    if isinstance(content, str):
-        return content
     if content is None:
         raise RuntimeError(f"{base_url} response contained empty content.")
-    return str(content)
+    text = content if isinstance(content, str) else str(content)
+    return text, _openai_usage(response)
 
 
 def _call_openai_chatgpt(
@@ -308,7 +505,7 @@ def _call_openai_chatgpt(
     model: str,
     max_tokens: int,
     config: Config,
-) -> str:
+) -> tuple[str, "LLMUsage | None"]:
     from .auth import AuthError, resolve_runtime_credentials
 
     try:
@@ -346,7 +543,7 @@ def _call_codex_responses(
     user_content: str,
     model: str,
     max_tokens: int,
-) -> str:
+) -> tuple[str, "LLMUsage | None"]:
     """Call the ChatGPT Codex backend via the Responses API.
 
     The Codex backend (chatgpt.com/backend-api/codex) does NOT serve
@@ -382,6 +579,7 @@ def _call_codex_responses(
     )
     chunks: list[str] = []
     final_text: str | None = None
+    usage: LLMUsage | None = None
     for event in stream:
         etype = getattr(event, "type", "")
         if etype == "response.output_text.delta":
@@ -393,10 +591,11 @@ def _call_codex_responses(
             candidate = getattr(resp, "output_text", None)
             if isinstance(candidate, str) and candidate.strip():
                 final_text = candidate
-    if chunks:
-        return "".join(chunks)
-    if final_text:
-        return final_text
+            # The Responses API attaches a usage object to the terminal event.
+            usage = _responses_usage(getattr(resp, "usage", None)) or usage
+    text = "".join(chunks) if chunks else final_text
+    if text:
+        return text, usage
     raise RuntimeError("ChatGPT Codex Responses API returned empty output.")
 
 
@@ -406,7 +605,7 @@ def _call_xai_oauth(
     model: str,
     max_tokens: int,
     config: Config,
-) -> str:
+) -> tuple[str, "LLMUsage | None"]:
     from .auth import AuthError, resolve_runtime_credentials
 
     try:
@@ -442,7 +641,7 @@ def _call_xai_api_key(
     model: str,
     max_tokens: int,
     config: Config,
-) -> str:
+) -> tuple[str, "LLMUsage | None"]:
     import os
 
     from .auth.oidc_discovery import validate_inference_base_url
@@ -486,3 +685,64 @@ def _extract_anthropic_text(message: object) -> str:
     if not text:
         raise RuntimeError("Anthropic response did not include text content.")
     return text
+
+
+def _safe_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _anthropic_usage(message: object) -> "LLMUsage | None":
+    """Map an Anthropic ``message.usage`` to LLMUsage (input/output tokens)."""
+    from .usage.models import LLMUsage
+
+    usage = getattr(message, "usage", None)
+    pt = _safe_int(getattr(usage, "input_tokens", None))
+    ct = _safe_int(getattr(usage, "output_tokens", None))
+    if pt is None and ct is None:
+        return None
+    return LLMUsage(
+        prompt_tokens=pt,
+        completion_tokens=ct,
+        total_tokens=(pt or 0) + (ct or 0),
+        token_source="provider",
+    )
+
+
+def _openai_usage(response: object) -> "LLMUsage | None":
+    """Map an OpenAI-compatible ``response.usage`` to LLMUsage."""
+    from .usage.models import LLMUsage
+
+    usage = getattr(response, "usage", None)
+    pt = _safe_int(getattr(usage, "prompt_tokens", None))
+    ct = _safe_int(getattr(usage, "completion_tokens", None))
+    tt = _safe_int(getattr(usage, "total_tokens", None))
+    if pt is None and ct is None and tt is None:
+        return None
+    return LLMUsage(
+        prompt_tokens=pt,
+        completion_tokens=ct,
+        total_tokens=tt if tt is not None else (pt or 0) + (ct or 0),
+        token_source="provider",
+    )
+
+
+def _responses_usage(usage: object) -> "LLMUsage | None":
+    """Map a Responses-API usage object (input/output/total tokens) to LLMUsage."""
+    from .usage.models import LLMUsage
+
+    pt = _safe_int(getattr(usage, "input_tokens", None))
+    ct = _safe_int(getattr(usage, "output_tokens", None))
+    tt = _safe_int(getattr(usage, "total_tokens", None))
+    if pt is None and ct is None and tt is None:
+        return None
+    return LLMUsage(
+        prompt_tokens=pt,
+        completion_tokens=ct,
+        total_tokens=tt if tt is not None else (pt or 0) + (ct or 0),
+        token_source="provider",
+    )

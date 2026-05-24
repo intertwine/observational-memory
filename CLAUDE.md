@@ -64,6 +64,7 @@ Important modules:
 - `src/observational_memory/reflect.py`: durable reflection.
 - `src/observational_memory/startup_memory.py`: budgeted startup packs and recall handles.
 - `src/observational_memory/reflection_metadata.py`: inline metadata, local scope, and conflict detection.
+- `src/observational_memory/usage/`: host-local LLM usage tracking, cost estimation, and budget enforcement (`usage.sqlite`, never synced).
 - `src/observational_memory/search/`: BM25, QMD, and no-op search backends.
 - `src/observational_memory/sync/`: OM Cluster config, records, crypto, materialization, and transports.
 - `src/observational_memory/sync/relay_server.py`: supported stdlib relay server.

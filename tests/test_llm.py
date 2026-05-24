@@ -143,9 +143,9 @@ def test_openai_token_limit_parameter_matches_model_family(monkeypatch, model, e
 
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
 
-    result = _call_openai_direct("sys", "user", model, 8, Config())
+    text, _usage = _call_openai_direct("sys", "user", model, 8, Config())
 
-    assert result == "ok"
+    assert text == "ok"
     assert request[expected_token_arg] == 8
     unexpected_token_arg = "max_tokens" if expected_token_arg == "max_completion_tokens" else "max_completion_tokens"
     assert unexpected_token_arg not in request

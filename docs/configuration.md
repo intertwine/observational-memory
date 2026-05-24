@@ -152,6 +152,65 @@ This cap only takes effect when OM Cluster is enabled, where observations are an
 
 `om status` and `om auth status` both show the resolved provider, the model each workflow will use, your stored subscription tokens (redacted), and a warning when subscription tokens exist but `auto` resolution is still using a metered API key (set `OM_LLM_PROVIDER` or re-run `om login` to fix).
 
+## Usage, Cost, and Budgets
+
+Observational Memory records every LLM call so you can see what `observe` and `reflect` actually cost, and stop a runaway job before it burns a budget. This is host-local: the data lives in `usage.sqlite` next to your memory files and is never synced through OM Cluster.
+
+### What gets recorded
+
+Every call through the LLM layer writes one row: timestamp, provider, model, operation (`observer` / `reflector`), prompt/completion tokens, an estimated USD cost, latency, retries, status, and the repo it ran in. Subscription-backed calls (`openai-chatgpt`, `xai-oauth`) record their tokens but cost `$0.00` — they are paid for by your flat subscription.
+
+Token counts come straight from the provider response. The ChatGPT Codex streaming path reports usage on its final event; when a provider gives no usage object, OM falls back to a `chars/4` estimate (marked `token_source=estimate`).
+
+```bash
+om usage status                 # totals, budgets, and pricing snapshot on one screen
+om usage status --since 2026-05-01 --json
+om usage tail --limit 20        # the most recent calls, newest first
+```
+
+Turn tracking off entirely with `OM_USAGE_TRACKING=0` — no database is created and the only overhead is a single env check.
+
+### Budgets
+
+Budgets are user-side guardrails. Declare them with the wizard or set them directly; they are stored in your env file.
+
+```bash
+om usage budget                              # interactive: scope, window, caps, hard/soft
+om usage budget set --daily-usd 5.00
+om usage budget set --operation reflector --daily-usd 1.00 --soft
+om usage budget set --monthly-tokens 5_000_000
+om usage budget clear --operation reflector
+```
+
+A budget is named `OM_BUDGET_[<OPERATION>_]<WINDOW>_<UNIT>`:
+
+- `OPERATION` (optional): `OBSERVER` or `REFLECTOR`; omit for a global cap.
+- `WINDOW`: `DAILY`, `MONTHLY`, or `SESSION` (one `om` process).
+- `UNIT`: `USD` or `TOKENS` (enforced independently).
+
+| Variable | Meaning |
+| --- | --- |
+| `OM_BUDGET_DAILY_USD=5.00` | $5/day across all operations |
+| `OM_BUDGET_REFLECTOR_DAILY_USD=1.00` | $1/day for reflect only |
+| `OM_BUDGET_DAILY_TOKENS=2_000_000` | 2M tokens/day |
+| `OM_BUDGET_MODE=hard` | `hard` blocks; `soft` warns. Per-budget override: `<KEY>_MODE` |
+| `OM_BUDGET_SOFT_THRESHOLD=0.8` | warn once spend reaches 80% of a cap |
+| `OM_BUDGET_BYPASS=1` | one-shot escape hatch for a single call |
+
+Before each call, OM estimates its cost (prompt `chars/4` plus the requested output cap) and checks it against current spend. A **hard** cap refuses the call with a clear message; a **soft** cap proceeds but warns. To push one call through a hard cap, prefix it: `OM_BUDGET_BYPASS=1 om reflect …`. `recall` makes no LLM call today, so it carries no budget.
+
+### Pricing
+
+Cost estimates use a dated pricing snapshot shipped in the package. Override any model per host — overrides win and are easy to keep current.
+
+```bash
+om usage pricing show                                   # effective table + snapshot date
+om usage pricing set --model gpt-5.5 --input 1.25 --output 10.00   # USD per 1M tokens
+om usage pricing reset                                  # drop overrides
+```
+
+Overrides live at `~/.config/observational-memory/pricing.toml` (set `OM_PRICING_OVERRIDES` to relocate). Unknown models record token counts with `pricing=unknown` and skip the dollar estimate. `om doctor` reports the tracking state, configured budgets, and the active pricing snapshot.
+
 ## Auth Store
 
 `om login` writes a single host-local file:
