@@ -43,6 +43,21 @@ def test_duplicate_profile_guidance_deduped_across_sections(cfg):
     assert payload.text.lower().count("prefers concise summaries") == 1
 
 
+def test_freshness_marker_does_not_defeat_dedup(cfg):
+    # Same operational bullet in two sections with different last_seen: one copy
+    # would be annotated stale, the other not. Dedup must still collapse them.
+    reflections = (
+        "# Reflections\n\n"
+        "## Preferences & Opinions\n"
+        f"- 🔴 tool version 1.2.3 installed <!--om: id=ome_1 kind=snapshot last_seen={_iso(40)}-->\n"
+        "## Active Projects\n"
+        f"- 🔴 tool version 1.2.3 installed <!--om: id=ome_2 kind=snapshot last_seen={_iso(1)}-->\n"
+    )
+    _write(cfg, reflections)
+    payload = sm.build_startup_payload(cfg, budget_chars=24000)
+    assert payload.text.lower().count("tool version 1.2.3 installed") == 1
+
+
 def test_dedupe_keeps_higher_priority_instance():
     high = sm.StartupChunk("profile", "Preferences & Opinions", "## Preferences\n- 🔴 Be direct", "h1", priority=10)
     low = sm.StartupChunk("active", "Recent Themes", "## Recent Themes\n- Be direct", "h2", priority=4)

@@ -306,11 +306,13 @@ def _annotate_stale_operational_facts(
 def _normalize_bullet(line: str) -> str:
     """Normalize a bullet for cross-section duplicate detection.
 
-    Strips the list marker, priority emoji, markdown emphasis, and any metadata
-    comment, then casefolds and collapses whitespace.
+    Strips the list marker, priority emoji, markdown emphasis, any metadata
+    comment, and the freshness marker, then casefolds and collapses whitespace.
+    The freshness marker is stripped so the same fact dedupes whether or not one
+    copy was annotated stale (different last_seen across sections).
     """
     visible, _metadata = _split_visible_and_metadata(line)
-    text = visible.strip()
+    text = _FRESHNESS_MARKER_RE.sub("", visible).strip()
     text = re.sub(r"^[-*]\s+", "", text)  # list marker
     text = re.sub(r"[🔴🟡🟢⚪️🔵🟠]", "", text)  # priority dots
     text = text.replace("*", "").replace("`", "")  # markdown emphasis/code
