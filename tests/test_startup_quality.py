@@ -251,6 +251,11 @@ def test_quality_report_shape(cfg):
 # --- review fixes ---
 
 
+def test_has_visible_content_ignores_comment_only_body():
+    assert sm._has_visible_content("## Heading\n<!-- auto -->\n") is False
+    assert sm._has_visible_content("## Heading\n<!-- auto -->\n- real") is True
+
+
 def test_dedup_does_not_orphan_nested_children():
     # A parent bullet with children is NOT deduped (would orphan the children);
     # a top-level leaf duplicate still is.

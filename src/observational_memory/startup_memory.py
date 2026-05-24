@@ -365,10 +365,10 @@ def _is_bullet(line: str) -> bool:
 
 
 def _has_visible_content(body: str) -> bool:
-    """True if the body has any non-heading, non-blank line (survives dedup)."""
+    """True if the body has any non-heading, non-comment, non-blank line (survives dedup)."""
     for line in body.split("\n"):
         stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
+        if stripped and not stripped.startswith("#") and not stripped.startswith("<!--"):
             return True
     return False
 
