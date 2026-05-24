@@ -1,0 +1,212 @@
+"""Tests for the API-key OpenAI Batch backend (#55), all mocked."""
+
+from __future__ import annotations
+
+import json
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from observational_memory.config import Config
+from observational_memory.jobs import (
+    BatchProviderError,
+    ProviderJobStore,
+    apply_completed_jobs,
+    cancel_job,
+    submit_reflect_batch,
+)
+from observational_memory.jobs.openai_batch import _sha256
+from observational_memory.reflect import ChunkingRequired
+
+_REFLECTIONS = (
+    "# Reflections\n\n*Last updated: 2026-05-01 00:00 UTC*\n*Last reflected: 2026-05-01*\n\n## Core Identity\n- Test\n"
+)
+_OBSERVATIONS = "# Observations\n\n## 2026-05-20\n\n- 🔴 10:00 A brand new observation\n"
+
+
+def _install_fake_openai(monkeypatch, state):
+    class _FakeFiles:
+        def create(self, file, purpose):
+            state["uploaded"] = {"purpose": purpose, "file": file}
+            return SimpleNamespace(id="file-input-1")
+
+        def content(self, file_id):
+            return SimpleNamespace(text=state.get("output_jsonl", ""))
+
+        def delete(self, file_id):
+            state.setdefault("deleted", []).append(file_id)
+
+    class _FakeBatches:
+        def create(self, input_file_id, endpoint, completion_window):
+            state["created"] = {
+                "input_file_id": input_file_id,
+                "endpoint": endpoint,
+                "completion_window": completion_window,
+            }
+            return SimpleNamespace(id="batch-1", status="validating")
+
+        def retrieve(self, batch_id):
+            return SimpleNamespace(
+                id=batch_id,
+                status=state.get("batch_status", "in_progress"),
+                output_file_id=state.get("output_file_id"),
+            )
+
+        def cancel(self, batch_id):
+            state["cancelled"] = batch_id
+            return SimpleNamespace(id=batch_id, status="cancelling")
+
+    class _FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.files = _FakeFiles()
+            self.batches = _FakeBatches()
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+
+
+@pytest.fixture
+def cfg(tmp_path, monkeypatch):
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_USAGE_TRACKING", "0")
+    monkeypatch.delenv("OM_CLUSTER_ENABLED", raising=False)
+    config = Config(memory_dir=tmp_path / "mem", env_file=tmp_path / "cfg" / "env")
+    config.ensure_memory_dir()
+    config.reflections_path.write_text(_REFLECTIONS)
+    config.observations_path.write_text(_OBSERVATIONS)
+    return config
+
+
+def _completed_output(custom_id: str, text: str) -> str:
+    # Two lines in scrambled order; only the second matches custom_id.
+    lines = [
+        {"custom_id": "reflector:other:zzzz", "response": {"status_code": 200, "body": {"choices": []}}},
+        {
+            "custom_id": custom_id,
+            "response": {
+                "status_code": 200,
+                "body": {
+                    "choices": [{"message": {"role": "assistant", "content": text}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+                },
+            },
+        },
+    ]
+    return "\n".join(json.dumps(line) for line in lines) + "\n"
+
+
+def test_submit_creates_job_with_batch_request(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+
+    record = submit_reflect_batch(cfg)
+    assert record is not None
+    assert record.status == "submitted"
+    assert record.batch_id == "batch-1"
+    assert record.custom_id.startswith("reflector:")
+    assert record.reflections_sha256 == _sha256(_REFLECTIONS)
+    # Uploaded with purpose=batch; batch created with the 24h window on /v1/chat/completions.
+    assert state["uploaded"]["purpose"] == "batch"
+    assert state["created"]["completion_window"] == "24h"
+    assert state["created"]["endpoint"] == "/v1/chat/completions"
+    # The JSONL line carries a chat-completions request body with the system+user messages.
+    _name, jsonl_bytes = state["uploaded"]["file"]
+    line = json.loads(jsonl_bytes.decode("utf-8"))
+    assert line["custom_id"] == record.custom_id
+    assert line["url"] == "/v1/chat/completions"
+    assert line["body"]["messages"][0]["role"] == "system"
+
+
+def test_provider_guard_rejects_openai_chatgpt(cfg, monkeypatch):
+    _install_fake_openai(monkeypatch, {})
+    monkeypatch.setenv("OM_LLM_REFLECTOR_PROVIDER", "openai-chatgpt")
+    # Config captures env at construction, so rebuild after setting the override.
+    config = Config(memory_dir=cfg.memory_dir, env_file=cfg.env_file)
+    with pytest.raises(BatchProviderError) as exc:
+        submit_reflect_batch(config)
+    assert "openai-chatgpt" in str(exc.value)
+
+
+def test_provider_guard_requires_api_key(cfg, monkeypatch):
+    _install_fake_openai(monkeypatch, {})
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(BatchProviderError) as exc:
+        submit_reflect_batch(cfg)
+    assert "OPENAI_API_KEY" in str(exc.value)
+
+
+def test_chunking_required_for_large_input(cfg, monkeypatch):
+    _install_fake_openai(monkeypatch, {})
+    # A huge observations file forces the chunked path -> not single-pass.
+    big = "# Observations\n\n## 2026-05-20\n\n" + ("- 🔴 10:00 " + "x" * 100 + "\n") * 800
+    cfg.observations_path.write_text(big)
+    with pytest.raises(ChunkingRequired):
+        submit_reflect_batch(cfg)
+
+
+def test_poll_applies_completed_job_mapping_by_custom_id(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    record = submit_reflect_batch(cfg)
+    assert record is not None
+
+    new_reflections = "# Reflections\n\n## Core Identity\n- Updated by batch\n"
+    state["batch_status"] = "completed"
+    state["output_file_id"] = "file-output-1"
+    state["output_jsonl"] = _completed_output(record.custom_id, new_reflections)
+
+    results = apply_completed_jobs(cfg)
+    assert results == [{"job_id": record.job_id, "status": "applied"}]
+    # reflections.md was rewritten from the batch output (timestamps re-stamped).
+    written = cfg.reflections_path.read_text()
+    assert "Updated by batch" in written
+    # Remote input + output files were cleaned up.
+    assert set(state["deleted"]) == {"file-input-1", "file-output-1"}
+    # Local record marked applied.
+    applied = ProviderJobStore(cfg.openai_batch_jobs_dir).load(record.job_id)
+    assert applied.status == "applied"
+
+
+def test_poll_refuses_on_drift_and_writes_artifact(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    record = submit_reflect_batch(cfg)
+    assert record is not None
+
+    # Simulate another reflect having run between submit and apply.
+    cfg.reflections_path.write_text(_REFLECTIONS + "\n## Drifted\n- changed since submit\n")
+
+    state["batch_status"] = "completed"
+    state["output_file_id"] = "file-output-1"
+    state["output_jsonl"] = _completed_output(record.custom_id, "# Reflections\n\n## Core Identity\n- Stale batch\n")
+
+    results = apply_completed_jobs(cfg)
+    assert results[0]["status"] == "drifted"
+    # reflections.md was NOT overwritten with the stale batch output.
+    assert "Stale batch" not in cfg.reflections_path.read_text()
+    assert "changed since submit" in cfg.reflections_path.read_text()
+    # The output was preserved as a review artifact.
+    artifact = cfg.openai_batch_jobs_dir / f"{record.job_id}.result.md"
+    assert artifact.exists() and "Stale batch" in artifact.read_text()
+    # Remote files are not cleaned up on drift (kept for review).
+    assert "deleted" not in state
+
+
+def test_submit_does_not_advance_state_until_apply(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    before = cfg.observations_path.read_text()
+    submit_reflect_batch(cfg)
+    # Submitting must not trim observations or write reflections.
+    assert cfg.observations_path.read_text() == before
+    assert cfg.reflections_path.read_text() == _REFLECTIONS
+
+
+def test_cancel_marks_cancelled(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    record = submit_reflect_batch(cfg)
+    cancelled = cancel_job(cfg, record.job_id)
+    assert cancelled.status == "cancelled"
+    assert state["cancelled"] == "batch-1"

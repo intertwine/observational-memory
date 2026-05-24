@@ -171,14 +171,26 @@ def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
 
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Print reflections without writing")
+@click.option(
+    "--async",
+    "async_mode",
+    is_flag=True,
+    help="Submit an offline OpenAI Batch job (API-key 'openai' provider) and exit; apply later with `om jobs poll`",
+)
 @click.pass_context
-def reflect(ctx: click.Context, dry_run: bool) -> None:
+def reflect(ctx: click.Context, dry_run: bool, async_mode: bool) -> None:
     """Run the reflector to condense observations into long-term memory."""
     from .reflect import run_reflector
 
     config = ctx.obj["config"]
-    click.echo("Running reflector...")
 
+    # Async is opt-in via --async or OM_OPENAI_ASYNC_MODE=batch. dry-run always
+    # runs synchronously (there's nothing to defer).
+    if not dry_run and (async_mode or config.openai_async_mode.strip().lower() == "batch"):
+        _reflect_async(config)
+        return
+
+    click.echo("Running reflector...")
     result = run_reflector(config, dry_run)
     if result:
         click.echo(f"Reflections updated ({len(result)} chars)")
@@ -186,6 +198,28 @@ def reflect(ctx: click.Context, dry_run: bool) -> None:
             click.echo(result)
     else:
         click.echo("No observations to reflect on.")
+
+
+def _reflect_async(config: Config) -> None:
+    """Submit a reflection as an OpenAI Batch job, falling back to sync when needed."""
+    from .jobs import BatchProviderError, submit_reflect_batch
+    from .reflect import ChunkingRequired, run_reflector
+
+    try:
+        record = submit_reflect_batch(config)
+    except ChunkingRequired as exc:
+        click.echo(f"Input too large for a single Batch request ({exc}); running synchronously instead.")
+        result = run_reflector(config)
+        click.echo(f"Reflections updated ({len(result)} chars)" if result else "No observations to reflect on.")
+        return
+    except BatchProviderError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if record is None:
+        click.echo("No observations to reflect on.")
+        return
+    click.echo(f"Submitted OpenAI Batch job {record.job_id} (batch {record.batch_id}).")
+    click.echo("Apply the result later with: om jobs poll")
 
 
 @cli.command()
@@ -5561,3 +5595,93 @@ def usage_pricing_reset(ctx: click.Context) -> None:
         click.echo(f"Removed {path}; using shipped snapshot.")
     else:
         click.echo("No override file; already using the shipped snapshot.")
+
+
+# --- om jobs: async provider jobs (OpenAI Batch) ---
+
+
+@cli.group()
+def jobs() -> None:
+    """Manage async provider jobs (OpenAI Batch for offline reflection)."""
+
+
+@jobs.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def jobs_list(ctx: click.Context, as_json: bool) -> None:
+    """List recorded async jobs (newest first)."""
+    from dataclasses import asdict
+
+    from .jobs import ProviderJobStore
+
+    config = ctx.obj["config"]
+    records = ProviderJobStore(config.openai_batch_jobs_dir).list()
+    if as_json:
+        click.echo(json.dumps([asdict(r) for r in records], indent=2))
+        return
+    if not records:
+        click.echo("No async jobs recorded.")
+        return
+    header = f"{'job_id':<18} {'op':<9} {'status':<10} {'model':<20} {'created (UTC)':<20}"
+    click.echo(header)
+    click.echo("-" * len(header))
+    for r in records:
+        created = (r.created_at or "")[:19].replace("T", " ")
+        click.echo(f"{r.job_id:<18} {r.operation:<9} {r.status:<10} {(r.model or '')[:20]:<20} {created:<20}")
+
+
+@jobs.command("poll")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def jobs_poll(ctx: click.Context, as_json: bool) -> None:
+    """Poll pending jobs and apply any that have completed."""
+    from .jobs import apply_completed_jobs
+
+    config = ctx.obj["config"]
+    results = apply_completed_jobs(config)
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+        return
+    if not results:
+        click.echo("No pending jobs.")
+        return
+    for r in results:
+        detail = f" — {r['detail']}" if r.get("detail") else ""
+        artifact = f" (review: {r['artifact']})" if r.get("artifact") else ""
+        click.echo(f"{r['job_id']}: {r['status']}{detail}{artifact}")
+
+
+@jobs.command("show")
+@click.argument("job_id")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def jobs_show(ctx: click.Context, job_id: str, as_json: bool) -> None:
+    """Show one job record."""
+    from dataclasses import asdict
+
+    from .jobs import ProviderJobStore
+
+    config = ctx.obj["config"]
+    record = ProviderJobStore(config.openai_batch_jobs_dir).load(job_id)
+    if record is None:
+        raise click.ClickException(f"No job '{job_id}'.")
+    if as_json:
+        click.echo(json.dumps(asdict(record), indent=2))
+        return
+    for key, value in asdict(record).items():
+        click.echo(f"{key:<20} {value}")
+
+
+@jobs.command("cancel")
+@click.argument("job_id")
+@click.pass_context
+def jobs_cancel(ctx: click.Context, job_id: str) -> None:
+    """Request cancellation of a pending job and mark it cancelled locally."""
+    from .jobs import BatchProviderError, cancel_job
+
+    config = ctx.obj["config"]
+    try:
+        record = cancel_job(config, job_id)
+    except BatchProviderError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Job {record.job_id} marked {record.status}." + (f" ({record.error})" if record.error else ""))

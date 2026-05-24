@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -62,6 +63,56 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     if _cluster_enabled(config):
         return _run_cluster_reflector(config, dry_run=dry_run)
 
+    inputs = _gather_reflection_inputs(config)
+    if inputs is None:
+        return None
+
+    if inputs.single_pass:
+        result = _reflect_single(
+            inputs.system_prompt,
+            inputs.reflections,
+            inputs.observations,
+            config,
+            inputs.auto_memory,
+            inputs.amem_changed,
+        )
+    else:
+        # Too large — chunk observations and fold incrementally
+        result = _reflect_chunked(
+            inputs.system_prompt,
+            inputs.reflections,
+            inputs.observations,
+            config,
+            inputs.auto_memory,
+            inputs.amem_changed,
+        )
+
+    return finalize_reflection(result, config, inputs.raw_observations, dry_run=dry_run)
+
+
+@dataclass
+class ReflectionInputs:
+    """Gathered reflector inputs and the single-pass vs chunked decision."""
+
+    system_prompt: str
+    reflections: str
+    observations: str  # filtered to new observations since last reflection
+    raw_observations: str
+    auto_memory: str
+    amem_changed: bool
+    single_pass: bool
+
+
+class ChunkingRequired(RuntimeError):
+    """Raised by the async path when the input is too large for one Batch request."""
+
+
+def _gather_reflection_inputs(config: Config) -> ReflectionInputs | None:
+    """Read observations/reflections, filter to new work, and size the request.
+
+    Returns None when there's nothing to reflect on. Shared by the synchronous
+    reflector and the async (Batch) submit path so both see identical inputs.
+    """
     raw_observations = ""
     if config.observations_path.exists():
         raw_observations = config.observations_path.read_text()
@@ -70,39 +121,64 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     if config.reflections_path.exists():
         reflections = config.reflections_path.read_text()
 
-    # Filter to only new observations since last reflection
     last_reflected_date = _parse_last_reflected(reflections)
     observations = _filter_new_observations(raw_observations, last_reflected_date) if raw_observations.strip() else ""
 
-    # Check for auto-memory context, but only invoke the reflector for it
-    # if auto-memory has actually changed since the last reflection.
-    # Note: auto-memory may be empty string (all files deleted) — the reflector
-    # still needs to run to clean up stale facts from reflections.
+    # Auto-memory is included only when it changed since the last reflection
+    # (it may be empty when all files were deleted — the reflector still runs to
+    # clean up stale facts).
     auto_memory = ""
     amem_changed = _auto_memory_changed_since_reflection(config)
     if not observations.strip():
-        # No new observations — only proceed if auto-memory changed
         if not amem_changed:
             return None
         auto_memory = _gather_auto_memory_context(config)
-    else:
-        # New observations exist — include auto-memory as supplementary context
-        if amem_changed:
-            auto_memory = _gather_auto_memory_context(config)
+    elif amem_changed:
+        auto_memory = _gather_auto_memory_context(config)
 
     system_prompt = _load_reflector_prompt()
-
-    # Estimate total input size
     total_input_chars = len(system_prompt) + len(reflections) + len(observations) + len(auto_memory)
-    estimated_tokens = total_input_chars / _CHARS_PER_TOKEN
+    single_pass = (total_input_chars / _CHARS_PER_TOKEN) <= _MAX_INPUT_TOKENS
+    return ReflectionInputs(
+        system_prompt=system_prompt,
+        reflections=reflections,
+        observations=observations,
+        raw_observations=raw_observations,
+        auto_memory=auto_memory,
+        amem_changed=amem_changed,
+        single_pass=single_pass,
+    )
 
-    if estimated_tokens <= _MAX_INPUT_TOKENS:
-        # Small enough — single pass
-        result = _reflect_single(system_prompt, reflections, observations, config, auto_memory, amem_changed)
-    else:
-        # Too large — chunk observations and fold incrementally
-        result = _reflect_chunked(system_prompt, reflections, observations, config, auto_memory, amem_changed)
 
+def prepare_single_pass_reflection(config: Config) -> tuple[str, str, int, ReflectionInputs] | None:
+    """Build the single-pass reflector request for async (Batch) submission.
+
+    Returns ``(system_prompt, user_content, max_output_tokens, inputs)`` or None
+    when there's nothing to reflect on. Raises :class:`ChunkingRequired` when the
+    input would need chunking (the caller should fall back to a synchronous run)
+    or when cluster mode is active (unsupported for async).
+    """
+    if _cluster_enabled(config):
+        raise ChunkingRequired("cluster-mode reflection is not supported for async Batch")
+    inputs = _gather_reflection_inputs(config)
+    if inputs is None:
+        return None
+    if not inputs.single_pass:
+        raise ChunkingRequired("reflect input is too large for a single Batch request")
+    user_content = _single_pass_user_content(
+        inputs.reflections, inputs.observations, config, inputs.auto_memory, inputs.amem_changed
+    )
+    return inputs.system_prompt, user_content, _REFLECTOR_MAX_OUTPUT_TOKENS, inputs
+
+
+def finalize_reflection(result: str, config: Config, raw_observations: str, dry_run: bool = False) -> str:
+    """Stamp, normalize, and persist a raw reflector output.
+
+    Shared by the synchronous reflector and the async (Batch) apply path so a
+    deferred result is processed identically to an immediate one: stamp the
+    timestamps, ensure metadata, prune stale snapshots, then (unless dry-run)
+    write reflections.md, trim consumed observations, and reindex search.
+    """
     # Programmatically stamp the "Last reflected" timestamp so we don't
     # rely on the LLM to format it correctly.
     latest_obs_date = _extract_latest_observation_date(raw_observations)
@@ -294,11 +370,22 @@ def _reflect_single(
     amem_changed: bool = False,
 ) -> str:
     """Single-pass reflection for small observation sets."""
+    user_content = _single_pass_user_content(reflections, observations, config, auto_memory, amem_changed)
+    return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
+
+
+def _single_pass_user_content(
+    reflections: str,
+    observations: str,
+    config: Config,
+    auto_memory: str = "",
+    amem_changed: bool = False,
+) -> str:
+    """Build the single-pass reflector user content (shared by sync and async)."""
     amem_section = _auto_memory_section(auto_memory, amem_changed)
     obs_section = f"## Current observations\n\n{observations}" if observations.strip() else "(no new observations)"
     bounded = _bound_reflections_context(reflections, config.reflector_context_max_chars)
-    user_content = f"## Current reflections\n\n{bounded}\n\n---\n\n{obs_section}{amem_section}"
-    return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
+    return f"## Current reflections\n\n{bounded}\n\n---\n\n{obs_section}{amem_section}"
 
 
 def _reflector_budgets(system_prompt: str, amem_section: str, configured_cap: int) -> tuple[int, int]:

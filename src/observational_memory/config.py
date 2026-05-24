@@ -182,6 +182,11 @@ ENV_FILE_TEMPLATE = """\
 # OPENAI_API_KEY=sk-...
 # XAI_API_KEY=xai-...
 #
+# Offline reflection via OpenAI Batch (API-key 'openai' provider only; ~50%
+# cheaper, 24h window). off|batch. When 'batch', `om reflect` submits a Batch
+# job; apply later with `om jobs poll`. Also opt-in per run via `om reflect --async`.
+# OM_OPENAI_ASYNC_MODE=off
+#
 # Subscription providers (preferred for cheap-feeling features; run `om login`):
 # OM_OPENAI_CHATGPT_MODEL=gpt-5.5
 # OM_XAI_OAUTH_MODEL=grok-code-fast-1
@@ -363,6 +368,11 @@ class Config:
     budget_soft_threshold: float = field(
         default_factory=lambda: _safe_float(os.environ.get("OM_BUDGET_SOFT_THRESHOLD"), 0.8)
     )
+    # Async execution mode for the direct API-key OpenAI provider: off | batch.
+    # When "batch", `om reflect` submits an offline OpenAI Batch job instead of
+    # running synchronously (also opt-in per-invocation via `om reflect --async`).
+    # Never applies to the openai-chatgpt subscription provider.
+    openai_async_mode: str = field(default_factory=lambda: os.environ.get("OM_OPENAI_ASYNC_MODE", "off"))
 
     @property
     def observations_path(self) -> Path:
@@ -403,6 +413,15 @@ class Config:
         if override:
             return Path(override).expanduser()
         return self.env_file.parent / "pricing.toml"
+
+    @property
+    def provider_jobs_dir(self) -> Path:
+        """Host-local store for async provider jobs (e.g. OpenAI Batch). Never synced."""
+        return self.memory_dir / ".provider-jobs"
+
+    @property
+    def openai_batch_jobs_dir(self) -> Path:
+        return self.provider_jobs_dir / "openai-batch"
 
     @property
     def auth_file(self) -> Path:

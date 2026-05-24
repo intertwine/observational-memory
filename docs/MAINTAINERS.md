@@ -188,6 +188,31 @@ Tests that should protect Hermes behavior:
 
 The standalone plugin has its own tests in the `intertwine/hermes-observational-memory` repo. Do not treat this repo's Hermes parser tests as proof that the live Hermes plugin still loads under current Hermes.
 
+## OpenAI Batch Live Smoke (opt-in)
+
+The `om reflect --async` Batch path is fully covered by mocked tests
+(`tests/test_jobs_batch.py`). A live end-to-end smoke needs a real `OPENAI_API_KEY`
+with usable billing (the v0.6.5 validation hit `billing_hard_limit_reached`, which
+blocked a real run). When billing is available, run a tiny end-to-end check:
+
+```bash
+export OPENAI_API_KEY=sk-...           # billing enabled
+export OM_LLM_REFLECTOR_PROVIDER=openai
+export OM_OPENAI_MODEL=gpt-4o-mini     # cheap model for the smoke
+
+om reflect --async                     # submit; prints job id + batch id
+om jobs list                           # status: submitted
+# wait for the batch to complete (up to 24h; usually minutes for one request)
+om jobs poll                           # applies when completed; reflections.md updates
+om jobs show <job_id>                  # status: applied
+```
+
+Confirm: the job reaches `applied`, `reflections.md` updates, `om usage tail` shows
+the recorded call at the Batch (half) price, and the uploaded input/output files are
+gone from your OpenAI account. The `openai-chatgpt` subscription provider has no
+Batch API — `OM_LLM_REFLECTOR_PROVIDER=openai-chatgpt om reflect --async` must error
+clearly (also asserted in tests).
+
 ## Grok Integration Model
 
 Grok Build TUI is a first-class local integration.
