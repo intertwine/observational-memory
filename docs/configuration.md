@@ -148,6 +148,32 @@ Every observe run re-sends part of `observations.md` for dedup context. `OM_OBSE
 
 This cap only takes effect when OM Cluster is enabled, where observations are an append-only record log and `observations.md` is a materialized view — a bounded context can't lose history. In non-cluster mode the observer rewrites the whole file, so the full existing content is always sent regardless of this setting.
 
+### Reflector context budget
+
+The reflector folds new observations into `reflections.md`. For large observation sets it works in chunks, re-sending the running document on each fold — without a bound that cost grows with the number of chunks. `OM_REFLECTOR_CONTEXT_MAX_CHARS` (default `48000`) caps how much of `reflections.md` is re-sent as context. The default comfortably fits a target-size reflections file (the prompt aims for 200–600 lines), so the cap only trims documents that have grown past target. Set it to `0` to disable the bound.
+
+When the cap does trim, it keeps the head of the document (durable identity and active projects sit at the top) and logs a warning. In single-pass reflection it bounds only the *input* context — the reflector still emits a complete document — so a normal run never shrinks your stored memory, and raising the cap restores the full context.
+
+The chunked path (only reached for very large observation sets) is stricter: every fold must fit one per-call input budget shared between the reflections context and the observation chunk, so the reflections context is automatically reduced — below your configured cap if necessary — to keep each call within budget. Folding against a reduced head means tail sections beyond that limit may not carry forward. The practical guidance is to keep `reflections.md` compact (the prompt targets 200–600 lines); the deeper fix, incremental section-targeted reflection, is tracked separately.
+
+### Latency: Codex reasoning effort
+
+ChatGPT Codex (`openai-chatgpt`) accepts a reasoning effort — `low`, `medium`, `high`, or `xhigh`. Lower effort cuts `gpt-5.5` latency sharply. Observe runs default to `low` (it's frequent and latency-sensitive); reflect is left at the backend default to protect consolidation quality. Override globally or per operation:
+
+```bash
+OM_OPENAI_CHATGPT_REASONING_EFFORT=low            # all Codex calls
+OM_OPENAI_CHATGPT_OBSERVER_REASONING_EFFORT=low   # observe only (default)
+OM_OPENAI_CHATGPT_REFLECTOR_REASONING_EFFORT=medium  # reflect only
+```
+
+Unrecognized values are ignored (the backend default is used), so a typo can't fail a call.
+
+### Prompt caching
+
+On the metered Anthropic providers (`anthropic`, `anthropic-vertex`, `anthropic-bedrock`), the stable observer/reflector system prompt is sent as a cacheable block (`cache_control: ephemeral`), so repeat calls reuse it at a fraction of the input cost. OpenAI and xAI cache eligible prefixes automatically — no configuration needed. The ChatGPT Codex backend does not expose cache controls, so its instructions are sent as-is.
+
+Cached tokens are folded into the recorded prompt-token total (see `om usage`), so usage accounting stays accurate with caching on. Cost is still estimated at the flat input rate — the per-token cache read/write discounts are not separately modeled, so a cached call's estimate is a slight over-estimate of true spend.
+
 ### Seeing what will run
 
 `om status` and `om auth status` both show the resolved provider, the model each workflow will use, your stored subscription tokens (redacted), and a warning when subscription tokens exist but `auto` resolution is still using a metered API key (set `OM_LLM_PROVIDER` or re-run `om login` to fix).

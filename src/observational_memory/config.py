@@ -166,6 +166,16 @@ ENV_FILE_TEMPLATE = """\
 # Observer context budget: how many chars of existing observations.md are
 # re-sent for dedup context each run (0 = send all; default 12000):
 # OM_OBSERVER_CONTEXT_MAX_CHARS=12000
+# Reflector context budget: how many chars of existing reflections.md are
+# re-sent to the reflector (0 = send all; default 48000, comfortably fits a
+# target-size doc; bounds the chunked fold's re-send cost):
+# OM_REFLECTOR_CONTEXT_MAX_CHARS=48000
+#
+# ChatGPT Codex reasoning effort (low|medium|high|xhigh). Lower = faster/cheaper.
+# Default: observer=low, reflector=backend default. Per-op overrides win:
+# OM_OPENAI_CHATGPT_REASONING_EFFORT=
+# OM_OPENAI_CHATGPT_OBSERVER_REASONING_EFFORT=low
+# OM_OPENAI_CHATGPT_REFLECTOR_REASONING_EFFORT=
 #
 # Direct provider keys (legacy/default flow):
 # ANTHROPIC_API_KEY=sk-ant-...
@@ -277,6 +287,20 @@ class Config:
     # gpt-5.5 / gpt-5.4 / gpt-5.3-codex). gpt-5.5 is the current flagship;
     # override with OM_OPENAI_CHATGPT_MODEL when the allow-list moves.
     openai_chatgpt_model: str = field(default_factory=lambda: os.environ.get("OM_OPENAI_CHATGPT_MODEL", "gpt-5.5"))
+    # ChatGPT Codex reasoning effort (low|medium|high|xhigh). Lower effort cuts
+    # gpt-5.5 latency sharply. The global default applies to all Codex calls; the
+    # per-operation overrides win. Built-in default: observer="low" (frequent,
+    # latency-sensitive), reflector unset (omit -> backend default, to preserve
+    # consolidation quality). See resolve_reasoning_effort().
+    codex_reasoning_effort: str | None = field(
+        default_factory=lambda: os.environ.get("OM_OPENAI_CHATGPT_REASONING_EFFORT")
+    )
+    codex_observer_reasoning_effort: str | None = field(
+        default_factory=lambda: os.environ.get("OM_OPENAI_CHATGPT_OBSERVER_REASONING_EFFORT")
+    )
+    codex_reflector_reasoning_effort: str | None = field(
+        default_factory=lambda: os.environ.get("OM_OPENAI_CHATGPT_REFLECTOR_REASONING_EFFORT")
+    )
     xai_oauth_model: str = field(default_factory=lambda: os.environ.get("OM_XAI_OAUTH_MODEL", "grok-code-fast-1"))
     xai_model: str = field(default_factory=lambda: os.environ.get("OM_XAI_MODEL", "grok-code-fast-1"))
     vertex_project_id: str | None = field(default_factory=lambda: os.environ.get("OM_VERTEX_PROJECT_ID"))
@@ -301,6 +325,16 @@ class Config:
     # append-only contract change that would let non-cluster mode bound this too.
     observer_context_max_chars: int = field(
         default_factory=lambda: int(os.environ.get("OM_OBSERVER_CONTEXT_MAX_CHARS", "12000"))
+    )
+    # Cap on how much of the existing reflections.md is re-sent to the reflector
+    # as "current reflections" context. The chunked reflector folds each chunk
+    # into a running document and re-sends it every fold; without a bound that is
+    # O(chunks x reflections_size). The default comfortably fits a target-size
+    # reflections.md (the prompt aims for 200-600 lines, ~48k chars at the top of
+    # that range), so the cap only trims documents grown past target — keeping the
+    # head, where durable identity/projects live, and logging a warning. 0 disables.
+    reflector_context_max_chars: int = field(
+        default_factory=lambda: int(os.environ.get("OM_REFLECTOR_CONTEXT_MAX_CHARS", "48000"))
     )
 
     # Reflector settings
@@ -585,6 +619,30 @@ class Config:
         if not override or override == "auto":
             return None
         return override
+
+    def resolve_reasoning_effort(self, operation: str | None) -> str | None:
+        """Resolve the ChatGPT Codex reasoning effort for an operation.
+
+        Precedence: per-operation env override -> global
+        ``OM_OPENAI_CHATGPT_REASONING_EFFORT`` -> built-in default
+        (``observer`` -> ``"low"``; anything else -> ``None`` = omit the
+        parameter and use the backend default). Returns ``None`` to omit it.
+        Unrecognized values are ignored (omitted) so a typo can't hard-fail a
+        call — only ``low|medium|high|xhigh`` are forwarded.
+        """
+        allowed = {"low", "medium", "high", "xhigh"}
+        if operation == "observer" and self.codex_observer_reasoning_effort:
+            effort = self.codex_observer_reasoning_effort
+        elif operation == "reflector" and self.codex_reflector_reasoning_effort:
+            effort = self.codex_reflector_reasoning_effort
+        elif self.codex_reasoning_effort:
+            effort = self.codex_reasoning_effort
+        elif operation == "observer":
+            effort = "low"
+        else:
+            return None
+        effort = (effort or "").strip().lower()
+        return effort if effort in allowed else None
 
     def resolve_model(
         self,

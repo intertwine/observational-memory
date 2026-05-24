@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +11,8 @@ from .config import Config
 from .llm import compress
 from .reflection_metadata import ensure_reflection_metadata, prune_stale_snapshots
 
+_LOGGER = logging.getLogger(__name__)
+
 REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
 
 # Approximate chars-per-token ratio for estimating input size.
@@ -17,6 +20,16 @@ _CHARS_PER_TOKEN = 3.5
 # Maximum input tokens to send in a single reflector call.
 # Kept conservative to avoid HTTP body size limits on some networks.
 _MAX_INPUT_TOKENS = 12_000
+# Total per-call input budget in chars (~_MAX_INPUT_TOKENS tokens). Every
+# reflector call (system prompt + reflections context + observations chunk +
+# wrappers) must stay under this ceiling.
+_MAX_INPUT_CHARS = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN)
+# Fixed allowance for the fold wrappers ("## Current reflections", separators,
+# the "## Observations (chunk i/N)" header, and the intermediate-chunk NOTE),
+# plus a safety margin.
+_FOLD_WRAPPER_CHARS = 400
+# Floor on the observations chunk so a fold always makes forward progress.
+_MIN_CHUNK_CHARS = 4000
 # max_tokens for reflector output (200-600 lines needs room)
 _REFLECTOR_MAX_OUTPUT_TOKENS = 8192
 _MAX_COMPETING_SNAPSHOT_CHARS = 4000
@@ -241,6 +254,37 @@ def _auto_memory_section(auto_memory: str, amem_changed: bool) -> str:
     return ""
 
 
+def _bound_reflections_context(reflections: str, max_chars: int) -> str:
+    """Cap the reflections.md context fed back to the reflector.
+
+    This bounds *input* size only — the reflector still emits a complete
+    document, so a single bounded pass doesn't shrink stored memory. In the
+    chunked path it also stops the running document from being re-sent in full
+    on every fold (the O(chunks x size) cost the issue calls out).
+
+    The default cap (see ``Config.reflector_context_max_chars``) is generous, so
+    this only trims pathologically large documents. When it does, it keeps the
+    head — durable identity/projects sit at the top of the reflections format —
+    appends a marker, and logs a warning so the operator can raise the cap or
+    compress the document. ``max_chars <= 0`` disables the bound.
+    """
+    if max_chars <= 0 or len(reflections) <= max_chars:
+        return reflections
+    marker = "\n\n[... older reflections truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS ...]\n"
+    # For an absurdly small cap (smaller than the marker) just hard-truncate so
+    # the result never exceeds max_chars and always carries some real content.
+    if max_chars <= len(marker):
+        return reflections[:max_chars]
+    head = reflections[: max_chars - len(marker)]
+    _LOGGER.warning(
+        "reflections.md context (%d chars) exceeds OM_REFLECTOR_CONTEXT_MAX_CHARS=%d; "
+        "sending the head only. Raise the cap or compress reflections to avoid dropping older sections.",
+        len(reflections),
+        max_chars,
+    )
+    return head + marker
+
+
 def _reflect_single(
     system_prompt: str,
     reflections: str,
@@ -252,8 +296,40 @@ def _reflect_single(
     """Single-pass reflection for small observation sets."""
     amem_section = _auto_memory_section(auto_memory, amem_changed)
     obs_section = f"## Current observations\n\n{observations}" if observations.strip() else "(no new observations)"
-    user_content = f"## Current reflections\n\n{reflections}\n\n---\n\n{obs_section}{amem_section}"
+    bounded = _bound_reflections_context(reflections, config.reflector_context_max_chars)
+    user_content = f"## Current reflections\n\n{bounded}\n\n---\n\n{obs_section}{amem_section}"
     return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
+
+
+def _reflector_budgets(system_prompt: str, amem_section: str, configured_cap: int) -> tuple[int, int]:
+    """Split the per-call input budget between reflections context and obs chunk.
+
+    Every fold must satisfy ``system_prompt + reflections + chunk + wrappers <=
+    _MAX_INPUT_CHARS``. We reserve the system prompt, auto-memory section, and a
+    fixed wrapper allowance, then share what remains: the reflections context is
+    capped by ``OM_REFLECTOR_CONTEXT_MAX_CHARS`` but never larger than what leaves
+    a minimum chunk for observations, and the chunk gets the rest. ``configured_cap``
+    of 0 (disabled) is treated as "as large as the budget allows" — the chunked
+    path can never re-send a truly unbounded document and stay under the ceiling.
+
+    Returns ``(reflections_cap, chunk_budget)``.
+
+    Observations get a fixed ~60% of the total budget: larger chunks mean fewer
+    folds, and each fold re-sends the reflections context, so maximizing the
+    chunk minimizes the repeated re-send cost. The reflections context gets
+    what's left after the system prompt, auto-memory, and wrappers — capped by
+    the configured value. A configured cap of 0 (disabled) takes the whole
+    remainder; the chunked path can never re-send a truly unbounded document and
+    stay under the ceiling.
+    """
+    chunk_budget = max(int(_MAX_INPUT_CHARS * 0.6), _MIN_CHUNK_CHARS)
+    remainder = _MAX_INPUT_CHARS - chunk_budget - len(system_prompt) - len(amem_section) - _FOLD_WRAPPER_CHARS
+    max_reflections = max(remainder, 0)
+    if configured_cap <= 0:
+        reflections_cap = max_reflections
+    else:
+        reflections_cap = min(configured_cap, max_reflections)
+    return reflections_cap, chunk_budget
 
 
 def _reflect_chunked(
@@ -265,7 +341,11 @@ def _reflect_chunked(
     amem_changed: bool = False,
 ) -> str:
     """Chunked reflection: split observations into date sections, fold each into reflections."""
-    chunks = _chunk_observations(observations)
+    # Reserve the auto-memory section for every fold (it actually rides only on
+    # the last) so the conservative budget keeps even that fold under the ceiling.
+    amem_section = _auto_memory_section(auto_memory, amem_changed)
+    reflections_cap, chunk_budget = _reflector_budgets(system_prompt, amem_section, config.reflector_context_max_chars)
+    chunks = _chunk_observations(observations, chunk_budget)
 
     running_reflections = reflections
 
@@ -280,15 +360,18 @@ def _reflect_chunked(
                 "Produce the complete updated reflections document."
             ).format(i=i, total=len(chunks))
 
-        # Include auto-memory context only in the final chunk
-        amem_section = ""
-        if is_last:
-            amem_section = _auto_memory_section(auto_memory, amem_changed)
+        # Include auto-memory context only in the final chunk.
+        fold_amem = amem_section if is_last else ""
 
+        # Bound the *re-sent* running document so the chunked fold isn't
+        # O(chunks x reflections_size) and stays under the per-call budget.
+        # running_reflections itself keeps the full latest output; only the
+        # per-fold context is capped.
+        bounded = _bound_reflections_context(running_reflections, reflections_cap)
         user_content = (
-            f"## Current reflections\n\n{running_reflections}\n\n"
+            f"## Current reflections\n\n{bounded}\n\n"
             f"---\n\n"
-            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}{amem_section}"
+            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}{fold_amem}"
         )
         running_reflections = compress(
             fold_prompt,
@@ -301,19 +384,51 @@ def _reflect_chunked(
     return running_reflections
 
 
-def _chunk_observations(observations: str) -> list[str]:
-    """Split observations by date headers into chunks that fit within token limits.
+def _split_to_width(text: str, max_len: int) -> list[str]:
+    """Split text into pieces no longer than ``max_len``, preferring line breaks.
 
-    Groups consecutive date sections until adding another would exceed the
-    per-chunk token budget. Each chunk is a string of one or more date sections.
+    A line longer than ``max_len`` is hard-split. Guarantees every piece is
+    ``<= max_len`` so a single oversized date section can't blow the budget.
     """
-    # Budget per chunk: leave room for reflections + system prompt
-    budget_chars = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN * 0.6)
+    if max_len <= 0 or len(text) <= max_len:
+        return [text]
+    pieces: list[str] = []
+    cur = ""
+    for line in text.splitlines(keepends=True):
+        if len(line) > max_len:
+            if cur:
+                pieces.append(cur)
+                cur = ""
+            for j in range(0, len(line), max_len):
+                pieces.append(line[j : j + max_len])
+            continue
+        if cur and len(cur) + len(line) > max_len:
+            pieces.append(cur)
+            cur = ""
+        cur += line
+    if cur:
+        pieces.append(cur)
+    return pieces
 
-    # Split by date headers, keeping each "## YYYY-MM-DD" section together
+
+def _chunk_observations(observations: str, budget_chars: int | None = None) -> list[str]:
+    """Split observations into chunks that each fit within ``budget_chars``.
+
+    Splits on ``## YYYY-MM-DD`` date headers and packs whole days into chunks,
+    re-prepending the ``# Observations`` header to each chunk for context.
+    ``budget_chars`` is the room left for observations after the reflections
+    context and system prompt are reserved (see ``_reflector_budgets``); when
+    omitted it falls back to a conservative standalone default.
+
+    A single date section larger than the budget is split within the day (on line
+    boundaries, hard-splitting if needed) so every emitted chunk — header
+    included — stays ``<= budget_chars``. We never emit a header-only chunk.
+    """
+    if budget_chars is None:
+        budget_chars = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN * 0.6)
+
     sections = re.split(r"(?=^## \d{4}-\d{2}-\d{2})", observations, flags=re.MULTILINE)
 
-    # First element may be the "# Observations" header — prepend to first date section
     header = ""
     date_sections = []
     for section in sections:
@@ -323,19 +438,24 @@ def _chunk_observations(observations: str) -> list[str]:
             header = section
 
     if not date_sections:
-        # No date sections found — return as single chunk
-        return [observations]
+        # No date structure — return whole if it fits, else hard-split to width.
+        return [observations] if len(observations) <= budget_chars else _split_to_width(observations, budget_chars)
+
+    # Every chunk re-carries the header, so content must fit in the remainder.
+    max_content = max(budget_chars - len(header), 1)
+    pieces: list[str] = []
+    for section in date_sections:
+        pieces.extend(_split_to_width(section, max_content))
 
     chunks: list[str] = []
-    current_chunk = header
-    for section in date_sections:
-        if len(current_chunk) + len(section) > budget_chars and current_chunk.strip():
-            chunks.append(current_chunk)
-            current_chunk = header  # restart with header for context
-        current_chunk += section
-
-    if current_chunk.strip():
-        chunks.append(current_chunk)
+    current = ""  # content only; header is added at flush
+    for piece in pieces:
+        if current and len(header) + len(current) + len(piece) > budget_chars:
+            chunks.append(header + current)
+            current = ""
+        current += piece
+    if current:
+        chunks.append(header + current)
 
     return chunks if chunks else [observations]
 

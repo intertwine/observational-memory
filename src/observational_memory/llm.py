@@ -68,11 +68,19 @@ def compress(
     # and cost recording happens after the call returns / finally fails.
     _enforce_budget(config, operation, effective_provider, model, system_prompt, user_content, max_tokens)
 
+    # ChatGPT Codex reasoning effort is per-operation; resolve it here (compress
+    # knows the operation) and pass it only to that path so other provider
+    # signatures (and their test fakes) are unaffected.
+    reasoning_effort = config.resolve_reasoning_effort(operation) if effective_provider == "openai-chatgpt" else None
+
     last_error: Exception | None = None
     started = time.monotonic()
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            result = fn(system_prompt, user_content, model, max_tokens, config)
+            if effective_provider == "openai-chatgpt":
+                result = fn(system_prompt, user_content, model, max_tokens, config, reasoning_effort=reasoning_effort)
+            else:
+                result = fn(system_prompt, user_content, model, max_tokens, config)
             text, usage = _coerce_result(result)
             _record_usage(
                 config,
@@ -384,7 +392,7 @@ def _call_anthropic_direct(
     message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
-        system=system_prompt,
+        system=_anthropic_system_blocks(system_prompt),
         messages=[{"role": "user", "content": user_content}],
     )
     return _extract_anthropic_text(message), _anthropic_usage(message)
@@ -403,7 +411,7 @@ def _call_anthropic_vertex(
     message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
-        system=system_prompt,
+        system=_anthropic_system_blocks(system_prompt),
         messages=[{"role": "user", "content": user_content}],
     )
     return _extract_anthropic_text(message), _anthropic_usage(message)
@@ -422,7 +430,7 @@ def _call_anthropic_bedrock(
     message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
-        system=system_prompt,
+        system=_anthropic_system_blocks(system_prompt),
         messages=[{"role": "user", "content": user_content}],
     )
     return _extract_anthropic_text(message), _anthropic_usage(message)
@@ -503,6 +511,7 @@ def _call_openai_chatgpt(
     model: str,
     max_tokens: int,
     config: Config,
+    reasoning_effort: str | None = None,
 ) -> tuple[str, "LLMUsage | None"]:
     from .auth import AuthError, resolve_runtime_credentials
 
@@ -518,6 +527,7 @@ def _call_openai_chatgpt(
             user_content=user_content,
             model=model,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
         )
     except Exception as exc:
         if _is_unauthorized(exc):
@@ -529,6 +539,7 @@ def _call_openai_chatgpt(
                 user_content=user_content,
                 model=model,
                 max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
             )
         raise
 
@@ -541,6 +552,7 @@ def _call_codex_responses(
     user_content: str,
     model: str,
     max_tokens: int,
+    reasoning_effort: str | None = None,
 ) -> tuple[str, "LLMUsage | None"]:
     """Call the ChatGPT Codex backend via the Responses API.
 
@@ -548,6 +560,11 @@ def _call_codex_responses(
     `/chat/completions` (returns 404) — it speaks the Responses API like the
     real Codex CLI. It also sits behind Cloudflare, which 403s any request that
     doesn't advertise a first-party `originator`. See the v0.6.5 plan amendment.
+
+    ``reasoning_effort`` (low|medium|high|xhigh), when set, is forwarded as the
+    Responses ``reasoning`` effort — lower effort cuts gpt-5.5 latency sharply.
+    The Codex ``/models`` endpoint advertises this; it is omitted when None so
+    the backend applies its own default.
     """
     import openai
 
@@ -568,12 +585,16 @@ def _call_codex_responses(
     # The system prompt rides in `instructions`; max_tokens is intentionally
     # not forwarded.
     del max_tokens  # not accepted by the Codex backend
+    extra: dict = {}
+    if reasoning_effort:
+        extra["reasoning"] = {"effort": reasoning_effort}
     stream = client.responses.create(
         model=model,
         instructions=system_prompt,
         input=[{"role": "user", "content": [{"type": "input_text", "text": user_content}]}],
         store=False,
         stream=True,
+        **extra,
     )
     chunks: list[str] = []
     final_text: str | None = None
@@ -674,6 +695,17 @@ def _is_unauthorized(exc: Exception) -> bool:
     return "401" in msg or "unauthorized" in msg
 
 
+def _anthropic_system_blocks(system_prompt: str) -> list[dict]:
+    """System prompt as a cacheable block for Anthropic prompt caching.
+
+    The observer/reflector system prompt is stable across calls, so marking it
+    with ``cache_control: ephemeral`` lets repeat calls reuse it at a fraction of
+    the input cost on the metered Anthropic providers. It is harmless when
+    caching doesn't apply — the API treats it as an ordinary system block.
+    """
+    return [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+
+
 def _extract_anthropic_text(message: object) -> str:
     content = getattr(message, "content", None)
     if not content:
@@ -695,18 +727,29 @@ def _safe_int(value: object) -> int | None:
 
 
 def _anthropic_usage(message: object) -> "LLMUsage | None":
-    """Map an Anthropic ``message.usage`` to LLMUsage (input/output tokens)."""
+    """Map an Anthropic ``message.usage`` to LLMUsage (input/output tokens).
+
+    With prompt caching active, ``input_tokens`` counts only the uncached
+    remainder; the cached tokens are reported separately as
+    ``cache_read_input_tokens`` and ``cache_creation_input_tokens``. We fold both
+    into the prompt-token total so usage accounting stays accurate after caching
+    is enabled (cost is still estimated at the flat input rate — the cache
+    read/write discounts are not separately modeled).
+    """
     from .usage.models import LLMUsage
 
     usage = getattr(message, "usage", None)
     pt = _safe_int(getattr(usage, "input_tokens", None))
+    cache_read = _safe_int(getattr(usage, "cache_read_input_tokens", None))
+    cache_create = _safe_int(getattr(usage, "cache_creation_input_tokens", None))
     ct = _safe_int(getattr(usage, "output_tokens", None))
-    if pt is None and ct is None:
+    if pt is None and ct is None and cache_read is None and cache_create is None:
         return None
+    prompt_tokens = (pt or 0) + (cache_read or 0) + (cache_create or 0)
     return LLMUsage(
-        prompt_tokens=pt,
+        prompt_tokens=prompt_tokens,
         completion_tokens=ct,
-        total_tokens=(pt or 0) + (ct or 0),
+        total_tokens=prompt_tokens + (ct or 0),
         token_source="provider",
     )
 
