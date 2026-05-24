@@ -105,10 +105,13 @@ def build_startup_payload(
     """Build a deterministic, budgeted startup payload with recall handles."""
     ensure_startup_memory(config)
     budget = max(int(budget_chars or DEFAULT_STARTUP_BUDGET_CHARS), MIN_STARTUP_BUDGET_CHARS)
-    # Keep metadata so freshness can be computed across all sections, then applied
-    # to the surviving (de-duplicated) copy using the freshest last_seen anywhere.
+    # Keep metadata so freshness can be computed before stripping. Freshness keying
+    # mirrors the dedup decision: facts that dedup collapses share one freshness
+    # entry (freshest sighting wins), but per-project subsections — which dedup
+    # treats as distinct — get per-chunk freshness so one project can't refresh
+    # another's identical-looking fact.
     chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=False)
-    fresh_map = _operational_freshness_map(chunks)
+    shared_map = _operational_freshness_map([c for c in chunks if not _is_project_subsection(c)])
     header = _startup_header(budget=budget, cwd=cwd, task=task, agent=agent)
     footer = _recall_footer(task=task, cwd=cwd)
 
@@ -120,7 +123,15 @@ def build_startup_payload(
     now = datetime.now(timezone.utc)
     days = _freshness_days()
     ordered = [
-        replace(chunk, body=_annotate_and_strip(chunk.body, fresh_map, now=now, freshness_days=days))
+        replace(
+            chunk,
+            body=_annotate_and_strip(
+                chunk.body,
+                _operational_freshness_map([chunk]) if _is_project_subsection(chunk) else shared_map,
+                now=now,
+                freshness_days=days,
+            ),
+        )
         for chunk in ordered
     ]
 

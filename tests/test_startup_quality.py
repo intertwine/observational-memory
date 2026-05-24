@@ -98,6 +98,25 @@ def test_distinct_project_fields_are_not_deduped(cfg):
     assert text.count("owner: bryan") == 3
 
 
+def test_per_project_freshness_is_not_merged_across_subsections(cfg):
+    # Same operational text under two DIFFERENT projects is two distinct facts:
+    # the stale one is marked, the recent one is not. Freshness must not merge
+    # across project subsections (only across copies dedup actually collapses).
+    reflections = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        f"### Alpha\n- 🔴 service version 1.2.3 installed <!--om: id=ome_a kind=snapshot last_seen={_iso(90)}-->\n"
+        f"### Beta\n- 🔴 service version 1.2.3 installed <!--om: id=ome_b kind=snapshot last_seen={_iso(1)}-->\n"
+    )
+    _write(cfg, reflections)
+    payload = sm.build_startup_payload(cfg, budget_chars=24000)
+    assert payload.text.count("service version 1.2.3 installed") == 2  # both projects kept
+    assert payload.text.count("verify") == 1  # only the stale (Alpha) copy marked
+    report = sm.startup_quality_report(cfg, budget_chars=24000)
+    assert len(report["stale_operational_facts"]) == 1
+    assert report["stale_operational_facts"][0]["age_days"] >= 90
+
+
 def test_fact_seen_recently_elsewhere_is_not_marked_stale(cfg):
     # Same fact: old copy in a higher-priority section, recent copy elsewhere.
     # The surviving (deduped) copy must NOT be marked stale — freshness uses the
