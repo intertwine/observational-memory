@@ -199,7 +199,9 @@ def _build_profile(reflections: str) -> str:
         if filtered:
             parts.extend(["", filtered.strip()])
 
-    return _annotate_stale_operational_facts("\n".join(parts))
+    # Materialized files stay raw (with metadata); freshness is applied at
+    # payload-build time so it always reflects the current OM_STARTUP_FRESHNESS_DAYS.
+    return "\n".join(parts)
 
 
 def _build_active(reflections: str, observations: str) -> str:
@@ -218,7 +220,7 @@ def _build_active(reflections: str, observations: str) -> str:
     if latest_context:
         parts.extend(["", latest_context.strip()])
 
-    return _annotate_stale_operational_facts("\n".join(parts))
+    return "\n".join(parts)
 
 
 def _extract_h2_section(text: str, heading: str) -> str:
@@ -516,6 +518,9 @@ def _startup_chunks(
             ]
         for heading, body, handle in chunk_parts:
             if strip_metadata:
+                # Annotate stale operational facts from metadata (env-aware, at
+                # build time) before the metadata comments are stripped.
+                body = _annotate_stale_operational_facts(body)
                 body = _strip_om_metadata(body)
             if project_startup and _is_empty_startup_chunk(body):
                 continue
@@ -755,11 +760,19 @@ def _chunk_priority(
     if "creative & professional" in lower_heading:
         priority = 3
     route_terms = _route_terms(cwd=cwd, task=task, agent=agent)
-    if route_terms and any(term in lower_body or term in lower_heading for term in route_terms):
+    # Match with separators normalized to spaces on both sides, so a cwd slug like
+    # "observational-memory" matches a human heading like "Observational Memory".
+    hay = _normalize_route_text(lower_heading + " " + lower_body)
+    if route_terms and any(_normalize_route_text(term) in hay for term in route_terms):
         # The project/section matching the current cwd/task gets first claim on
         # budget; unmatched active-project inventory overflows to recall handles.
         priority += _ROUTE_MATCH_BOOST
     return priority
+
+
+def _normalize_route_text(text: str) -> str:
+    """Lowercase and collapse separators so hyphen/underscore slugs match spaced text."""
+    return re.sub(r"[\s_\-.]+", " ", text.lower()).strip()
 
 
 def _selected_chunk_order(chunk: StartupChunk) -> tuple[int, int, str, str]:

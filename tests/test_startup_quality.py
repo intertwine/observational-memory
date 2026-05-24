@@ -62,8 +62,10 @@ def test_stale_operational_fact_is_annotated(cfg):
         f"- 🔴 grok-cli running version 1.2.0 <!--om: id=ome_a kind=snapshot last_seen={_iso(40)}-->\n"
     )
     _write(cfg, reflections)
-    active = cfg.active_path.read_text()
-    assert "as of" in active and "verify" in active
+    # Freshness is applied at payload-build time (not baked into the file).
+    payload = sm.build_startup_payload(cfg, budget_chars=24000)
+    assert "as of" in payload.text and "verify" in payload.text
+    assert "as of" not in cfg.active_path.read_text()  # materialized file stays raw
 
 
 def test_recent_operational_fact_not_annotated(cfg):
@@ -73,7 +75,7 @@ def test_recent_operational_fact_not_annotated(cfg):
         f"- 🔴 grok-cli running version 1.2.0 <!--om: id=ome_a kind=snapshot last_seen={_iso(2)}-->\n"
     )
     _write(cfg, reflections)
-    assert "as of" not in cfg.active_path.read_text()
+    assert "as of" not in sm.build_startup_payload(cfg, budget_chars=24000).text
 
 
 def test_non_operational_fact_not_annotated(cfg):
@@ -83,7 +85,47 @@ def test_non_operational_fact_not_annotated(cfg):
         f"- 🔴 Prefers terse answers <!--om: id=ome_p kind=preference last_seen={_iso(60)}-->\n"
     )
     _write(cfg, reflections)
-    assert "as of" not in cfg.profile_path.read_text()
+    assert "as of" not in sm.build_startup_payload(cfg, budget_chars=24000).text
+
+
+def test_freshness_reflects_env_without_source_change(cfg, monkeypatch):
+    # Changing OM_STARTUP_FRESHNESS_DAYS must affect the payload immediately,
+    # without a source-file change — payload-time annotation guarantees this.
+    reflections = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        f"- 🔴 grok-cli running version 1.2.0 <!--om: id=ome_a kind=snapshot last_seen={_iso(5)}-->\n"
+    )
+    _write(cfg, reflections)
+    assert "as of" not in sm.build_startup_payload(cfg, budget_chars=24000).text  # 5d < default 14
+    monkeypatch.setenv("OM_STARTUP_FRESHNESS_DAYS", "1")
+    assert "as of" in sm.build_startup_payload(cfg, budget_chars=24000).text  # now 5d >= 1
+
+
+def test_durable_kind_not_marked(cfg):
+    reflections = (
+        "# Reflections\n\n"
+        "## Preferences & Opinions\n"
+        f"- 🔴 Prefers Python 3.11 for new projects <!--om: id=ome_p kind=preference last_seen={_iso(90)}-->\n"
+    )
+    _write(cfg, reflections)
+    assert "as of" not in sm.build_startup_payload(cfg, budget_chars=24000).text
+
+
+def test_route_match_normalizes_separators(cfg):
+    # cwd slug "observational-memory" must boost a spaced heading "Observational Memory".
+    p_obs = sm._chunk_priority(
+        "active",
+        "Active Projects / Observational Memory",
+        "- work",
+        cwd="/x/observational-memory",
+        task=None,
+        agent=None,
+    )
+    p_other = sm._chunk_priority(
+        "active", "Active Projects / Code and Context", "- work", cwd="/x/observational-memory", task=None, agent=None
+    )
+    assert p_obs > p_other
 
 
 # --- cwd / task scope ---
@@ -163,17 +205,6 @@ def test_quality_report_excludes_durable_kind_from_stale(cfg):
     texts = " ".join(fact["text"].lower() for fact in report["stale_operational_facts"])
     assert "python 3.11" not in texts  # durable preference excluded
     assert "tool version 9.9.9" in texts  # snapshot still reported
-
-
-def test_durable_kind_not_freshness_marked(cfg):
-    # Operational-looking text (version token) but kind=preference -> never marked.
-    reflections = (
-        "# Reflections\n\n"
-        "## Preferences & Opinions\n"
-        f"- 🔴 Prefers Python 3.11 for new projects <!--om: id=ome_p kind=preference last_seen={_iso(90)}-->\n"
-    )
-    _write(cfg, reflections)
-    assert "as of" not in cfg.profile_path.read_text()
 
 
 def test_route_terms_filter_generic_directory_and_filler():
