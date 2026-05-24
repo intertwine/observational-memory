@@ -184,10 +184,11 @@ def reflect(ctx: click.Context, dry_run: bool, async_mode: bool) -> None:
 
     config = ctx.obj["config"]
 
-    # Async is opt-in via --async or OM_OPENAI_ASYNC_MODE=batch. dry-run always
-    # runs synchronously (there's nothing to defer).
-    if not dry_run and (async_mode or config.openai_async_mode.strip().lower() == "batch"):
-        _reflect_async(config)
+    # Async is opt-in via --async (explicit) or OM_OPENAI_ASYNC_MODE=batch (env).
+    # dry-run always runs synchronously (there's nothing to defer).
+    env_async = config.openai_async_mode.strip().lower() == "batch"
+    if not dry_run and (async_mode or env_async):
+        _reflect_async(config, explicit=async_mode)
         return
 
     click.echo("Running reflector...")
@@ -200,20 +201,37 @@ def reflect(ctx: click.Context, dry_run: bool, async_mode: bool) -> None:
         click.echo("No observations to reflect on.")
 
 
-def _reflect_async(config: Config) -> None:
-    """Submit a reflection as an OpenAI Batch job, falling back to sync when needed."""
+def _run_reflector_sync(config: Config) -> None:
+    from .reflect import run_reflector
+
+    result = run_reflector(config)
+    click.echo(f"Reflections updated ({len(result)} chars)" if result else "No observations to reflect on.")
+
+
+def _reflect_async(config: Config, explicit: bool) -> None:
+    """Submit a reflection as an OpenAI Batch job.
+
+    Falls back to a synchronous run when the input needs chunking. A provider
+    misconfiguration is a hard error for an explicit ``--async`` (the user asked
+    for Batch specifically), but degrades to a synchronous run when async came
+    from the persistent ``OM_OPENAI_ASYNC_MODE=batch`` env mode — so a scheduled
+    reflect never hard-fails just because Batch isn't usable on this host.
+    """
     from .jobs import BatchProviderError, submit_reflect_batch
-    from .reflect import ChunkingRequired, run_reflector
+    from .reflect import ChunkingRequired
 
     try:
         record = submit_reflect_batch(config)
     except ChunkingRequired as exc:
-        click.echo(f"Input too large for a single Batch request ({exc}); running synchronously instead.")
-        result = run_reflector(config)
-        click.echo(f"Reflections updated ({len(result)} chars)" if result else "No observations to reflect on.")
+        click.echo(f"Input too large for a single Batch request ({exc}); running synchronously instead.", err=True)
+        _run_reflector_sync(config)
         return
     except BatchProviderError as exc:
-        raise click.ClickException(str(exc)) from exc
+        if explicit:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Async Batch unavailable ({exc}); running synchronously instead.", err=True)
+        _run_reflector_sync(config)
+        return
 
     if record is None:
         click.echo("No observations to reflect on.")

@@ -476,11 +476,11 @@ def build_openai_chat_request(model: str, system_prompt: str, user_content: str,
     }
 
 
-def _parse_openai_chat_text(response: object) -> str:
+def _parse_openai_chat_text(response: object, source: str = "OpenAI") -> str:
     """Extract assistant text from an OpenAI chat.completions response object."""
     content = response.choices[0].message.content
     if content is None:
-        raise RuntimeError("OpenAI response contained empty content.")
+        raise RuntimeError(f"{source} response contained empty content.")
     # OpenAI can return non-string content arrays in newer SDK response variants.
     return content if isinstance(content, str) else str(content)
 
@@ -507,7 +507,7 @@ def _call_openai_compatible(
     response = client.chat.completions.create(
         **build_openai_chat_request(model, system_prompt, user_content, max_tokens)
     )
-    return _parse_openai_chat_text(response), _openai_usage(response)
+    return _parse_openai_chat_text(response, source=base_url), _openai_usage(response)
 
 
 def _call_openai_chatgpt(

@@ -210,3 +210,91 @@ def test_cancel_marks_cancelled(cfg, monkeypatch):
     cancelled = cancel_job(cfg, record.job_id)
     assert cancelled.status == "cancelled"
     assert state["cancelled"] == "batch-1"
+
+
+def test_submit_returns_none_when_nothing_to_reflect(cfg, monkeypatch):
+    _install_fake_openai(monkeypatch, {})
+    # Last reflected is newer than the only observation -> nothing new, no auto-memory.
+    cfg.reflections_path.write_text(
+        "# Reflections\n\n*Last updated: 2026-05-22 00:00 UTC*\n*Last reflected: 2026-05-22*\n\n## Core Identity\n- x\n"
+    )
+    assert submit_reflect_batch(cfg) is None
+
+
+def test_apply_marks_failed_on_failed_batch(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    record = submit_reflect_batch(cfg)
+    state["batch_status"] = "failed"
+    results = apply_completed_jobs(cfg)
+    assert results[0]["status"] == "failed"
+    assert ProviderJobStore(cfg.openai_batch_jobs_dir).load(record.job_id).status == "failed"
+
+
+def test_apply_reports_request_level_error(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    record = submit_reflect_batch(cfg)
+    err_line = {"custom_id": record.custom_id, "response": {"status_code": 429, "body": {}}, "error": None}
+    state["batch_status"] = "completed"
+    state["output_file_id"] = "file-output-1"
+    state["output_jsonl"] = json.dumps(err_line) + "\n"
+    results = apply_completed_jobs(cfg)
+    assert results[0]["status"] == "failed"
+    assert "429" in results[0]["detail"]
+    assert cfg.reflections_path.read_text() == _REFLECTIONS  # untouched
+
+
+def test_auto_memory_change_blocks_apply(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    record = submit_reflect_batch(cfg)  # records auto_memory_sha256 of "" (no auto-memory)
+
+    # Make apply observe changed auto-memory (reflections/observations unchanged).
+    from observational_memory import reflect as reflect_mod
+
+    original = reflect_mod._gather_reflection_inputs
+
+    def with_changed_auto_memory(config):
+        inputs = original(config)
+        if inputs is not None:
+            inputs.auto_memory = "NEW cross-project facts"
+        return inputs
+
+    monkeypatch.setattr(reflect_mod, "_gather_reflection_inputs", with_changed_auto_memory)
+    state["batch_status"] = "completed"
+    state["output_file_id"] = "file-output-1"
+    state["output_jsonl"] = _completed_output(record.custom_id, "# Reflections\n\n## Core Identity\n- stale\n")
+    results = apply_completed_jobs(cfg)
+    assert results[0]["status"] == "drifted"
+    assert "stale" not in cfg.reflections_path.read_text()
+
+
+def test_env_async_mode_falls_back_to_sync_on_provider_error(cfg, monkeypatch):
+    from observational_memory import cli, jobs
+
+    def boom(config):
+        raise jobs.BatchProviderError("no usable openai provider")
+
+    monkeypatch.setattr("observational_memory.jobs.submit_reflect_batch", boom)
+    ran: dict = {}
+    monkeypatch.setattr(
+        "observational_memory.reflect.run_reflector",
+        lambda config: ran.setdefault("ran", True) and "# Reflections",
+    )
+    # Env-driven async (explicit=False) must degrade to a sync run, not raise.
+    cli._reflect_async(cfg, explicit=False)
+    assert ran.get("ran") is True
+
+
+def test_explicit_async_raises_on_provider_error(cfg, monkeypatch):
+    import click
+
+    from observational_memory import cli, jobs
+
+    def boom(config):
+        raise jobs.BatchProviderError("no usable openai provider")
+
+    monkeypatch.setattr("observational_memory.jobs.submit_reflect_batch", boom)
+    with pytest.raises(click.ClickException):
+        cli._reflect_async(cfg, explicit=True)

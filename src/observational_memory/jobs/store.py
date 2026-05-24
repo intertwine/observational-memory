@@ -31,9 +31,10 @@ class JobRecord:
     input_file_id: str | None = None
     output_file_id: str | None = None
     status: str = "submitted"
-    # Drift guards: hashes of the inputs as they were at submit time.
+    # Drift guards: hashes of the reflector inputs as they were at submit time.
     reflections_sha256: str | None = None
     observations_sha256: str | None = None
+    auto_memory_sha256: str | None = None
     created_at: str = field(default_factory=_now_iso)
     updated_at: str = field(default_factory=_now_iso)
     applied_at: str | None = None

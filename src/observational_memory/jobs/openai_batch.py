@@ -100,6 +100,7 @@ def submit_reflect_batch(config: Config) -> JobRecord | None:
         status="submitted",
         reflections_sha256=_sha256(inputs.reflections),
         observations_sha256=_sha256(inputs.observations),
+        auto_memory_sha256=_sha256(inputs.auto_memory),
         host=host_name(),
         repo=repo_name(),
     )
@@ -116,6 +117,7 @@ def apply_completed_jobs(config: Config) -> list[dict]:
     results: list[dict] = []
     for record in pending:
         if not record.batch_id:
+            results.append({"job_id": record.job_id, "status": "error", "detail": "no batch_id recorded"})
             continue
         try:
             batch = client.batches.retrieve(record.batch_id)
@@ -153,10 +155,28 @@ def _apply_one(config: Config, client, store: ProviderJobStore, record: JobRecor
         store.save(record)
         return {"job_id": record.job_id, "status": "error", "detail": record.error}
 
-    body = _find_response_body(raw, record.custom_id)
-    if body is None:
+    line = _find_response_line(raw, record.custom_id)
+    if line is None:
         record.status = "failed"
         record.error = "no response matched the recorded custom_id"
+        store.save(record)
+        return {"job_id": record.job_id, "status": "failed", "detail": record.error}
+
+    # Distinguish a request-level error / non-200 from a malformed body so the
+    # reported reason is the real one.
+    err = line.get("error")
+    response = line.get("response") or {}
+    status_code = response.get("status_code")
+    if err or (status_code is not None and status_code != 200):
+        record.status = "failed"
+        record.error = f"batch request failed: {err or f'HTTP {status_code}'}"
+        store.save(record)
+        return {"job_id": record.job_id, "status": "failed", "detail": record.error}
+
+    body = response.get("body")
+    if not isinstance(body, dict):
+        record.status = "failed"
+        record.error = "batch response had no body"
         store.save(record)
         return {"job_id": record.job_id, "status": "failed", "detail": record.error}
 
@@ -168,13 +188,17 @@ def _apply_one(config: Config, client, store: ProviderJobStore, record: JobRecor
         store.save(record)
         return {"job_id": record.job_id, "status": "failed", "detail": record.error}
 
-    # Drift guard: refuse to apply if reflections.md or the new-observation
-    # frontier changed since submit. Save the output as a review artifact instead.
+    # Drift guard: refuse to apply if any reflector input — reflections.md, the
+    # new-observation frontier, or auto-memory — changed since submit. Save the
+    # output as a review artifact instead.
     current_reflections = config.reflections_path.read_text() if config.reflections_path.exists() else ""
     inputs = reflect._gather_reflection_inputs(config)
     current_observations = inputs.observations if inputs is not None else ""
-    drifted = _sha256(current_reflections) != (record.reflections_sha256 or "") or _sha256(current_observations) != (
-        record.observations_sha256 or ""
+    current_auto_memory = inputs.auto_memory if inputs is not None else ""
+    drifted = (
+        _sha256(current_reflections) != (record.reflections_sha256 or "")
+        or _sha256(current_observations) != (record.observations_sha256 or "")
+        or _sha256(current_auto_memory) != (record.auto_memory_sha256 or "")
     )
     if drifted:
         config.openai_batch_jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -222,8 +246,12 @@ def _download_text(client, file_id: str) -> str:
     return str(content)
 
 
-def _find_response_body(raw_jsonl: str, custom_id: str) -> dict | None:
-    """Map the output line by custom_id (order is not guaranteed) and return its body."""
+def _find_response_line(raw_jsonl: str, custom_id: str) -> dict | None:
+    """Return the output line matching ``custom_id`` (order is not guaranteed).
+
+    Returns the whole line object so the caller can distinguish a request-level
+    error / non-200 from a malformed body; None when no line matches.
+    """
     for raw_line in raw_jsonl.splitlines():
         line = raw_line.strip()
         if not line:
@@ -232,13 +260,8 @@ def _find_response_body(raw_jsonl: str, custom_id: str) -> dict | None:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if obj.get("custom_id") != custom_id:
-            continue
-        if obj.get("error"):
-            return None
-        response = obj.get("response") or {}
-        body = response.get("body")
-        return body if isinstance(body, dict) else None
+        if obj.get("custom_id") == custom_id:
+            return obj
     return None
 
 
