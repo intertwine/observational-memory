@@ -446,21 +446,10 @@ def _call_openai_direct(
     import openai
 
     client = openai.OpenAI(timeout=300.0)
-    token_limit_arg = _openai_token_limit_arg(model, max_tokens)
     response = client.chat.completions.create(
-        model=model,
-        **token_limit_arg,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
+        **build_openai_chat_request(model, system_prompt, user_content, max_tokens)
     )
-    content = response.choices[0].message.content
-    if content is None:
-        raise RuntimeError("OpenAI response contained empty content.")
-    # OpenAI can return non-string content arrays in newer SDK response variants.
-    text = content if isinstance(content, str) else str(content)
-    return text, _openai_usage(response)
+    return _parse_openai_chat_text(response), _openai_usage(response)
 
 
 def _openai_token_limit_arg(model: str, max_tokens: int) -> dict[str, int]:
@@ -468,6 +457,32 @@ def _openai_token_limit_arg(model: str, max_tokens: int) -> dict[str, int]:
     if normalized.startswith(("gpt-5", "o1", "o3", "o4")):
         return {"max_completion_tokens": max_tokens}
     return {"max_tokens": max_tokens}
+
+
+def build_openai_chat_request(model: str, system_prompt: str, user_content: str, max_tokens: int) -> dict:
+    """Build the OpenAI chat.completions request body.
+
+    Shared by the synchronous direct/compatible callers and the async Batch
+    backend so the request shape (messages + model-aware token-limit arg) is
+    identical whether a reflection runs now or via a Batch job.
+    """
+    return {
+        "model": model,
+        **_openai_token_limit_arg(model, max_tokens),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    }
+
+
+def _parse_openai_chat_text(response: object, source: str = "OpenAI") -> str:
+    """Extract assistant text from an OpenAI chat.completions response object."""
+    content = response.choices[0].message.content
+    if content is None:
+        raise RuntimeError(f"{source} response contained empty content.")
+    # OpenAI can return non-string content arrays in newer SDK response variants.
+    return content if isinstance(content, str) else str(content)
 
 
 def _call_openai_compatible(
@@ -489,20 +504,10 @@ def _call_openai_compatible(
         timeout=300.0,
         default_headers=default_headers or None,
     )
-    token_limit_arg = _openai_token_limit_arg(model, max_tokens)
     response = client.chat.completions.create(
-        model=model,
-        **token_limit_arg,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
+        **build_openai_chat_request(model, system_prompt, user_content, max_tokens)
     )
-    content = response.choices[0].message.content
-    if content is None:
-        raise RuntimeError(f"{base_url} response contained empty content.")
-    text = content if isinstance(content, str) else str(content)
-    return text, _openai_usage(response)
+    return _parse_openai_chat_text(response, source=base_url), _openai_usage(response)
 
 
 def _call_openai_chatgpt(

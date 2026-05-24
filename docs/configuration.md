@@ -239,6 +239,29 @@ om usage pricing reset                                  # drop overrides
 
 Overrides live at `~/.config/observational-memory/pricing.toml` (set `OM_PRICING_OVERRIDES` to relocate). Unknown models record token counts with `pricing=unknown` and skip the dollar estimate. `om doctor` reports the tracking state, configured budgets, and the active pricing snapshot.
 
+## Offline reflection with OpenAI Batch
+
+The OpenAI Batch API runs requests offline within a 24-hour window at about half the synchronous token cost, on a separate rate-limit pool. Observational Memory can submit a reflection as a Batch job and apply the result later — useful for cutting cost on a metered key and avoiding synchronous timeouts on long reflections.
+
+This is **API-key only**. It works with the direct `openai` provider (`OPENAI_API_KEY`) and is never used for the `openai-chatgpt` subscription provider, which has no Batch API. If your reflector resolves to anything other than `openai`, `--async` errors with a clear message — set `OM_LLM_REFLECTOR_PROVIDER=openai` to use it.
+
+```bash
+OM_LLM_REFLECTOR_PROVIDER=openai
+om reflect --async        # submit a Batch job and exit (does not write reflections.md yet)
+om jobs list              # see recorded jobs and their status
+om jobs poll              # apply any completed jobs (safe — see drift below)
+om jobs show <job_id>     # inspect one job
+om jobs cancel <job_id>   # request cancellation
+```
+
+Set `OM_OPENAI_ASYNC_MODE=batch` to make a plain `om reflect` (including scheduled runs) submit async automatically, without the flag.
+
+**Single-pass only.** Batch handles the single-call reflection. If the input is large enough to need chunked folding (each fold depends on the previous output, which a parallel batch can't do), `--async` falls back to running synchronously with a notice — so it's never silently partial.
+
+**Drift safety.** A submitted job records a fingerprint of `reflections.md` and the new observations at submit time. On `om jobs poll`, if either changed since submit (a sync reflect ran, or new observations arrived), the result is **not** applied — it's written to a review artifact next to the job record and the job is marked `drifted`, so a stale consolidation never clobbers newer memory. When state is unchanged, apply runs the full reflect pipeline (stamp, prune, write, trim, reindex) — identical to a synchronous run — records usage at the Batch price, and deletes the uploaded input/output files from OpenAI.
+
+A live smoke test is opt-in and skipped unless `OPENAI_API_KEY` is present with usable billing; see `docs/MAINTAINERS.md`.
+
 ## Auth Store
 
 `om login` writes a single host-local file:
