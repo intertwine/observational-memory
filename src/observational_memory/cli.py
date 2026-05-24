@@ -541,17 +541,19 @@ def context(
 
 
 def _format_quality_report(report: dict) -> str:
+    unique = report["duplicate_bullets"]
     lines = [
         "Startup context quality report",
         f"  budget: {report['used_chars']} / {report['budget_chars']} chars used",
-        f"  duplicate bullets dropped: {report['duplicate_count']}",
+        f"  duplicate bullets dropped: {report['duplicate_count']} occurrences ({len(unique)} unique)",
     ]
-    for dup in report["duplicate_bullets"]:
+    for dup in unique:
         lines.append(f"    - {dup}")
     stale = report["stale_operational_facts"]
     lines.append(f"  stale operational facts: {len(stale)}")
     for fact in stale:
-        lines.append(f"    - [{fact['section']}] {fact['text']} (as of {fact['as_of']}, {fact['age_days']}d)")
+        age = f", {fact['age_days']}d" if fact.get("age_days") is not None else ""
+        lines.append(f"    - [{fact['section']}] {fact['text']} (as of {fact['as_of']}{age})")
     lines.append("  budget by section:")
     for section in report["budget_by_section"]:
         lines.append(f"    {section['chars']:>6}  {section['heading']}")

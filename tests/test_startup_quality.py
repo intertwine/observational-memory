@@ -58,6 +58,46 @@ def test_freshness_marker_does_not_defeat_dedup(cfg):
     assert payload.text.lower().count("tool version 1.2.3 installed") == 1
 
 
+def test_durable_survivor_not_marked_despite_duplicate_snapshot(cfg):
+    # Same visible bullet: a durable preference (higher priority) and a snapshot
+    # duplicate elsewhere, both old. The surviving durable copy must NOT be marked
+    # stale even though the snapshot supplied a last_seen for the shared key.
+    reflections = (
+        "# Reflections\n\n"
+        "## Preferences & Opinions\n"  # higher priority, durable
+        f"- 🔴 Prefers Python 3.11 for new projects <!--om: id=ome_1 kind=preference last_seen={_iso(90)}-->\n"
+        "## Active Projects\n"  # lower priority, snapshot duplicate
+        f"- 🔴 Prefers Python 3.11 for new projects <!--om: id=ome_2 kind=snapshot last_seen={_iso(90)}-->\n"
+    )
+    _write(cfg, reflections)
+    payload = sm.build_startup_payload(cfg, budget_chars=24000)
+    assert payload.text.lower().count("prefers python 3.11") == 1
+    assert "verify" not in payload.text
+    report = sm.startup_quality_report(cfg, budget_chars=24000)
+    assert report["stale_operational_facts"] == []
+
+
+def test_distinct_project_fields_are_not_deduped(cfg):
+    # Sibling project subsections carry identical short fields that are DISTINCT
+    # facts about distinct projects. Dedup must not collapse them or vanish a
+    # whole project from both the payload and overflow.
+    reflections = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        "### Alpha\n- Status: Active\n- Owner: Bryan\n"
+        "### Beta\n- Status: Active\n- Owner: Bryan\n"
+        "### Gamma\n- Status: Active\n- Owner: Bryan\n"
+    )
+    _write(cfg, reflections)
+    payload = sm.build_startup_payload(cfg, budget_chars=24000)
+    text = payload.text.lower()
+    for project in ("alpha", "beta", "gamma"):
+        assert project in text
+    # Each project keeps its own Status/Owner fields (not collapsed to one).
+    assert text.count("status: active") == 3
+    assert text.count("owner: bryan") == 3
+
+
 def test_fact_seen_recently_elsewhere_is_not_marked_stale(cfg):
     # Same fact: old copy in a higher-priority section, recent copy elsewhere.
     # The surviving (deduped) copy must NOT be marked stale — freshness uses the

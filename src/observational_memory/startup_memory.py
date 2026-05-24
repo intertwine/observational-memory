@@ -328,6 +328,11 @@ def _annotate_and_strip(body: str, fresh_map: dict[str, datetime], *, now: datet
 def _annotate_line_with_map(line: str, fresh_map: dict[str, datetime], *, now: datetime, freshness_days: int) -> str:
     if not _is_bullet(line):
         return line
+    # The surviving line's own kind= is authoritative: a durable fact that won
+    # dedup is never marked, even if a duplicate snapshot put its key in the map.
+    kind = _KIND_RE.search(line)
+    if kind and kind.group(1).lower() in _DURABLE_KINDS:
+        return line
     visible, metadata = _split_visible_and_metadata(line)
     if _FRESHNESS_MARKER in visible.lower() or not _looks_operational(visible):
         return line
@@ -368,6 +373,38 @@ def _has_visible_content(body: str) -> bool:
     return False
 
 
+def _stale_facts_from_payload(text: str, *, now: datetime) -> list[dict]:
+    """Extract the operational facts the payload actually marked stale.
+
+    Parsing the emitted payload keeps the report consistent with injected context
+    by construction — it honors dedup, the durable-kind guard, and the
+    freshest-across-sections logic without re-deriving any of them.
+    """
+    facts: list[dict] = []
+    section = ""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            section = stripped.lstrip("#").strip()
+            continue
+        if not _is_bullet(line) or not _FRESHNESS_MARKER_RE.search(line):
+            continue
+        date_match = re.search(r"as of (\d{4}-\d{2}-\d{2})", line)
+        as_of = date_match.group(1) if date_match else ""
+        ts = _parse_iso_ts(as_of) if as_of else None
+        clean = re.sub(r"^[-*]\s+", "", _FRESHNESS_MARKER_RE.sub("", line).strip()).strip()
+        clean = re.sub(r"^[🔴🟡🟢⚪️🔵🟠]\s*", "", clean).strip()
+        facts.append(
+            {
+                "section": section,
+                "text": clean,
+                "as_of": as_of,
+                "age_days": (now - ts).days if ts else None,
+            }
+        )
+    return facts
+
+
 def startup_quality_report(
     config: Config,
     *,
@@ -390,35 +427,10 @@ def startup_quality_report(
     ordered = sorted(stripped, key=lambda item: (-item.priority, item.source, item.heading, item.handle))
     deduped, removed = _dedupe_startup_chunks(ordered)
 
-    now = datetime.now(timezone.utc)
-    days = _freshness_days()
-    raw_chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=False)
-    # Use the same global freshest-last_seen logic as the payload, so the report
-    # agrees with what's actually annotated, and list each fact once.
-    fresh_map = _operational_freshness_map(raw_chunks)
-    stale: list[dict] = []
-    reported: set[str] = set()
-    for chunk in raw_chunks:
-        for line in chunk.body.split("\n"):
-            if _operational_last_seen(line) is None:
-                continue
-            key = _normalize_bullet(line)
-            if not key or key in reported:
-                continue
-            freshest = fresh_map.get(key)
-            if freshest is None or (now - freshest).days < days:
-                continue
-            reported.add(key)
-            visible, _metadata = _split_visible_and_metadata(line)
-            clean = _FRESHNESS_MARKER_RE.sub("", re.sub(r"^[-*]\s+", "", visible.strip())).strip()
-            stale.append(
-                {
-                    "section": chunk.heading,
-                    "text": clean,
-                    "as_of": freshest.strftime("%Y-%m-%d"),
-                    "age_days": (now - freshest).days,
-                }
-            )
+    # Derive stale facts from the payload's actual freshness markers, so the
+    # report is consistent with the emitted context by construction (it honors
+    # dedup, the durable-kind guard, and the freshest-across-sections logic).
+    stale = _stale_facts_from_payload(payload.text, now=datetime.now(timezone.utc))
 
     included = set(payload.included_handles)
     by_section = [
@@ -448,6 +460,16 @@ def _next_nonblank_indent(lines: list[str], idx: int) -> int:
     return 0
 
 
+def _is_project_subsection(chunk: StartupChunk) -> bool:
+    """True for a per-project Active Projects SUBSECTION (e.g. startup:active:active-projects:alpha).
+
+    Only subsection chunks (with a project slug) are exempt — their identical
+    short fields are distinct per-project facts. The flat "## Active Projects"
+    chunk (handle without a trailing project slug) still de-dupes normally.
+    """
+    return chunk.handle.startswith("startup:active:active-projects:")
+
+
 def _dedupe_startup_chunks(chunks: list[StartupChunk]) -> tuple[list[StartupChunk], list[str]]:
     """Drop bullets already shown in an earlier (higher-priority) chunk.
 
@@ -456,11 +478,20 @@ def _dedupe_startup_chunks(chunks: list[StartupChunk]) -> tuple[list[StartupChun
     for the quality report. Only *top-level leaf* bullets are de-duplicated:
     bullets with nested children are kept intact so dedup can never orphan a
     sub-bullet. Headings, prose, and nested bullets are preserved.
+
+    Active-project subsections are EXEMPT: sibling projects routinely carry
+    identical short structured fields ("- Status: Active", "- Owner: Bryan") that
+    are distinct facts about distinct projects, not repeated guidance. Deduping
+    them would erase project fields (or vanish a whole project). Dedup targets
+    repeated profile/working-contract guidance, not per-project fields.
     """
     seen: set[str] = set()
     removed: list[str] = []
     out: list[StartupChunk] = []
     for chunk in chunks:
+        if _is_project_subsection(chunk):
+            out.append(chunk)  # keep verbatim; don't dedup distinct project fields
+            continue
         kept_lines: list[str] = []
         lines = chunk.body.split("\n")
         for i, line in enumerate(lines):
