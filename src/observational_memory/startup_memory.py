@@ -362,6 +362,9 @@ def startup_quality_report(
             seen = _LAST_SEEN_RE.search(line)
             if not seen:
                 continue
+            kind = _KIND_RE.search(line)
+            if kind and kind.group(1).lower() in _DURABLE_KINDS:
+                continue  # mirror the annotation path: durable facts aren't stale
             visible, _metadata = _split_visible_and_metadata(line)
             if not _looks_operational(visible):
                 continue

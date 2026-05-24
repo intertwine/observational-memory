@@ -148,6 +148,23 @@ def test_dedup_does_not_orphan_nested_children():
     assert "uses pytest" in low_body
 
 
+def test_quality_report_excludes_durable_kind_from_stale(cfg):
+    # The report's stale list must agree with the payload: a durable-kind bullet
+    # with version-like text is never reported as a stale operational fact.
+    reflections = (
+        "# Reflections\n\n"
+        "## Preferences & Opinions\n"
+        f"- 🔴 Prefers Python 3.11 for new projects <!--om: id=ome_p kind=preference last_seen={_iso(90)}-->\n"
+        "## Active Projects\n"
+        f"- 🔴 tool version 9.9.9 installed <!--om: id=ome_v kind=snapshot last_seen={_iso(90)}-->\n"
+    )
+    _write(cfg, reflections)
+    report = sm.startup_quality_report(cfg, budget_chars=24000)
+    texts = " ".join(fact["text"].lower() for fact in report["stale_operational_facts"])
+    assert "python 3.11" not in texts  # durable preference excluded
+    assert "tool version 9.9.9" in texts  # snapshot still reported
+
+
 def test_durable_kind_not_freshness_marked(cfg):
     # Operational-looking text (version token) but kind=preference -> never marked.
     reflections = (
