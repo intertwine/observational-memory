@@ -16,7 +16,7 @@ Route the startup pack when the host can provide more detail:
 
 ```bash
 om context --for codex --cwd "$PWD" --task "fix cluster validation docs"
-om context --for claude --cwd "$PWD" --task "prepare v0.6.4 release notes"
+om context --for claude --cwd "$PWD" --task "prepare v0.6.6 release notes"
 ```
 
 Control the budget:
@@ -34,6 +34,23 @@ startup:profile:preferences-opinions
 
 For large memory corpora, startup context is a projection rather than a full dump.
 `om context` can emit a compact `Working Profile`, strip inline OM provenance comments from startup output, and split active context by project-level subsections. The full generated Markdown remains available through recall handles.
+
+### Quality: freshness, dedup, and scope
+
+As your memory grows, startup context applies three quality passes so the budget is spent on signal, not noise:
+
+- **Deduplication.** A bullet that appears in more than one section is shown once, in the highest-priority section. (Per-project Active Projects fields like `Status` or `Owner` are kept distinct — only repeated profile guidance is collapsed.)
+- **Freshness.** Operational facts (tool versions, install status) older than `OM_STARTUP_FRESHNESS_DAYS` (default `14`) get an `(as of <date> — verify)` marker, so the agent knows whether to trust the value or check live. Durable preferences and identity facts are never marked.
+- **Scope.** The `--cwd`/`--task` you pass (the SessionStart hook passes them) give the matching project first claim on the budget; unrelated active-project inventory overflows to recall handles instead of crowding out the current work.
+
+Inspect all three with the diagnostic:
+
+```bash
+om context --quality-report          # human-readable
+om context --quality-report --json   # machine-readable
+```
+
+It reports duplicate bullets dropped, operational facts that look stale, budget usage per included section, and what overflowed to recall. See [`configuration.md`](configuration.md#quality-freshness-dedup-and-scope) for details.
 
 ## Recall
 

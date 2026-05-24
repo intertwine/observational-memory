@@ -171,6 +171,10 @@ ENV_FILE_TEMPLATE = """\
 # target-size doc; bounds the chunked fold's re-send cost):
 # OM_REFLECTOR_CONTEXT_MAX_CHARS=48000
 #
+# Startup context: mark operational facts (tool versions/install status) older
+# than this many days with "(as of <date> — verify)" (default 14):
+# OM_STARTUP_FRESHNESS_DAYS=14
+#
 # ChatGPT Codex reasoning effort (low|medium|high|xhigh). Lower = faster/cheaper.
 # Default: observer=low, reflector=backend default. Per-op overrides win:
 # OM_OPENAI_CHATGPT_REASONING_EFFORT=

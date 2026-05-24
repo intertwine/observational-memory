@@ -4,19 +4,20 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.6.5`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.6.6`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
+- host-local usage/cost tracking and budgets with `om usage` (SQLite `usage.sqlite`, shipped pricing snapshot, hard/soft token & dollar budgets, `om doctor` integration)
+- offline reflection via the API-key OpenAI Batch API (`om reflect --async`, `om jobs list|poll|show|cancel`, `OM_OPENAI_ASYNC_MODE`)
+- observe/reflect cost & latency controls (bounded reflector input via `OM_REFLECTOR_CONTEXT_MAX_CHARS`, Codex reasoning effort via `OM_OPENAI_CHATGPT_REASONING_EFFORT`, Anthropic prompt caching)
+- startup-context quality controls (cross-section dedup, operational-fact freshness markers, cwd/task scope, `om context --quality-report`)
 - `om login` for OpenAI ChatGPT and xAI SuperGrok subscriptions (host-local token store, Codex Responses-API routing, per-workflow provider selection)
 - budgeted startup context with `om context`
 - first-class recall with `om recall`
 - first-class Grok Build TUI hooks and transcript observation
 - richer reflection metadata and host-local scope controls
-- opt-in OM Cluster sync
-- stdlib relay server through `om-relay` and `om cluster relay serve`
-- relay health checks through `om cluster relay health`
-- public-safe cluster validation docs
+- opt-in OM Cluster sync, stdlib relay server (`om-relay`, `om cluster relay serve`), relay health checks, and public-safe cluster validation docs
 
 ## Build And Test
 
@@ -135,4 +136,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-`v0.6.4` has release notes in `docs/RELEASE-0.6.4.md`. Future release steps require explicit user approval.
+`v0.6.6` has release notes in `docs/RELEASE-0.6.6.md`. Future release steps require explicit user approval.
