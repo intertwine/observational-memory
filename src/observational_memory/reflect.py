@@ -261,7 +261,11 @@ def _bound_reflections_context(reflections: str, max_chars: int) -> str:
     if max_chars <= 0 or len(reflections) <= max_chars:
         return reflections
     marker = "\n\n[... older reflections truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS ...]\n"
-    head = reflections[: max(max_chars - len(marker), 0)]
+    # For an absurdly small cap (smaller than the marker) just hard-truncate so
+    # the result never exceeds max_chars and always carries some real content.
+    if max_chars <= len(marker):
+        return reflections[:max_chars]
+    head = reflections[: max_chars - len(marker)]
     _LOGGER.warning(
         "reflections.md context (%d chars) exceeds OM_REFLECTOR_CONTEXT_MAX_CHARS=%d; "
         "sending the head only. Raise the cap or compress reflections to avoid dropping older sections.",
