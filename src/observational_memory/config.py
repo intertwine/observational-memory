@@ -131,6 +131,15 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _safe_float(value: str | None, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value.strip().replace("_", "").replace(",", ""))
+    except (AttributeError, ValueError):
+        return default
+
+
 ENV_FILE_TEMPLATE = """\
 # Observational Memory — API Keys
 # This file is sourced by om, its hooks, and its background scheduler jobs.
@@ -198,6 +207,23 @@ ENV_FILE_TEMPLATE = """\
 
 # Codex observer polling cadence (minutes)
 # OM_CODEX_OBSERVER_INTERVAL_MINUTES=15
+
+# Usage tracking, cost estimation, and budgets (host-local; never synced).
+# Records every LLM call to usage.sqlite next to your memory files. Inspect with
+# `om usage status` / `om usage tail`; configure with `om usage budget`.
+# OM_USAGE_TRACKING=1                  # 1=on (default), 0=off (no DB, no overhead)
+# OM_USAGE_DB=                         # override DB path (default: <memory_dir>/usage.sqlite)
+# OM_PRICING_OVERRIDES=                # pricing overrides (default: <config_dir>/pricing.toml)
+#
+# Budgets: OM_BUDGET_[<OPERATION>_]<WINDOW>_<UNIT>
+#   OPERATION (optional): OBSERVER | REFLECTOR   WINDOW: DAILY|MONTHLY|SESSION   UNIT: USD|TOKENS
+# OM_BUDGET_DAILY_USD=5.00
+# OM_BUDGET_MONTHLY_USD=100.00
+# OM_BUDGET_REFLECTOR_DAILY_USD=1.00
+# OM_BUDGET_DAILY_TOKENS=2_000_000
+# OM_BUDGET_MODE=hard                  # hard (block) | soft (warn); per-budget override: <KEY>_MODE
+# OM_BUDGET_SOFT_THRESHOLD=0.8         # warn at 80% of a cap
+# OM_BUDGET_BYPASS=0                   # one-shot: 1 lets a single call exceed a hard cap
 """
 
 
@@ -295,6 +321,15 @@ class Config:
     qmd_rerank_model: str | None = field(default_factory=lambda: os.environ.get("OM_QMD_RERANK_MODEL"))
     qmd_generate_model: str | None = field(default_factory=lambda: os.environ.get("OM_QMD_GENERATE_MODEL"))
 
+    # Usage tracking, cost estimation, and budgets (host-local; never synced).
+    # The DB and pricing override paths are derived properties below so that a
+    # custom memory_dir / env_file (e.g. tmp_path in tests) keeps them local too.
+    usage_tracking: bool = field(default_factory=lambda: _env_flag("OM_USAGE_TRACKING", True))
+    budget_mode: str = field(default_factory=lambda: os.environ.get("OM_BUDGET_MODE", "hard"))
+    budget_soft_threshold: float = field(
+        default_factory=lambda: _safe_float(os.environ.get("OM_BUDGET_SOFT_THRESHOLD"), 0.8)
+    )
+
     @property
     def observations_path(self) -> Path:
         return self.memory_dir / "observations.md"
@@ -318,6 +353,22 @@ class Config:
     @property
     def search_index_dir(self) -> Path:
         return self.memory_dir / ".search-index"
+
+    @property
+    def usage_db_path(self) -> Path:
+        """Host-local usage SQLite DB. Never materialized or synced via OM Cluster."""
+        override = os.environ.get("OM_USAGE_DB")
+        if override:
+            return Path(override).expanduser()
+        return self.memory_dir / "usage.sqlite"
+
+    @property
+    def pricing_overrides_path(self) -> Path:
+        """Optional per-host pricing override file (wins over the shipped snapshot)."""
+        override = os.environ.get("OM_PRICING_OVERRIDES")
+        if override:
+            return Path(override).expanduser()
+        return self.env_file.parent / "pricing.toml"
 
     @property
     def auth_file(self) -> Path:

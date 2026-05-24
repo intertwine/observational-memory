@@ -3294,6 +3294,34 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     except Exception as e:
         _check("OM Cluster", "WARN", f"diagnostics failed: {e}")
 
+    # 14b. Usage tracking, budgets, and pricing (host-local; never synced)
+    try:
+        from .usage import resolve_budgets
+        from .usage.pricing import load_pricing
+
+        if config.usage_tracking:
+            db = config.usage_db_path
+            _check("Usage tracking", "PASS", f"{db} ({'present' if db.exists() else 'not created yet'})")
+            budgets = resolve_budgets(config)
+            if budgets:
+                _check("Usage budgets", "PASS", f"{len(budgets)} configured (default mode: {config.budget_mode})")
+            else:
+                _check("Usage budgets", "PASS", "none configured", fix="Run: om usage budget")
+            pricing = load_pricing(config.pricing_overrides_path)
+            detail = f"snapshot {pricing.snapshot_date}"
+            if pricing.override_path:
+                detail += f" (+override {pricing.override_path})"
+            _check("Usage pricing", "PASS", detail)
+        else:
+            _check(
+                "Usage tracking",
+                "WARN",
+                "disabled (OM_USAGE_TRACKING=0)",
+                fix="Set OM_USAGE_TRACKING=1 to record token spend",
+            )
+    except Exception as e:
+        _check("Usage tracking", "WARN", f"could not inspect usage subsystem: {e}")
+
     # 15. Platform
     _check("Platform", "PASS", sys.platform)
 
@@ -5243,3 +5271,293 @@ def auth_refresh_cmd(provider: str | None) -> None:
         auth_refresh(provider)
     except AuthError as exc:
         raise click.ClickException(format_auth_error(exc)) from exc
+
+
+# --- om usage: token/cost tracking and budgets (host-local) ---
+
+_USAGE_WINDOWS = {"daily": "DAILY", "monthly": "MONTHLY", "session": "SESSION"}
+
+
+def _usage_since_iso(since: str | None) -> str | None:
+    """Convert a YYYY-MM-DD date into a UTC ISO timestamp (start of day)."""
+    if not since:
+        return None
+    try:
+        dt = datetime.strptime(since.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise click.ClickException(f"--since must be YYYY-MM-DD: {exc}") from exc
+    return dt.isoformat()
+
+
+def _upsert_env_file(config: Config, updates: dict[str, str | None]) -> None:
+    """Insert/replace/remove KEY=value lines in the env file, preserving comments.
+
+    A value of ``None`` removes the key. New keys are appended. The env file is
+    created from template first if missing.
+    """
+    from .config import is_windows
+
+    config.ensure_env_file()
+    path = config.env_file
+    lines = path.read_text().splitlines() if path.exists() else []
+    remaining = dict(updates)
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in remaining:
+                value = remaining.pop(key)
+                if value is None:
+                    continue
+                out.append(f"{key}={value}")
+                continue
+        out.append(line)
+    for key, value in remaining.items():
+        if value is None:
+            continue
+        out.append(f"{key}={value}")
+    text = "\n".join(out)
+    if not text.endswith("\n"):
+        text += "\n"
+    path.write_text(text)
+    if not is_windows():
+        path.chmod(0o600)
+
+
+def _budget_env_keys(operation: str | None) -> list[str]:
+    prefix = f"{operation.upper()}_" if operation else ""
+    keys: list[str] = []
+    for win in _USAGE_WINDOWS.values():
+        for unit in ("USD", "TOKENS"):
+            keys.append(f"OM_BUDGET_{prefix}{win}_{unit}")
+    return keys
+
+
+@cli.group()
+def usage() -> None:
+    """Inspect LLM token usage, cost, and budgets (host-local, never synced)."""
+
+
+@usage.command("status")
+@click.option("--since", default=None, help="Only count calls on/after this UTC date (YYYY-MM-DD).")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def usage_status(ctx: click.Context, since: str | None, as_json: bool) -> None:
+    """Show usage totals, budgets, and the active pricing snapshot."""
+    from .usage import format_status, status_payload
+
+    config = ctx.obj["config"]
+    since_utc = _usage_since_iso(since)
+    if as_json:
+        click.echo(json.dumps(status_payload(config, since_utc=since_utc), indent=2))
+    else:
+        click.echo(format_status(config, since_utc=since_utc))
+
+
+@usage.command("tail")
+@click.option("--limit", default=20, show_default=True, type=int, help="How many recent calls to show.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def usage_tail(ctx: click.Context, limit: int, as_json: bool) -> None:
+    """List the most recent recorded LLM calls (newest first)."""
+    from .usage import format_tail, tail_payload
+
+    config = ctx.obj["config"]
+    if as_json:
+        click.echo(json.dumps(tail_payload(config, limit=limit), indent=2))
+    else:
+        click.echo(format_tail(config, limit=limit))
+
+
+def _validate_cap(label: str, raw: str) -> str:
+    """Reject caps that resolve_budgets() would silently drop (unparsable or <= 0).
+
+    Uses the same parser as enforcement so a written budget is always enforceable.
+    """
+    from .usage.budgets import _parse_number
+
+    parsed = _parse_number(raw)
+    if parsed is None or parsed <= 0:
+        raise click.ClickException(f"Invalid {label} cap {raw!r}: must be a positive number.")
+    return raw
+
+
+@usage.group("budget", invoke_without_command=True)
+@click.pass_context
+def usage_budget(ctx: click.Context) -> None:
+    """Configure token/dollar budgets. With no subcommand, runs an interactive wizard."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _usage_budget_wizard(ctx.obj["config"])
+
+
+def _usage_budget_wizard(config: Config) -> None:
+    click.echo("Configure an Observational Memory budget (written to your env file).")
+    scope = click.prompt("Scope", type=click.Choice(["global", "observer", "reflector"]), default="global")
+    window = click.prompt("Window", type=click.Choice(list(_USAGE_WINDOWS)), default="daily")
+    usd = click.prompt("USD cap (blank to skip)", default="", show_default=False).strip()
+    tokens = click.prompt("Token cap (blank to skip)", default="", show_default=False).strip()
+    if not usd and not tokens:
+        raise click.ClickException("Set at least one of USD cap / token cap.")
+    mode = click.prompt("Enforcement", type=click.Choice(["hard", "soft"]), default="hard")
+
+    if usd:
+        usd = _validate_cap("USD", usd)
+    if tokens:
+        tokens = _validate_cap("token", tokens)
+
+    operation = None if scope == "global" else scope
+    prefix = f"{operation.upper()}_" if operation else ""
+    win = _USAGE_WINDOWS[window]
+    updates: dict[str, str | None] = {}
+    if usd:
+        key = f"OM_BUDGET_{prefix}{win}_USD"
+        updates[key] = usd
+        updates[f"{key}_MODE"] = mode
+    if tokens:
+        key = f"OM_BUDGET_{prefix}{win}_TOKENS"
+        updates[key] = tokens
+        updates[f"{key}_MODE"] = mode
+    _upsert_env_file(config, updates)
+    click.echo(f"Wrote {len([k for k in updates if not k.endswith('_MODE')])} budget(s) to {config.env_file}:")
+    for key, value in updates.items():
+        click.echo(f"  {key}={value}")
+
+
+@usage_budget.command("set")
+@click.option("--operation", type=click.Choice(["observer", "reflector"]), default=None, help="Scope to one operation.")
+@click.option("--daily-usd", default=None, help="Daily USD cap.")
+@click.option("--monthly-usd", default=None, help="Monthly USD cap.")
+@click.option("--session-usd", default=None, help="Per-session USD cap.")
+@click.option("--daily-tokens", default=None, help="Daily token cap.")
+@click.option("--monthly-tokens", default=None, help="Monthly token cap.")
+@click.option("--session-tokens", default=None, help="Per-session token cap.")
+@click.option("--soft/--hard", "soft", default=None, help="Enforcement for the budgets set here.")
+@click.pass_context
+def usage_budget_set(
+    ctx: click.Context,
+    operation: str | None,
+    daily_usd: str | None,
+    monthly_usd: str | None,
+    session_usd: str | None,
+    daily_tokens: str | None,
+    monthly_tokens: str | None,
+    session_tokens: str | None,
+    soft: bool | None,
+) -> None:
+    """Set one or more budgets non-interactively (writes to the env file)."""
+    config = ctx.obj["config"]
+    prefix = f"{operation.upper()}_" if operation else ""
+    pairs = {
+        ("DAILY", "USD"): daily_usd,
+        ("MONTHLY", "USD"): monthly_usd,
+        ("SESSION", "USD"): session_usd,
+        ("DAILY", "TOKENS"): daily_tokens,
+        ("MONTHLY", "TOKENS"): monthly_tokens,
+        ("SESSION", "TOKENS"): session_tokens,
+    }
+    updates: dict[str, str | None] = {}
+    for (win, unit), value in pairs.items():
+        if value is None:
+            continue
+        key = f"OM_BUDGET_{prefix}{win}_{unit}"
+        updates[key] = _validate_cap(f"--{win.lower()}-{unit.lower()}", value)
+        if soft is not None:
+            updates[f"{key}_MODE"] = "soft" if soft else "hard"
+    if not updates:
+        raise click.ClickException("Provide at least one cap, e.g. --daily-usd 5.00")
+    _upsert_env_file(config, updates)
+    for key, value in updates.items():
+        click.echo(f"set {key}={value}")
+
+
+@usage_budget.command("clear")
+@click.option(
+    "--operation", type=click.Choice(["observer", "reflector"]), default=None, help="Clear one operation's budgets."
+)
+@click.option("--all", "clear_all", is_flag=True, help="Clear ALL configured budgets.")
+@click.pass_context
+def usage_budget_clear(ctx: click.Context, operation: str | None, clear_all: bool) -> None:
+    """Remove configured budgets from the env file."""
+    config = ctx.obj["config"]
+    if not operation and not clear_all:
+        raise click.ClickException("Specify --operation <op> or --all.")
+    targets: list[str] = []
+    if clear_all:
+        for op in (None, "observer", "reflector"):
+            targets += _budget_env_keys(op)
+    else:
+        targets += _budget_env_keys(operation)
+    updates: dict[str, str | None] = {}
+    for key in targets:
+        updates[key] = None
+        updates[f"{key}_MODE"] = None
+    _upsert_env_file(config, updates)
+    click.echo(f"Cleared budgets for {'all scopes' if clear_all else operation} in {config.env_file}.")
+
+
+@usage.group("pricing")
+def usage_pricing() -> None:
+    """Inspect or override per-model pricing (USD per 1M tokens)."""
+
+
+@usage_pricing.command("show")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def usage_pricing_show(ctx: click.Context, as_json: bool) -> None:
+    """Show the effective pricing table (snapshot merged with any override)."""
+    from .usage.pricing import load_pricing
+
+    config = ctx.obj["config"]
+    pricing = load_pricing(config.pricing_overrides_path)
+    if as_json:
+        payload = {
+            "snapshot_date": pricing.snapshot_date,
+            "override_path": str(pricing.override_path) if pricing.override_path else None,
+            "models": {
+                m: {
+                    "input": pricing.rates[m]["input"],
+                    "output": pricing.rates[m]["output"],
+                    "source": pricing.sources.get(m, "builtin"),
+                }
+                for m in sorted(pricing.rates)
+            },
+        }
+        click.echo(json.dumps(payload, indent=2))
+        return
+    click.echo(f"Pricing snapshot: {pricing.snapshot_date} (USD per 1M tokens)")
+    if pricing.override_path:
+        click.echo(f"Override file:    {pricing.override_path}")
+    click.echo(f"{'model':<26} {'input':>10} {'output':>10}  source")
+    for model in sorted(pricing.rates):
+        rate = pricing.rates[model]
+        source = pricing.sources.get(model, "builtin")
+        click.echo(f"{model:<26} {rate['input']:>10.2f} {rate['output']:>10.2f}  {source}")
+
+
+@usage_pricing.command("set")
+@click.option("--model", required=True, help="Model name (e.g. gpt-5.5).")
+@click.option("--input", "input_usd", required=True, type=float, help="USD per 1M input tokens.")
+@click.option("--output", "output_usd", required=True, type=float, help="USD per 1M output tokens.")
+@click.pass_context
+def usage_pricing_set(ctx: click.Context, model: str, input_usd: float, output_usd: float) -> None:
+    """Add or update a per-host pricing override."""
+    from .usage.pricing import write_override
+
+    config = ctx.obj["config"]
+    write_override(config.pricing_overrides_path, model, input_usd, output_usd)
+    click.echo(f"set {model}: input={input_usd:g} output={output_usd:g} -> {config.pricing_overrides_path}")
+
+
+@usage_pricing.command("reset")
+@click.pass_context
+def usage_pricing_reset(ctx: click.Context) -> None:
+    """Remove the per-host pricing override file (revert to the shipped snapshot)."""
+    config = ctx.obj["config"]
+    path = config.pricing_overrides_path
+    if path.exists():
+        path.unlink()
+        click.echo(f"Removed {path}; using shipped snapshot.")
+    else:
+        click.echo("No override file; already using the shipped snapshot.")

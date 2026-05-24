@@ -5,6 +5,16 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _disable_usage_tracking_by_default(monkeypatch):
+    """Keep the usage subsystem from writing to a real DB during unrelated tests.
+
+    Usage/budget tests opt back in by setting ``OM_USAGE_TRACKING=1`` and pointing
+    ``OM_USAGE_DB`` at a tmp path.
+    """
+    monkeypatch.setenv("OM_USAGE_TRACKING", "0")
+
+
 @pytest.fixture
 def isolated_om_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
