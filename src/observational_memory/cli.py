@@ -484,6 +484,12 @@ def _format_location(path: str | None, line: int | None) -> str | None:
 @click.option("--cwd", "routing_cwd", help="Current working directory for task-aware startup routing.")
 @click.option("--task", help="Current task summary for task-aware startup routing.")
 @click.option("--for", "agent", help="Host agent name, e.g. codex, claude, cowork, hermes.")
+@click.option(
+    "--quality-report",
+    is_flag=True,
+    help="Print a startup-context quality report (duplicates, stale facts, budget by section) instead of the payload.",
+)
+@click.option("--json", "as_json", is_flag=True, help="With --quality-report, emit JSON.")
 @click.pass_context
 def context(
     ctx: click.Context,
@@ -491,17 +497,29 @@ def context(
     routing_cwd: str | None,
     task: str | None,
     agent: str | None,
+    quality_report: bool,
+    as_json: bool,
 ) -> None:
     """Generate session-start JSON with budgeted startup memory.
 
     Called by the SessionStart hook. Outputs JSON with additionalContext
-    containing compact generated memory and recall handles.
+    containing compact generated memory and recall handles. With
+    ``--quality-report`` it prints a diagnostic instead.
     """
     import json as json_mod
 
-    from .startup_memory import build_startup_payload
+    from .startup_memory import build_startup_payload, startup_quality_report
 
     config = ctx.obj["config"]
+
+    if quality_report:
+        report = startup_quality_report(config, budget_chars=budget_chars, cwd=routing_cwd, task=task, agent=agent)
+        if as_json:
+            click.echo(json_mod.dumps(report, indent=2))
+        else:
+            click.echo(_format_quality_report(report))
+        return
+
     try:
         from .sync.config import cluster_feature_enabled, load_cluster_config
         from .sync.engine import sync_cluster
@@ -520,6 +538,28 @@ def context(
         }
     }
     click.echo(json_mod.dumps(output))
+
+
+def _format_quality_report(report: dict) -> str:
+    lines = [
+        "Startup context quality report",
+        f"  budget: {report['used_chars']} / {report['budget_chars']} chars used",
+        f"  duplicate bullets dropped: {report['duplicate_count']}",
+    ]
+    for dup in report["duplicate_bullets"]:
+        lines.append(f"    - {dup}")
+    stale = report["stale_operational_facts"]
+    lines.append(f"  stale operational facts: {len(stale)}")
+    for fact in stale:
+        lines.append(f"    - [{fact['section']}] {fact['text']} (as of {fact['as_of']}, {fact['age_days']}d)")
+    lines.append("  budget by section:")
+    for section in report["budget_by_section"]:
+        lines.append(f"    {section['chars']:>6}  {section['heading']}")
+    if report["overflow_handles"]:
+        lines.append(f"  overflow (recall handles): {len(report['overflow_handles'])}")
+        for handle in report["overflow_handles"]:
+            lines.append(f"    - {handle}")
+    return "\n".join(lines)
 
 
 @cli.command()

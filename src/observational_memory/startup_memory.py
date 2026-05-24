@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config
@@ -14,7 +16,23 @@ DEFAULT_STARTUP_BUDGET_CHARS = 24000
 MIN_STARTUP_BUDGET_CHARS = 2000
 LARGE_STARTUP_CHUNK_CHARS = 8000
 STARTUP_PROFILE_PREFERENCE_LIMIT = 16
+# Priority boost for a chunk matching the current cwd/task route terms.
+_ROUTE_MATCH_BOOST = 6
+# Operational facts (tool versions, install status) older than this many days are
+# annotated as potentially stale in startup context (OM_STARTUP_FRESHNESS_DAYS).
+DEFAULT_STARTUP_FRESHNESS_DAYS = 14
 _OM_METADATA_COMMENT_RE = re.compile(r"\s*<!--om:.*?-->")
+# Capture an ISO timestamp value, ending on a digit so the trailing "-->" of the
+# metadata comment is never swallowed.
+_LAST_SEEN_RE = re.compile(r"last_seen=(\d{4}-\d{2}-\d{2}(?:[T ][\d:.+\-]*\d)?)")
+# A version-number token or an install/version status word marks a bullet as an
+# "operational" fact whose truth decays (the agent can verify it live).
+_VERSION_TOKEN_RE = re.compile(r"\bv?\d+\.\d+(?:\.\d+)?\b")
+_OPERATIONAL_WORD_RE = re.compile(
+    r"\b(installed|install status|version|upgraded|downgraded|running|available|enabled|disabled|up to date)\b",
+    re.IGNORECASE,
+)
+_FRESHNESS_MARKER = "as of"
 
 
 @dataclass(frozen=True)
@@ -86,10 +104,17 @@ def build_startup_payload(
     header = _startup_header(budget=budget, cwd=cwd, task=task, agent=agent)
     footer = _recall_footer(task=task, cwd=cwd)
 
+    # De-duplicate bullets across sections in priority order (the highest-priority
+    # section keeps each bullet) before spending budget on repeats.
+    ordered = sorted(chunks, key=lambda item: (-item.priority, item.source, item.heading, item.handle))
+    ordered, _removed = _dedupe_startup_chunks(ordered)
+
     used = len(header) + len(footer)
     selected: list[StartupChunk] = []
     overflow: list[StartupChunk] = []
-    for chunk in sorted(chunks, key=lambda item: (-item.priority, item.source, item.heading, item.handle)):
+    for chunk in ordered:
+        if not _has_visible_content(chunk.body):
+            continue  # emptied by dedup — nothing left to show
         chunk_text = "\n\n" + chunk.body.strip()
         if used + len(chunk_text) <= budget:
             selected.append(chunk)
@@ -169,7 +194,7 @@ def _build_profile(reflections: str) -> str:
         if filtered:
             parts.extend(["", filtered.strip()])
 
-    return "\n".join(parts)
+    return _annotate_stale_operational_facts("\n".join(parts))
 
 
 def _build_active(reflections: str, observations: str) -> str:
@@ -188,7 +213,7 @@ def _build_active(reflections: str, observations: str) -> str:
     if latest_context:
         parts.extend(["", latest_context.strip()])
 
-    return "\n".join(parts)
+    return _annotate_stale_operational_facts("\n".join(parts))
 
 
 def _extract_h2_section(text: str, heading: str) -> str:
@@ -205,6 +230,181 @@ def _extract_h3_subsection(text: str, heading: str) -> str:
     pattern = _SUBSECTION_RE_TEMPLATE.format(heading=re.escape(heading))
     match = re.search(pattern, text)
     return match.group(1).rstrip() if match else ""
+
+
+# --- #50 startup quality: freshness, dedup, quality report ---
+
+
+def _freshness_days() -> int:
+    try:
+        return int(os.environ.get("OM_STARTUP_FRESHNESS_DAYS", str(DEFAULT_STARTUP_FRESHNESS_DAYS)))
+    except ValueError:
+        return DEFAULT_STARTUP_FRESHNESS_DAYS
+
+
+def _parse_iso_ts(value: str) -> datetime | None:
+    raw = value.strip().replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _looks_operational(visible: str) -> bool:
+    """True for tool-version / install-status style facts whose truth decays."""
+    return bool(_VERSION_TOKEN_RE.search(visible) or _OPERATIONAL_WORD_RE.search(visible))
+
+
+def _split_visible_and_metadata(line: str) -> tuple[str, str]:
+    match = _OM_METADATA_COMMENT_RE.search(line)
+    if not match:
+        return line, ""
+    return line[: match.start()], line[match.start() :]
+
+
+def _annotate_operational_line(line: str, *, now: datetime, freshness_days: int) -> str:
+    """Append an "(as of <date> — verify)" marker to a stale operational bullet."""
+    if not line.lstrip().startswith("-"):
+        return line
+    seen = _LAST_SEEN_RE.search(line)
+    if not seen:
+        return line
+    visible, metadata = _split_visible_and_metadata(line)
+    if _FRESHNESS_MARKER in visible.lower() or not _looks_operational(visible):
+        return line
+    last_seen = _parse_iso_ts(seen.group(1))
+    if last_seen is None or (now - last_seen).days < freshness_days:
+        return line
+    marker = f" ({_FRESHNESS_MARKER} {last_seen.strftime('%Y-%m-%d')} — verify)"
+    return visible.rstrip() + marker + metadata
+
+
+def _annotate_stale_operational_facts(
+    text: str, *, now: datetime | None = None, freshness_days: int | None = None
+) -> str:
+    if not text:
+        return text
+    now = now or datetime.now(timezone.utc)
+    days = freshness_days if freshness_days is not None else _freshness_days()
+    return "\n".join(_annotate_operational_line(line, now=now, freshness_days=days) for line in text.split("\n"))
+
+
+def _normalize_bullet(line: str) -> str:
+    """Normalize a bullet for cross-section duplicate detection.
+
+    Strips the list marker, priority emoji, markdown emphasis, and any metadata
+    comment, then casefolds and collapses whitespace.
+    """
+    visible, _metadata = _split_visible_and_metadata(line)
+    text = visible.strip()
+    text = re.sub(r"^[-*]\s+", "", text)  # list marker
+    text = re.sub(r"[🔴🟡🟢⚪️🔵🟠]", "", text)  # priority dots
+    text = text.replace("*", "").replace("`", "")  # markdown emphasis/code
+    text = re.sub(r"\s+", " ", text)
+    return text.strip().casefold()
+
+
+def _is_bullet(line: str) -> bool:
+    return line.lstrip().startswith(("- ", "* "))
+
+
+def _has_visible_content(body: str) -> bool:
+    """True if the body has any non-heading, non-blank line (survives dedup)."""
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return True
+    return False
+
+
+def startup_quality_report(
+    config: Config,
+    *,
+    budget_chars: int | None = None,
+    cwd: str | None = None,
+    task: str | None = None,
+    agent: str | None = None,
+) -> dict:
+    """Diagnostic for ``om context --quality-report``.
+
+    Reports cross-section duplicate bullets dropped from the payload, operational
+    facts (tool versions / install status) that look stale, and budget usage per
+    included section.
+    """
+    ensure_startup_memory(config)
+    budget = max(int(budget_chars or DEFAULT_STARTUP_BUDGET_CHARS), MIN_STARTUP_BUDGET_CHARS)
+    payload = build_startup_payload(config, budget_chars=budget, cwd=cwd, task=task, agent=agent)
+
+    stripped = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=True)
+    ordered = sorted(stripped, key=lambda item: (-item.priority, item.source, item.heading, item.handle))
+    deduped, removed = _dedupe_startup_chunks(ordered)
+
+    now = datetime.now(timezone.utc)
+    days = _freshness_days()
+    raw_chunks = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=False)
+    stale: list[dict] = []
+    for chunk in raw_chunks:
+        for line in chunk.body.split("\n"):
+            if not _is_bullet(line):
+                continue
+            seen = _LAST_SEEN_RE.search(line)
+            if not seen:
+                continue
+            visible, _metadata = _split_visible_and_metadata(line)
+            if not _looks_operational(visible):
+                continue
+            last_seen = _parse_iso_ts(seen.group(1))
+            if last_seen is not None and (now - last_seen).days >= days:
+                stale.append(
+                    {
+                        "section": chunk.heading,
+                        "text": re.sub(r"^[-*]\s+", "", visible.strip()),
+                        "as_of": last_seen.strftime("%Y-%m-%d"),
+                        "age_days": (now - last_seen).days,
+                    }
+                )
+
+    included = set(payload.included_handles)
+    by_section = [
+        {"handle": chunk.handle, "heading": chunk.heading, "chars": len(chunk.body.strip())}
+        for chunk in deduped
+        if chunk.handle in included
+    ]
+    return {
+        "budget_chars": budget,
+        "used_chars": len(payload.text),
+        "duplicate_bullets": sorted(set(removed)),
+        "duplicate_count": len(removed),
+        "stale_operational_facts": stale,
+        "budget_by_section": by_section,
+        "overflow_handles": [item["handle"] for item in payload.overflow],
+    }
+
+
+def _dedupe_startup_chunks(chunks: list[StartupChunk]) -> tuple[list[StartupChunk], list[str]]:
+    """Drop bullets already shown in an earlier (higher-priority) chunk.
+
+    ``chunks`` must be in selection order (highest priority first). Returns the
+    de-duplicated chunks plus the list of removed (normalized) duplicate bullets
+    for the quality report. Non-bullet lines and headings are preserved.
+    """
+    seen: set[str] = set()
+    removed: list[str] = []
+    out: list[StartupChunk] = []
+    for chunk in chunks:
+        kept_lines: list[str] = []
+        for line in chunk.body.split("\n"):
+            if _is_bullet(line):
+                norm = _normalize_bullet(line)
+                if norm and norm in seen:
+                    removed.append(norm)
+                    continue
+                if norm:
+                    seen.add(norm)
+            kept_lines.append(line)
+        out.append(replace(chunk, body="\n".join(kept_lines)))
+    return out, removed
 
 
 def _filter_priority_bullets(section: str, allowed_prefixes: tuple[str, ...]) -> str:
@@ -526,7 +726,9 @@ def _chunk_priority(
         priority = 3
     route_terms = _route_terms(cwd=cwd, task=task, agent=agent)
     if route_terms and any(term in lower_body or term in lower_heading for term in route_terms):
-        priority += 5
+        # The project/section matching the current cwd/task gets first claim on
+        # budget; unmatched active-project inventory overflows to recall handles.
+        priority += _ROUTE_MATCH_BOOST
     return priority
 
 
@@ -632,8 +834,6 @@ def _shell_safe_hint(value: str) -> str:
 
 
 def _enabled_profile_section_keys() -> set[str]:
-    import os
-
     explicit = os.environ.get("OM_PROFILE_SECTIONS")
     if explicit:
         return {item.strip().lower() for item in explicit.split(",") if item.strip()}
