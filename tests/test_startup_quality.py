@@ -143,7 +143,7 @@ def test_dedupe_keeps_higher_priority_instance():
     deduped, removed = sm._dedupe_startup_chunks([high, low])
     assert "be direct" in deduped[0].body.lower()
     assert "- be direct" not in deduped[1].body.lower()  # dropped from the lower-priority chunk
-    assert removed == ["be direct"]
+    assert removed == ["Be direct"]  # readable (case-preserved) text for the report
 
 
 # --- freshness ---
@@ -258,7 +258,7 @@ def test_quality_report_shape(cfg):
     _write(cfg, reflections)
     report = sm.startup_quality_report(cfg, budget_chars=24000)
     assert report["duplicate_count"] >= 1
-    assert "prefers concise summaries" in report["duplicate_bullets"]
+    assert any(d.lower() == "prefers concise summaries" for d in report["duplicate_bullets"])
     assert len(report["stale_operational_facts"]) >= 1
     assert report["stale_operational_facts"][0]["age_days"] >= 99
     assert report["budget_by_section"]  # at least one included section sized

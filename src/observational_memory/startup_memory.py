@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,6 +59,8 @@ class StartupPayload:
     budget_chars: int
     included_handles: list[str]
     overflow: list[dict[str, str | int]]
+    # Post-annotation char size of each selected section (accurate budget usage).
+    included_sections: list[dict[str, str | int]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -66,6 +68,7 @@ class StartupPayload:
             "budget_chars": self.budget_chars,
             "included_handles": self.included_handles,
             "overflow": self.overflow,
+            "included_sections": self.included_sections,
         }
 
 
@@ -164,6 +167,9 @@ def build_startup_payload(
         overflow=[
             {"handle": chunk.handle, "heading": chunk.heading, "source": chunk.source, "chars": chunk.size}
             for chunk in overflow
+        ],
+        included_sections=[
+            {"handle": chunk.handle, "heading": chunk.heading, "chars": len(chunk.body.strip())} for chunk in selected
         ],
     )
 
@@ -371,6 +377,13 @@ def _normalize_bullet(line: str) -> str:
     return text.strip().casefold()
 
 
+def _display_bullet(line: str) -> str:
+    """Human-readable bullet text for the report (list marker + freshness marker stripped, case kept)."""
+    visible, _metadata = _split_visible_and_metadata(line)
+    text = _FRESHNESS_MARKER_RE.sub("", visible).strip()
+    return re.sub(r"^[-*]\s+", "", text).strip()
+
+
 def _is_bullet(line: str) -> bool:
     return line.lstrip().startswith(("- ", "* "))
 
@@ -436,26 +449,21 @@ def startup_quality_report(
 
     stripped = _startup_chunks(config, cwd=cwd, task=task, agent=agent, project_startup=True, strip_metadata=True)
     ordered = sorted(stripped, key=lambda item: (-item.priority, item.source, item.heading, item.handle))
-    deduped, removed = _dedupe_startup_chunks(ordered)
+    _deduped, removed = _dedupe_startup_chunks(ordered)
 
     # Derive stale facts from the payload's actual freshness markers, so the
     # report is consistent with the emitted context by construction (it honors
     # dedup, the durable-kind guard, and the freshest-across-sections logic).
     stale = _stale_facts_from_payload(payload.text, now=datetime.now(timezone.utc))
 
-    included = set(payload.included_handles)
-    by_section = [
-        {"handle": chunk.handle, "heading": chunk.heading, "chars": len(chunk.body.strip())}
-        for chunk in deduped
-        if chunk.handle in included
-    ]
     return {
         "budget_chars": budget,
         "used_chars": len(payload.text),
         "duplicate_bullets": sorted(set(removed)),
         "duplicate_count": len(removed),
         "stale_operational_facts": stale,
-        "budget_by_section": by_section,
+        # Accurate post-annotation section sizes straight from the emitted payload.
+        "budget_by_section": payload.included_sections,
         "overflow_handles": [item["handle"] for item in payload.overflow],
     }
 
@@ -510,7 +518,7 @@ def _dedupe_startup_chunks(chunks: list[StartupChunk]) -> tuple[list[StartupChun
                 # top-level leaf bullet (no nested children)
                 norm = _normalize_bullet(line)
                 if norm and norm in seen:
-                    removed.append(norm)
+                    removed.append(_display_bullet(line))  # readable text for the report
                     continue
                 if norm:
                     seen.add(norm)

@@ -299,15 +299,12 @@ Startup context applies three quality passes so a growing memory corpus stays tr
 - **Freshness.** Operational facts (tool versions, install status) get an `(as of <date> — verify)` marker once they're older than `OM_STARTUP_FRESHNESS_DAYS` (default `14`), so the agent knows whether to trust the injected value or check live. Durable preferences and identity facts are never marked.
 - **Scope.** When you pass `--cwd` / `--task` (the SessionStart hook does), the matching project gets first claim on the budget; unrelated active-project inventory overflows to recall handles instead of crowding out the current work.
 
-```bash
-OM_STARTUP_FRESHNESS_DAYS=14
-```
-
-Inspect all three with the diagnostic:
+Tune the freshness window (default 14 days) and inspect all three passes with the diagnostic:
 
 ```bash
-om context --quality-report          # human-readable
-om context --quality-report --json   # machine-readable
+# Mark operational facts older than 7 days, and see the quality report:
+OM_STARTUP_FRESHNESS_DAYS=7 om context --quality-report
+OM_STARTUP_FRESHNESS_DAYS=7 om context --quality-report --json   # machine-readable
 ```
 
 It reports duplicate bullets dropped, operational facts that look stale, budget usage per included section, and what overflowed to recall.
