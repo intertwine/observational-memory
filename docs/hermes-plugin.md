@@ -11,7 +11,7 @@ Use it when you want Hermes to read the same local-first memory as Claude Code, 
 ## Requirements
 
 - Hermes with user-installed memory provider discovery. Recent Hermes releases discover providers from `$HERMES_HOME/plugins/<name>`.
-- `observational-memory>=0.6.5,<0.7`.
+- `observational-memory>=0.6.6,<0.7`.
 - Optional: an initialized OM Cluster when you want shared memory across machines.
 
 ## Install
@@ -35,7 +35,7 @@ The `--no-enable` flag is intentional. Hermes memory providers are exclusive plu
 If Hermes does not install the Python dependency automatically, install it in the Hermes runtime:
 
 ```bash
-uv pip install "observational-memory>=0.6.5,<0.7"
+uv pip install "observational-memory>=0.6.6,<0.7"
 ```
 
 ## What Hermes Gets

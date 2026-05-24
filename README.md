@@ -11,20 +11,21 @@
 
 Observational Memory, or `om`, gives Claude Code, Codex, Grok Build TUI, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
 
-The current release is `v0.6.5`. It includes:
+The current release is `v0.6.6`. It includes:
 
+- **See and cap LLM spend** — every observe/reflect call records tokens and an estimated cost, with token/dollar budgets (hard or soft, per day/month/session) that stop a runaway job before it bills (`om usage status`, `om usage budget`)
+- **Offline reflection via OpenAI Batch** — `om reflect --async` submits a job and `om jobs poll` applies it later, at ~50% token cost on a metered OpenAI key
+- **Cheaper, faster observe/reflect** — bounded reflector input, ChatGPT Codex reasoning-effort control, and Anthropic prompt caching
+- **Higher-quality startup context** — cross-section de-duplication, freshness markers on stale operational facts, and cwd/task-aware scope, inspectable with `om context --quality-report`
 - **`om login` for your ChatGPT or SuperGrok subscription** so the observer and reflector run off your existing plan instead of a metered API key
 - first-class Grok Build TUI hooks and transcript observation
-- budgeted startup context through `om context`
-- compact startup profile projection for long-running memory corpora
-- project-level active context routing so large active files still fit
+- budgeted startup context through `om context`, with compact profile projection and project-level active-context routing
 - first-class recall through `om recall`
 - richer reflection metadata and host-memory controls
-- OM Cluster relay operations and health checks
-- public-safe cluster validation docs
+- OM Cluster relay operations, health checks, and public-safe validation docs
 - Windows, macOS, and Linux install paths
 
-For the subscription-auth details and cost comparison, see [`docs/configuration.md`](docs/configuration.md) and [`docs/RELEASE-0.6.5.md`](docs/RELEASE-0.6.5.md).
+For configuration of all of these — providers, usage budgets, async Batch, and startup quality — see [`docs/configuration.md`](docs/configuration.md). Subscription-auth background is in [`docs/RELEASE-0.6.5.md`](docs/RELEASE-0.6.5.md).
 
 ## Quick Install
 
@@ -137,9 +138,14 @@ om status
 om doctor
 om observe --source codex
 om reflect
+om reflect --async              # submit an offline OpenAI Batch job (API-key 'openai')
+om jobs poll                    # apply completed async jobs
 om recall --query "what was decided about sync?"
 om recall --handle startup:active
 om search "preferences" --json
+om usage status                 # token usage, cost, and budgets
+om usage budget set --daily-usd 5.00
+om context --quality-report     # startup-context dedup / freshness / budget report
 om export --target chatgpt
 om export --target claude-managed-agents --output ./om-claude-memory
 ```
@@ -175,7 +181,7 @@ The short version:
 
 ## Release State
 
-`v0.6.4` is the current release. It is a stability patch that raises the `SessionStart` hook timeout from 5 s to 15 s across Claude Code, Codex, Grok Build TUI, and Cowork to prevent startup timeouts on cold Python launches or larger memory stores. It also ships a permanent regression test (`make verify-session-start`) so this class of issue stays fixed. Grok Build TUI first-class support (introduced in v0.6.3) remains.
+`v0.6.6` is the current release. It adds a host-local usage/cost/budget subsystem (`om usage`), offline reflection through the OpenAI Batch API (`om reflect --async`, `om jobs`), observe/reflect cost-and-latency improvements (bounded reflector input, Codex reasoning-effort control, Anthropic prompt caching), and startup-context quality controls (cross-section de-duplication, freshness markers, cwd/task scope, `om context --quality-report`). It builds on v0.6.5 subscription auth (`om login`) and the v0.6.4 `SessionStart` timeout hardening (`make verify-session-start`).
 
 Before the next release, maintainers should run:
 

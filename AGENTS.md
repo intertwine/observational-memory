@@ -4,7 +4,7 @@ This repo uses Observational Memory itself, but repo work should remain local-fi
 
 ## Current Goal Shape
 
-The current release line is `v0.6.4`. Do not bump versions, tag releases, publish to PyPI, or update Homebrew again unless Bryan explicitly asks.
+The current release line is `v0.6.6`. Do not bump versions, tag releases, publish to PyPI, or update Homebrew again unless Bryan explicitly asks.
 
 ## Work Rules
 
@@ -52,3 +52,6 @@ uv run pytest
 - OM Cluster is opt-in and disabled unless initialized or joined.
 - Relay transport is supported, but relay access is not cluster trust.
 - Hosted memory exports are review bundles; `om` does not silently write ChatGPT or Claude Managed Agents memory.
+- Usage tracking, cost, and budgets (`om usage`) are host-local in `usage.sqlite`; never synced via OM Cluster.
+- OpenAI Batch async reflection (`om reflect --async`, `om jobs`) is API-key `openai` only and never selected for the `openai-chatgpt` subscription provider.
+- Startup-context quality passes (dedup, freshness, scope, `om context --quality-report`) operate on the budgeted payload only; `om recall` still returns the full sections.
