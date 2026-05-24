@@ -727,18 +727,29 @@ def _safe_int(value: object) -> int | None:
 
 
 def _anthropic_usage(message: object) -> "LLMUsage | None":
-    """Map an Anthropic ``message.usage`` to LLMUsage (input/output tokens)."""
+    """Map an Anthropic ``message.usage`` to LLMUsage (input/output tokens).
+
+    With prompt caching active, ``input_tokens`` counts only the uncached
+    remainder; the cached tokens are reported separately as
+    ``cache_read_input_tokens`` and ``cache_creation_input_tokens``. We fold both
+    into the prompt-token total so usage accounting stays accurate after caching
+    is enabled (cost is still estimated at the flat input rate — the cache
+    read/write discounts are not separately modeled).
+    """
     from .usage.models import LLMUsage
 
     usage = getattr(message, "usage", None)
     pt = _safe_int(getattr(usage, "input_tokens", None))
+    cache_read = _safe_int(getattr(usage, "cache_read_input_tokens", None))
+    cache_create = _safe_int(getattr(usage, "cache_creation_input_tokens", None))
     ct = _safe_int(getattr(usage, "output_tokens", None))
-    if pt is None and ct is None:
+    if pt is None and ct is None and cache_read is None and cache_create is None:
         return None
+    prompt_tokens = (pt or 0) + (cache_read or 0) + (cache_create or 0)
     return LLMUsage(
-        prompt_tokens=pt,
+        prompt_tokens=prompt_tokens,
         completion_tokens=ct,
-        total_tokens=(pt or 0) + (ct or 0),
+        total_tokens=prompt_tokens + (ct or 0),
         token_source="provider",
     )
 

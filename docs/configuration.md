@@ -150,9 +150,9 @@ This cap only takes effect when OM Cluster is enabled, where observations are an
 
 ### Reflector context budget
 
-The reflector folds new observations into `reflections.md`. For large observation sets it works in chunks, re-sending the running document on each fold — without a bound that cost grows with the number of chunks. `OM_REFLECTOR_CONTEXT_MAX_CHARS` (default `32000`) caps how much of `reflections.md` is re-sent as context. The default is generous — a target-size reflections file (the prompt aims for 200–600 lines) is always sent whole, so the cap only trims unusually large documents. Set it to `0` to disable the bound.
+The reflector folds new observations into `reflections.md`. For large observation sets it works in chunks, re-sending the running document on each fold — without a bound that cost grows with the number of chunks. `OM_REFLECTOR_CONTEXT_MAX_CHARS` (default `48000`) caps how much of `reflections.md` is re-sent as context. The default comfortably fits a target-size reflections file (the prompt aims for 200–600 lines), so the cap only trims documents that have grown past target. Set it to `0` to disable the bound.
 
-When the cap does trim, it keeps the head of the document (durable identity and active projects sit at the top) and logs a warning. It bounds only the *input* context — the reflector still emits a complete document — so a normal run never shrinks your stored memory. If you see the warning, raise the cap or let the reflector compress the file.
+When the cap does trim, it keeps the head of the document (durable identity and active projects sit at the top) and logs a warning. In single-pass reflection it bounds only the *input* context — the reflector still emits a complete document — so a normal run never shrinks your stored memory. In the chunked path (only reached for very large observation sets), folding against a trimmed head means tail sections beyond the cap may not be carried forward, so keep the cap above your actual document size. If you see the warning, raise the cap or let the reflector compress the file.
 
 ### Latency: Codex reasoning effort
 
@@ -169,6 +169,8 @@ Unrecognized values are ignored (the backend default is used), so a typo can't f
 ### Prompt caching
 
 On the metered Anthropic providers (`anthropic`, `anthropic-vertex`, `anthropic-bedrock`), the stable observer/reflector system prompt is sent as a cacheable block (`cache_control: ephemeral`), so repeat calls reuse it at a fraction of the input cost. OpenAI and xAI cache eligible prefixes automatically — no configuration needed. The ChatGPT Codex backend does not expose cache controls, so its instructions are sent as-is.
+
+Cached tokens are folded into the recorded prompt-token total (see `om usage`), so usage accounting stays accurate with caching on. Cost is still estimated at the flat input rate — the per-token cache read/write discounts are not separately modeled, so a cached call's estimate is a slight over-estimate of true spend.
 
 ### Seeing what will run
 
