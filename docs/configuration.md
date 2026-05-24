@@ -152,7 +152,9 @@ This cap only takes effect when OM Cluster is enabled, where observations are an
 
 The reflector folds new observations into `reflections.md`. For large observation sets it works in chunks, re-sending the running document on each fold — without a bound that cost grows with the number of chunks. `OM_REFLECTOR_CONTEXT_MAX_CHARS` (default `48000`) caps how much of `reflections.md` is re-sent as context. The default comfortably fits a target-size reflections file (the prompt aims for 200–600 lines), so the cap only trims documents that have grown past target. Set it to `0` to disable the bound.
 
-When the cap does trim, it keeps the head of the document (durable identity and active projects sit at the top) and logs a warning. In single-pass reflection it bounds only the *input* context — the reflector still emits a complete document — so a normal run never shrinks your stored memory. In the chunked path (only reached for very large observation sets), folding against a trimmed head means tail sections beyond the cap may not be carried forward, so keep the cap above your actual document size. If you see the warning, raise the cap or let the reflector compress the file.
+When the cap does trim, it keeps the head of the document (durable identity and active projects sit at the top) and logs a warning. In single-pass reflection it bounds only the *input* context — the reflector still emits a complete document — so a normal run never shrinks your stored memory, and raising the cap restores the full context.
+
+The chunked path (only reached for very large observation sets) is stricter: every fold must fit one per-call input budget shared between the reflections context and the observation chunk, so the reflections context is automatically reduced — below your configured cap if necessary — to keep each call within budget. Folding against a reduced head means tail sections beyond that limit may not carry forward. The practical guidance is to keep `reflections.md` compact (the prompt targets 200–600 lines); the deeper fix, incremental section-targeted reflection, is tracked separately.
 
 ### Latency: Codex reasoning effort
 

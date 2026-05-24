@@ -44,21 +44,36 @@ def test_bound_reflections_context_tiny_cap_never_exceeds():
     assert out.startswith("HEAD")
 
 
-def test_reflect_chunked_applies_bound(monkeypatch):
-    captured: list[str] = []
+def test_reflect_chunked_keeps_each_fold_under_input_budget(monkeypatch):
+    from observational_memory.reflect import _MAX_INPUT_CHARS
+
+    captured: list[tuple[str, str]] = []
 
     def fake_compress(system_prompt, user_content, config, **kwargs):
-        captured.append(user_content)
-        # Return a large running document so the fold context would grow.
-        return "# Reflections\n\n" + "U" * 6000
+        captured.append((system_prompt, user_content))
+        # Return a large running document so the fold context would grow without
+        # the bound — exactly the O(chunks x size) case the cap must contain.
+        return "# Reflections\n\n" + "U" * 60000
 
     monkeypatch.setattr(reflect, "compress", fake_compress)
-    cfg = Config(reflector_context_max_chars=1000)
-    # Two date sections force multiple chunks.
-    observations = "# Observations\n\n" + "## 2026-05-20\n\n" + ("- a\n" * 400) + "## 2026-05-21\n\n" + ("- b\n" * 400)
-    reflect._reflect_chunked("sys", "R" * 5000, observations, cfg)
-    assert captured, "chunked reflect made no LLM calls"
-    assert any("truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS" in uc for uc in captured)
+    # Large reflections cap forces a small chunk budget -> multiple folds, and a
+    # 60k running doc must be trimmed to fit. system_prompt is sized realistically.
+    cfg = Config(reflector_context_max_chars=37000)
+    system_prompt = "S" * 4000
+    # Several date sections, each comfortably under the derived chunk budget, that
+    # together require more than one fold.
+    sections = "".join(f"## 2026-05-{d:02d}\n\n" + ("- obs line\n" * 600) for d in range(10, 20))
+    observations = "# Observations\n\n" + sections
+    reflect._reflect_chunked(system_prompt, "R" * 60000, observations, cfg)
+
+    assert len(captured) >= 2, "expected multiple folds"
+    for sys_prompt, user_content in captured:
+        # The whole call (system prompt + user content) must stay under budget.
+        assert len(sys_prompt) + len(user_content) <= _MAX_INPUT_CHARS, (
+            f"fold exceeded budget: {len(sys_prompt) + len(user_content)} > {_MAX_INPUT_CHARS}"
+        )
+    # The oversized running document was bounded on later folds.
+    assert any("truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS" in uc for _, uc in captured)
 
 
 def test_bound_reflections_context_keeps_head_and_marks_truncation():

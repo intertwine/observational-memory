@@ -20,6 +20,16 @@ _CHARS_PER_TOKEN = 3.5
 # Maximum input tokens to send in a single reflector call.
 # Kept conservative to avoid HTTP body size limits on some networks.
 _MAX_INPUT_TOKENS = 12_000
+# Total per-call input budget in chars (~_MAX_INPUT_TOKENS tokens). Every
+# reflector call (system prompt + reflections context + observations chunk +
+# wrappers) must stay under this ceiling.
+_MAX_INPUT_CHARS = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN)
+# Fixed allowance for the fold wrappers ("## Current reflections", separators,
+# the "## Observations (chunk i/N)" header, and the intermediate-chunk NOTE),
+# plus a safety margin.
+_FOLD_WRAPPER_CHARS = 400
+# Floor on the observations chunk so a fold always makes forward progress.
+_MIN_CHUNK_CHARS = 4000
 # max_tokens for reflector output (200-600 lines needs room)
 _REFLECTOR_MAX_OUTPUT_TOKENS = 8192
 _MAX_COMPETING_SNAPSHOT_CHARS = 4000
@@ -291,6 +301,37 @@ def _reflect_single(
     return compress(system_prompt, user_content, config, max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS, operation="reflector")
 
 
+def _reflector_budgets(system_prompt: str, amem_section: str, configured_cap: int) -> tuple[int, int]:
+    """Split the per-call input budget between reflections context and obs chunk.
+
+    Every fold must satisfy ``system_prompt + reflections + chunk + wrappers <=
+    _MAX_INPUT_CHARS``. We reserve the system prompt, auto-memory section, and a
+    fixed wrapper allowance, then share what remains: the reflections context is
+    capped by ``OM_REFLECTOR_CONTEXT_MAX_CHARS`` but never larger than what leaves
+    a minimum chunk for observations, and the chunk gets the rest. ``configured_cap``
+    of 0 (disabled) is treated as "as large as the budget allows" — the chunked
+    path can never re-send a truly unbounded document and stay under the ceiling.
+
+    Returns ``(reflections_cap, chunk_budget)``.
+
+    Observations get a fixed ~60% of the total budget: larger chunks mean fewer
+    folds, and each fold re-sends the reflections context, so maximizing the
+    chunk minimizes the repeated re-send cost. The reflections context gets
+    what's left after the system prompt, auto-memory, and wrappers — capped by
+    the configured value. A configured cap of 0 (disabled) takes the whole
+    remainder; the chunked path can never re-send a truly unbounded document and
+    stay under the ceiling.
+    """
+    chunk_budget = max(int(_MAX_INPUT_CHARS * 0.6), _MIN_CHUNK_CHARS)
+    remainder = _MAX_INPUT_CHARS - chunk_budget - len(system_prompt) - len(amem_section) - _FOLD_WRAPPER_CHARS
+    max_reflections = max(remainder, 0)
+    if configured_cap <= 0:
+        reflections_cap = max_reflections
+    else:
+        reflections_cap = min(configured_cap, max_reflections)
+    return reflections_cap, chunk_budget
+
+
 def _reflect_chunked(
     system_prompt: str,
     reflections: str,
@@ -300,7 +341,11 @@ def _reflect_chunked(
     amem_changed: bool = False,
 ) -> str:
     """Chunked reflection: split observations into date sections, fold each into reflections."""
-    chunks = _chunk_observations(observations)
+    # Reserve the auto-memory section for every fold (it actually rides only on
+    # the last) so the conservative budget keeps even that fold under the ceiling.
+    amem_section = _auto_memory_section(auto_memory, amem_changed)
+    reflections_cap, chunk_budget = _reflector_budgets(system_prompt, amem_section, config.reflector_context_max_chars)
+    chunks = _chunk_observations(observations, chunk_budget)
 
     running_reflections = reflections
 
@@ -315,19 +360,18 @@ def _reflect_chunked(
                 "Produce the complete updated reflections document."
             ).format(i=i, total=len(chunks))
 
-        # Include auto-memory context only in the final chunk
-        amem_section = ""
-        if is_last:
-            amem_section = _auto_memory_section(auto_memory, amem_changed)
+        # Include auto-memory context only in the final chunk.
+        fold_amem = amem_section if is_last else ""
 
         # Bound the *re-sent* running document so the chunked fold isn't
-        # O(chunks x reflections_size). running_reflections itself keeps the
-        # full latest output; only the per-fold context is capped.
-        bounded = _bound_reflections_context(running_reflections, config.reflector_context_max_chars)
+        # O(chunks x reflections_size) and stays under the per-call budget.
+        # running_reflections itself keeps the full latest output; only the
+        # per-fold context is capped.
+        bounded = _bound_reflections_context(running_reflections, reflections_cap)
         user_content = (
             f"## Current reflections\n\n{bounded}\n\n"
             f"---\n\n"
-            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}{amem_section}"
+            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}{fold_amem}"
         )
         running_reflections = compress(
             fold_prompt,
@@ -340,14 +384,18 @@ def _reflect_chunked(
     return running_reflections
 
 
-def _chunk_observations(observations: str) -> list[str]:
+def _chunk_observations(observations: str, budget_chars: int | None = None) -> list[str]:
     """Split observations by date headers into chunks that fit within token limits.
 
     Groups consecutive date sections until adding another would exceed the
-    per-chunk token budget. Each chunk is a string of one or more date sections.
+    per-chunk budget. ``budget_chars`` is the room left for observations after
+    the reflections context and system prompt are reserved (see
+    ``_reflector_budgets``); when omitted it falls back to a conservative
+    standalone default. A single date section larger than the budget is kept
+    whole (we never split within a day) and may exceed it — a rare edge case.
     """
-    # Budget per chunk: leave room for reflections + system prompt
-    budget_chars = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN * 0.6)
+    if budget_chars is None:
+        budget_chars = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN * 0.6)
 
     # Split by date headers, keeping each "## YYYY-MM-DD" section together
     sections = re.split(r"(?=^## \d{4}-\d{2}-\d{2})", observations, flags=re.MULTILINE)
