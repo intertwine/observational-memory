@@ -16,6 +16,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 
+# Homebrew requires `desc` < 80 chars, no leading article, no trailing period.
+HOMEBREW_DESC = "Local cross-agent memory and search for coding agents"
+
 
 @dataclass(frozen=True)
 class Artifact:
@@ -400,7 +403,10 @@ def main() -> int:
 
     formula_text = render_formula(
         class_name=ruby_class_name(args.formula_name),
-        desc=metadata["description"],
+        # Homebrew caps `desc` at 80 chars and dislikes leading articles / trailing
+        # periods, so use a short Homebrew-specific description rather than the
+        # full pyproject one.
+        desc=HOMEBREW_DESC,
         homepage=metadata["homepage"],
         root=root_sdist,
         license_name=metadata["license"],
