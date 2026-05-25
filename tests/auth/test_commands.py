@@ -185,6 +185,119 @@ def test_login_sets_provider_in_env(isolated_auth, monkeypatch) -> None:
     assert "OM_LLM_PROVIDER=openai-chatgpt" in Config().env_file.read_text()
 
 
+def test_login_updates_incompatible_global_model_for_subscription(isolated_auth, monkeypatch, capsys) -> None:
+    """Switching to ChatGPT should not leave a stale Claude global model behind."""
+    import observational_memory.auth.commands as cmds
+    from observational_memory.config import Config
+
+    monkeypatch.delenv("OM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OM_LLM_MODEL", raising=False)
+    env_file = Config().env_file
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text("OM_LLM_PROVIDER=anthropic\nOM_LLM_MODEL=claude-sonnet-4-5-20250929\n")
+    monkeypatch.setattr(
+        cmds._chatgpt,
+        "device_code_login",
+        lambda **k: {
+            "auth_mode": "chatgpt",
+            "tokens": {"access_token": "AT", "refresh_token": "RT"},
+            "id_token_claims": {},
+        },
+    )
+
+    cmds.login_openai_chatgpt(open_browser=False, set_default=True)
+
+    content = env_file.read_text()
+    assert "OM_LLM_PROVIDER=openai-chatgpt" in content
+    assert "OM_LLM_MODEL=gpt-5.5" in content
+    assert "claude-sonnet-4-5-20250929" not in content
+    assert "Set OM_LLM_MODEL=gpt-5.5" in capsys.readouterr().out
+
+
+def test_login_preserves_compatible_subscription_model(isolated_auth, monkeypatch) -> None:
+    import observational_memory.auth.commands as cmds
+    from observational_memory.config import Config
+
+    monkeypatch.delenv("OM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OM_LLM_MODEL", raising=False)
+    env_file = Config().env_file
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text("OM_LLM_PROVIDER=anthropic\nOM_LLM_MODEL=gpt-5.4\n")
+    monkeypatch.setattr(
+        cmds._chatgpt,
+        "device_code_login",
+        lambda **k: {
+            "auth_mode": "chatgpt",
+            "tokens": {"access_token": "AT", "refresh_token": "RT"},
+            "id_token_claims": {},
+        },
+    )
+
+    cmds.login_openai_chatgpt(open_browser=False, set_default=True)
+
+    content = env_file.read_text()
+    assert "OM_LLM_PROVIDER=openai-chatgpt" in content
+    assert "OM_LLM_MODEL=gpt-5.4" in content
+
+
+def test_login_updates_incompatible_operation_model_without_provider_override(isolated_auth, monkeypatch) -> None:
+    import observational_memory.auth.commands as cmds
+    from observational_memory.config import Config
+
+    monkeypatch.delenv("OM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OM_LLM_OBSERVER_MODEL", raising=False)
+    env_file = Config().env_file
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text("OM_LLM_PROVIDER=anthropic\nOM_LLM_OBSERVER_MODEL=claude-sonnet-4-5-20250929\n")
+    monkeypatch.setattr(
+        cmds._chatgpt,
+        "device_code_login",
+        lambda **k: {
+            "auth_mode": "chatgpt",
+            "tokens": {"access_token": "AT", "refresh_token": "RT"},
+            "id_token_claims": {},
+        },
+    )
+
+    cmds.login_openai_chatgpt(open_browser=False, set_default=True)
+
+    content = env_file.read_text()
+    assert "OM_LLM_PROVIDER=openai-chatgpt" in content
+    assert "OM_LLM_OBSERVER_MODEL=gpt-5.5" in content
+
+
+def test_login_preserves_operation_model_for_explicit_other_provider(isolated_auth, monkeypatch) -> None:
+    import observational_memory.auth.commands as cmds
+    from observational_memory.config import Config
+
+    monkeypatch.delenv("OM_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OM_LLM_OBSERVER_PROVIDER", raising=False)
+    monkeypatch.delenv("OM_LLM_OBSERVER_MODEL", raising=False)
+    env_file = Config().env_file
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text(
+        "OM_LLM_PROVIDER=anthropic\n"
+        "OM_LLM_OBSERVER_PROVIDER=anthropic\n"
+        "OM_LLM_OBSERVER_MODEL=claude-sonnet-4-5-20250929\n"
+    )
+    monkeypatch.setattr(
+        cmds._chatgpt,
+        "device_code_login",
+        lambda **k: {
+            "auth_mode": "chatgpt",
+            "tokens": {"access_token": "AT", "refresh_token": "RT"},
+            "id_token_claims": {},
+        },
+    )
+
+    cmds.login_openai_chatgpt(open_browser=False, set_default=True)
+
+    content = env_file.read_text()
+    assert "OM_LLM_PROVIDER=openai-chatgpt" in content
+    assert "OM_LLM_OBSERVER_PROVIDER=anthropic" in content
+    assert "OM_LLM_OBSERVER_MODEL=claude-sonnet-4-5-20250929" in content
+
+
 def test_login_no_set_default_skips_env(isolated_auth, monkeypatch) -> None:
     import observational_memory.auth.commands as cmds
     from observational_memory.config import Config

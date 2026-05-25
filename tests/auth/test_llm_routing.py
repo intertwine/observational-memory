@@ -6,7 +6,23 @@ silently cross-routed to the metered `openai` provider via `_infer_provider`.
 
 from __future__ import annotations
 
+import pytest
+
 from observational_memory.llm import _infer_provider
+
+
+@pytest.fixture(autouse=True)
+def clean_llm_env(monkeypatch):
+    for key in (
+        "OM_LLM_PROVIDER",
+        "OM_LLM_MODEL",
+        "OM_LLM_OBSERVER_MODEL",
+        "OM_LLM_REFLECTOR_MODEL",
+        "OM_LLM_OBSERVER_PROVIDER",
+        "OM_LLM_REFLECTOR_PROVIDER",
+        "XAI_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 def test_openai_chatgpt_is_sticky_for_gpt_model(monkeypatch) -> None:

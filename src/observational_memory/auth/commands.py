@@ -53,6 +53,74 @@ def _persist_provider(provider_id: str, state: dict, *, set_active: bool = True)
         save_auth_store(store)
 
 
+def _read_env_vars(path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def _model_matches_provider(provider_id: str, model: str) -> bool:
+    normalized = model.strip().lower()
+    if not normalized:
+        return True
+    if provider_id == "openai-chatgpt":
+        return normalized.startswith(("gpt-", "o1", "o3", "o4", "chatgpt", "codex-"))
+    if provider_id == "xai-oauth":
+        return normalized.startswith("grok-")
+    return True
+
+
+def _subscription_default_model(provider_id: str, cfg) -> str | None:
+    if provider_id == "openai-chatgpt":
+        return cfg.openai_chatgpt_model
+    if provider_id == "xai-oauth":
+        return cfg.xai_oauth_model
+    return None
+
+
+def _model_reconciliation_updates(provider_id: str, cfg) -> dict[str, str]:
+    """Return model env updates needed after making a subscription provider default.
+
+    `om login` is often used to switch away from a previously configured API-key
+    provider. A stale global model such as a Claude model under
+    `OM_LLM_PROVIDER=openai-chatgpt` fails at request time. Update incompatible
+    model overrides while preserving compatible user choices.
+    """
+    default_model = _subscription_default_model(provider_id, cfg)
+    if provider_id not in {"openai-chatgpt", "xai-oauth"} or not default_model:
+        return {}
+
+    env_values = _read_env_vars(cfg.env_file)
+
+    def current(name: str) -> str:
+        return (os.environ.get(name) or env_values.get(name) or "").strip()
+
+    updates: dict[str, str] = {}
+    for name, provider_override_name in (
+        ("OM_LLM_MODEL", None),
+        ("OM_LLM_OBSERVER_MODEL", "OM_LLM_OBSERVER_PROVIDER"),
+        ("OM_LLM_REFLECTOR_MODEL", "OM_LLM_REFLECTOR_PROVIDER"),
+    ):
+        value = current(name)
+        if not value:
+            continue
+        override = current(provider_override_name) if provider_override_name else ""
+        if override and override.lower() not in {"auto", provider_id}:
+            continue
+        if not _model_matches_provider(provider_id, value):
+            updates[name] = default_model
+    return updates
+
+
 def _set_default_provider(provider_id: str) -> None:
     """Write OM_LLM_PROVIDER to the env file so `auto` doesn't keep an API key.
 
@@ -63,14 +131,22 @@ def _set_default_provider(provider_id: str) -> None:
     """
     from ..config import Config
 
-    previous = (os.environ.get("OM_LLM_PROVIDER") or "").strip()
+    cfg = Config()
+    env_values = _read_env_vars(cfg.env_file)
+    previous = (os.environ.get("OM_LLM_PROVIDER") or env_values.get("OM_LLM_PROVIDER") or "").strip()
+    model_updates = _model_reconciliation_updates(provider_id, cfg)
     _append_env_var("OM_LLM_PROVIDER", provider_id)
     os.environ["OM_LLM_PROVIDER"] = provider_id
+    for name, value in model_updates.items():
+        _append_env_var(name, value)
+        os.environ[name] = value
     cfg = Config()
     if previous and previous.lower() not in {"auto", provider_id}:
         click.echo(f"Set OM_LLM_PROVIDER={provider_id} in {cfg.env_file} (was {previous}).")
     else:
         click.echo(f"Set OM_LLM_PROVIDER={provider_id} in {cfg.env_file}.")
+    for name, value in model_updates.items():
+        click.echo(f"Set {name}={value} in {cfg.env_file} for {provider_id}.")
 
 
 def login_openai_chatgpt(*, open_browser: bool = True, set_default: bool = True) -> dict:
