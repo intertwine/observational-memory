@@ -3643,7 +3643,7 @@ def _uninstall_cowork_plugin(config: Config) -> None:
 # --- Codex integration ---
 
 _CODEX_OM_MARKER = "<!-- observational-memory -->"
-_CODEX_OM_FALLBACK_VERSION_MARKER = "<!-- observational-memory:codex-hooks-fallback-v1 -->"
+_CODEX_OM_FALLBACK_VERSION_MARKER = "<!-- observational-memory:codex-hooks-fallback-v2 -->"
 _CODEX_HOOKS_FEATURE_FLAGS = ("hooks", "codex_hooks")
 _CODEX_SESSION_START_MATCHER = "startup|resume"
 _CODEX_SESSION_START_STATUS = "Loading observational memory..."
@@ -3657,12 +3657,16 @@ _CODEX_OM_BLOCK = f"""{_CODEX_OM_MARKER}
 Codex startup context is normally injected through hooks.
 
 If this session does not already include sections titled `# Startup Profile` and `# Active Context`,
-read these files before substantial work:
+run the budgeted startup command before substantial work:
 
-1. `~/.local/share/observational-memory/profile.md` — compact stable profile
-2. `~/.local/share/observational-memory/active.md` — compact active context
+`om context --for codex --cwd "$PWD"`
 
-If hooks are unavailable, that manual read is the fallback.
+Use the JSON `hookSpecificOutput.additionalContext` text as the startup context.
+This keeps startup bounded, de-duplicated, and routed to the current working directory.
+
+If `om context` is unavailable, do not bulk-read generated memory files.
+Use `om search "<query>"` first; only inspect `profile.md` or `active.md`
+for a narrow fact when search is unavailable too.
 
 If this is a long-lived Codex session, Codex observations run every 15 minutes by default.
 To adjust that interval, edit `~/.config/observational-memory/env` and set
@@ -3670,8 +3674,8 @@ To adjust that interval, edit `~/.config/observational-memory/env` and set
 You can run a manual checkpoint with `om observe --source codex`.
 
 For deeper context when needed, consult:
-- `~/.local/share/observational-memory/reflections.md`
-- `~/.local/share/observational-memory/observations.md`
+- `om recall --query "<query>"`
+- `om recall --handle <handle>` for handles emitted by `om context`
 - `om search "<query>"`
 
 These files are auto-maintained. Do not modify them directly.

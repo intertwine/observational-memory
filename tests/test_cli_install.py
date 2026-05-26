@@ -175,10 +175,14 @@ def test_install_generates_compact_files_and_updates_codex_startup_integration(m
     assert om_stop_groups[0]["hooks"][0]["command"].endswith(" codex-checkpoint")
 
     updated_agents = codex_agents.read_text()
-    assert "<!-- observational-memory:codex-hooks-fallback-v1 -->" in updated_agents
+    assert "<!-- observational-memory:codex-hooks-fallback-v2 -->" in updated_agents
     assert "Codex startup context is normally injected through hooks." in updated_agents
-    assert "profile.md" in updated_agents
-    assert "active.md" in updated_agents
+    assert 'om context --for codex --cwd "$PWD"' in updated_agents
+    assert "do not bulk-read generated memory files" in updated_agents
+    assert 'om recall --query "<query>"' in updated_agents
+    assert "read these files before substantial work" not in updated_agents
+    assert "~/.local/share/observational-memory/reflections.md" not in updated_agents
+    assert "~/.local/share/observational-memory/observations.md" not in updated_agents
     assert "om search" in updated_agents
 
 
