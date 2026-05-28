@@ -18,19 +18,17 @@ REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
 
 # Approximate chars-per-token ratio for estimating input size.
 _CHARS_PER_TOKEN = 3.5
-# Maximum input tokens to send in a single reflector call.
-# Kept conservative to avoid HTTP body size limits on some networks.
-_MAX_INPUT_TOKENS = 12_000
-# Total per-call input budget in chars (~_MAX_INPUT_TOKENS tokens). Every
-# reflector call (system prompt + reflections context + observations chunk +
-# wrappers) must stay under this ceiling.
-_MAX_INPUT_CHARS = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN)
 # Fixed allowance for the fold wrappers ("## Current reflections", separators,
 # the "## Observations (chunk i/N)" header, and the intermediate-chunk NOTE),
 # plus a safety margin.
 _FOLD_WRAPPER_CHARS = 400
 # Floor on the observations chunk so a fold always makes forward progress.
 _MIN_CHUNK_CHARS = 4000
+# Standalone fallback chunk budget for callers without a Config (mirrors the
+# OM_REFLECTOR_MAX_INPUT_TOKENS=45000 * OM_REFLECTOR_OBSERVATION_CHUNK_RATIO=0.6
+# defaults). The reflector path always passes an explicit, config-derived
+# budget; this only backstops direct _chunk_observations callers (e.g. tests).
+_DEFAULT_CHUNK_BUDGET_CHARS = int(45_000 * _CHARS_PER_TOKEN * 0.6)
 # max_tokens for reflector output (200-600 lines needs room)
 _REFLECTOR_MAX_OUTPUT_TOKENS = 8192
 _MAX_COMPETING_SNAPSHOT_CHARS = 4000
@@ -138,7 +136,7 @@ def _gather_reflection_inputs(config: Config) -> ReflectionInputs | None:
 
     system_prompt = _load_reflector_prompt()
     total_input_chars = len(system_prompt) + len(reflections) + len(observations) + len(auto_memory)
-    single_pass = (total_input_chars / _CHARS_PER_TOKEN) <= _MAX_INPUT_TOKENS
+    single_pass = (total_input_chars / _CHARS_PER_TOKEN) <= config.reflector_max_input_tokens
     return ReflectionInputs(
         system_prompt=system_prompt,
         reflections=reflections,
@@ -330,7 +328,11 @@ def _auto_memory_section(auto_memory: str, amem_changed: bool) -> str:
     return ""
 
 
-def _bound_reflections_context(reflections: str, max_chars: int) -> str:
+def _bound_reflections_context(
+    reflections: str,
+    max_chars: int,
+    diagnostics: dict[str, int] | None = None,
+) -> str:
     """Cap the reflections.md context fed back to the reflector.
 
     This bounds *input* size only — the reflector still emits a complete
@@ -343,21 +345,42 @@ def _bound_reflections_context(reflections: str, max_chars: int) -> str:
     head — durable identity/projects sit at the top of the reflections format —
     appends a marker, and logs a warning so the operator can raise the cap or
     compress the document. ``max_chars <= 0`` disables the bound.
+
+    ``diagnostics`` carries the chunked path's budget breakdown so the warning
+    can report the *configured* reflections cap alongside the *effective*
+    per-call cap and the binding ceiling. Without it (single-pass), ``max_chars``
+    is itself the configured cap and that is what binds.
     """
     if max_chars <= 0 or len(reflections) <= max_chars:
         return reflections
-    marker = "\n\n[... older reflections truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS ...]\n"
+    marker = "\n\n[... older reflections truncated to fit the reflector input budget ...]\n"
     # For an absurdly small cap (smaller than the marker) just hard-truncate so
     # the result never exceeds max_chars and always carries some real content.
     if max_chars <= len(marker):
         return reflections[:max_chars]
     head = reflections[: max_chars - len(marker)]
-    _LOGGER.warning(
-        "reflections.md context (%d chars) exceeds OM_REFLECTOR_CONTEXT_MAX_CHARS=%d; "
-        "sending the head only. Raise the cap or compress reflections to avoid dropping older sections.",
-        len(reflections),
-        max_chars,
-    )
+    if diagnostics:
+        # Report BOTH the configured cap and the effective per-call cap so the
+        # operator can tell which ceiling is actually binding (the input-token
+        # ceiling can clamp the effective cap below the configured value).
+        _LOGGER.warning(
+            "reflections.md context (%d chars) exceeds the effective reflector cap; "
+            "sending the head only. configured_reflections_cap=%d effective_reflections_cap=%d "
+            "max_input_tokens=%d observation_chunk_budget=%d. Raise OM_REFLECTOR_MAX_INPUT_TOKENS "
+            "(or OM_REFLECTOR_CONTEXT_MAX_CHARS) or compress reflections to avoid dropping older sections.",
+            len(reflections),
+            diagnostics["configured_reflections_cap"],
+            diagnostics["effective_reflections_cap"],
+            diagnostics["max_input_tokens"],
+            diagnostics["observation_chunk_budget"],
+        )
+    else:
+        _LOGGER.warning(
+            "reflections.md context (%d chars) exceeds OM_REFLECTOR_CONTEXT_MAX_CHARS=%d; "
+            "sending the head only. Raise the cap or compress reflections to avoid dropping older sections.",
+            len(reflections),
+            max_chars,
+        )
     return head + marker
 
 
@@ -388,30 +411,32 @@ def _single_pass_user_content(
     return f"## Current reflections\n\n{bounded}\n\n---\n\n{obs_section}{amem_section}"
 
 
-def _reflector_budgets(system_prompt: str, amem_section: str, configured_cap: int) -> tuple[int, int]:
+def _reflector_budgets(system_prompt: str, amem_section: str, config: Config) -> tuple[int, int]:
     """Split the per-call input budget between reflections context and obs chunk.
 
     Every fold must satisfy ``system_prompt + reflections + chunk + wrappers <=
-    _MAX_INPUT_CHARS``. We reserve the system prompt, auto-memory section, and a
-    fixed wrapper allowance, then share what remains: the reflections context is
-    capped by ``OM_REFLECTOR_CONTEXT_MAX_CHARS`` but never larger than what leaves
-    a minimum chunk for observations, and the chunk gets the rest. ``configured_cap``
-    of 0 (disabled) is treated as "as large as the budget allows" — the chunked
-    path can never re-send a truly unbounded document and stay under the ceiling.
+    max_input_chars`` (``OM_REFLECTOR_MAX_INPUT_TOKENS`` * ``_CHARS_PER_TOKEN``).
+    We reserve the system prompt, auto-memory section, and a fixed wrapper
+    allowance, then share what remains: the reflections context is capped by
+    ``OM_REFLECTOR_CONTEXT_MAX_CHARS`` but never larger than what leaves a
+    minimum chunk for observations, and the chunk gets the rest. A configured
+    cap of 0 (disabled) is treated as "as large as the budget allows" — the
+    chunked path can never re-send a truly unbounded document and stay under the
+    ceiling.
 
     Returns ``(reflections_cap, chunk_budget)``.
 
-    Observations get a fixed ~60% of the total budget: larger chunks mean fewer
-    folds, and each fold re-sends the reflections context, so maximizing the
-    chunk minimizes the repeated re-send cost. The reflections context gets
-    what's left after the system prompt, auto-memory, and wrappers — capped by
-    the configured value. A configured cap of 0 (disabled) takes the whole
-    remainder; the chunked path can never re-send a truly unbounded document and
-    stay under the ceiling.
+    Observations get ``OM_REFLECTOR_OBSERVATION_CHUNK_RATIO`` (default 0.6) of
+    the total budget: larger chunks mean fewer folds, and each fold re-sends the
+    reflections context, so maximizing the chunk minimizes the repeated re-send
+    cost. The reflections context gets what's left after the system prompt,
+    auto-memory, and wrappers — capped by the configured value.
     """
-    chunk_budget = max(int(_MAX_INPUT_CHARS * 0.6), _MIN_CHUNK_CHARS)
-    remainder = _MAX_INPUT_CHARS - chunk_budget - len(system_prompt) - len(amem_section) - _FOLD_WRAPPER_CHARS
+    max_input_chars = int(config.reflector_max_input_tokens * _CHARS_PER_TOKEN)
+    chunk_budget = max(int(max_input_chars * config.reflector_observation_chunk_ratio), _MIN_CHUNK_CHARS)
+    remainder = max_input_chars - chunk_budget - len(system_prompt) - len(amem_section) - _FOLD_WRAPPER_CHARS
     max_reflections = max(remainder, 0)
+    configured_cap = config.reflector_context_max_chars
     if configured_cap <= 0:
         reflections_cap = max_reflections
     else:
@@ -431,8 +456,17 @@ def _reflect_chunked(
     # Reserve the auto-memory section for every fold (it actually rides only on
     # the last) so the conservative budget keeps even that fold under the ceiling.
     amem_section = _auto_memory_section(auto_memory, amem_changed)
-    reflections_cap, chunk_budget = _reflector_budgets(system_prompt, amem_section, config.reflector_context_max_chars)
+    reflections_cap, chunk_budget = _reflector_budgets(system_prompt, amem_section, config)
     chunks = _chunk_observations(observations, chunk_budget)
+    # Surface the configured vs effective reflections cap honestly: the
+    # input-token ceiling (or chunk ratio) can clamp the effective cap below the
+    # configured OM_REFLECTOR_CONTEXT_MAX_CHARS, and the warning must say which.
+    budget_diagnostics = {
+        "configured_reflections_cap": config.reflector_context_max_chars,
+        "effective_reflections_cap": reflections_cap,
+        "max_input_tokens": config.reflector_max_input_tokens,
+        "observation_chunk_budget": chunk_budget,
+    }
 
     running_reflections = reflections
 
@@ -454,7 +488,7 @@ def _reflect_chunked(
         # O(chunks x reflections_size) and stays under the per-call budget.
         # running_reflections itself keeps the full latest output; only the
         # per-fold context is capped.
-        bounded = _bound_reflections_context(running_reflections, reflections_cap)
+        bounded = _bound_reflections_context(running_reflections, reflections_cap, budget_diagnostics)
         user_content = (
             f"## Current reflections\n\n{bounded}\n\n"
             f"---\n\n"
@@ -512,7 +546,7 @@ def _chunk_observations(observations: str, budget_chars: int | None = None) -> l
     included — stays ``<= budget_chars``. We never emit a header-only chunk.
     """
     if budget_chars is None:
-        budget_chars = int(_MAX_INPUT_TOKENS * _CHARS_PER_TOKEN * 0.6)
+        budget_chars = _DEFAULT_CHUNK_BUDGET_CHARS
 
     sections = re.split(r"(?=^## \d{4}-\d{2}-\d{2})", observations, flags=re.MULTILINE)
 
@@ -748,7 +782,7 @@ def _run_cluster_reflector(config: Config, dry_run: bool = False) -> str | None:
 
     total_input_chars = len(system_prompt) + len(reflections) + len(raw_observations) + len(auto_memory)
     estimated_tokens = total_input_chars / _CHARS_PER_TOKEN
-    if estimated_tokens <= _MAX_INPUT_TOKENS:
+    if estimated_tokens <= config.reflector_max_input_tokens:
         result = _reflect_single(system_prompt, reflections, raw_observations, config, auto_memory, amem_changed)
     else:
         result = _reflect_chunked(system_prompt, reflections, raw_observations, config, auto_memory, amem_changed)

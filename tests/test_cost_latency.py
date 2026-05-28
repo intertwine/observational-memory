@@ -21,6 +21,8 @@ def _clear_effort_env(monkeypatch):
         "OM_OPENAI_CHATGPT_OBSERVER_REASONING_EFFORT",
         "OM_OPENAI_CHATGPT_REFLECTOR_REASONING_EFFORT",
         "OM_REFLECTOR_CONTEXT_MAX_CHARS",
+        "OM_REFLECTOR_MAX_INPUT_TOKENS",
+        "OM_REFLECTOR_OBSERVATION_CHUNK_RATIO",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -45,7 +47,7 @@ def test_bound_reflections_context_tiny_cap_never_exceeds():
 
 
 def test_reflect_chunked_keeps_each_fold_under_input_budget(monkeypatch):
-    from observational_memory.reflect import _MAX_INPUT_CHARS
+    from observational_memory.reflect import _CHARS_PER_TOKEN
 
     captured: list[tuple[str, str]] = []
 
@@ -56,9 +58,11 @@ def test_reflect_chunked_keeps_each_fold_under_input_budget(monkeypatch):
         return "# Reflections\n\n" + "U" * 60000
 
     monkeypatch.setattr(reflect, "compress", fake_compress)
-    # Large reflections cap forces a small chunk budget -> multiple folds, and a
-    # 60k running doc must be trimmed to fit. system_prompt is sized realistically.
-    cfg = Config(reflector_context_max_chars=37000)
+    # Small input ceiling + large reflections cap forces a small chunk budget ->
+    # multiple folds, and a 60k running doc must be trimmed to fit. system_prompt
+    # is sized realistically.
+    cfg = Config(reflector_context_max_chars=37000, reflector_max_input_tokens=12000)
+    max_input_chars = int(cfg.reflector_max_input_tokens * _CHARS_PER_TOKEN)
     system_prompt = "S" * 4000
     # Several date sections, each comfortably under the derived chunk budget, that
     # together require more than one fold.
@@ -69,15 +73,15 @@ def test_reflect_chunked_keeps_each_fold_under_input_budget(monkeypatch):
     assert len(captured) >= 2, "expected multiple folds"
     for sys_prompt, user_content in captured:
         # The whole call (system prompt + user content) must stay under budget.
-        assert len(sys_prompt) + len(user_content) <= _MAX_INPUT_CHARS, (
-            f"fold exceeded budget: {len(sys_prompt) + len(user_content)} > {_MAX_INPUT_CHARS}"
+        assert len(sys_prompt) + len(user_content) <= max_input_chars, (
+            f"fold exceeded budget: {len(sys_prompt) + len(user_content)} > {max_input_chars}"
         )
     # The oversized running document was bounded on later folds.
-    assert any("truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS" in uc for _, uc in captured)
+    assert any("truncated to fit the reflector input budget" in uc for _, uc in captured)
 
 
 def test_reflect_chunked_single_oversized_section_stays_under_budget(monkeypatch):
-    from observational_memory.reflect import _MAX_INPUT_CHARS
+    from observational_memory.reflect import _CHARS_PER_TOKEN
 
     captured: list[tuple[str, str]] = []
 
@@ -86,7 +90,8 @@ def test_reflect_chunked_single_oversized_section_stays_under_budget(monkeypatch
         return "# Reflections\n\nout"
 
     monkeypatch.setattr(reflect, "compress", fake_compress)
-    cfg = Config()
+    cfg = Config(reflector_max_input_tokens=12000)
+    max_input_chars = int(cfg.reflector_max_input_tokens * _CHARS_PER_TOKEN)
     # A SINGLE date section whose body dwarfs the per-call budget. The chunker
     # must split within the day rather than emit one oversized fold (or a
     # spurious header-only chunk).
@@ -95,11 +100,84 @@ def test_reflect_chunked_single_oversized_section_stays_under_budget(monkeypatch
 
     assert len(captured) >= 2, "oversized single section should split across folds"
     for sys_prompt, user_content in captured:
-        assert len(sys_prompt) + len(user_content) <= _MAX_INPUT_CHARS, (
-            f"fold exceeded budget: {len(sys_prompt) + len(user_content)} > {_MAX_INPUT_CHARS}"
+        assert len(sys_prompt) + len(user_content) <= max_input_chars, (
+            f"fold exceeded budget: {len(sys_prompt) + len(user_content)} > {max_input_chars}"
         )
         # No header-only / empty observation chunk — each fold carries real content.
         assert "a line of observation" in user_content
+
+
+def test_default_input_ceiling_does_not_clamp_configured_cap():
+    # The settled #65 default raises OM_REFLECTOR_MAX_INPUT_TOKENS so the
+    # configured OM_REFLECTOR_CONTEXT_MAX_CHARS (default 48000) actually binds
+    # rather than being silently clamped by the per-call input ceiling.
+    from observational_memory.reflect import _reflector_budgets
+
+    cfg = Config()  # all defaults: 48000 cap, 45000 input tokens, 0.6 ratio
+    system_prompt = "S" * 4312  # realistic reflector prompt size
+    amem_section = "A" * 4000  # near-max auto-memory section
+    reflections_cap, _chunk_budget = _reflector_budgets(system_prompt, amem_section, cfg)
+    # The effective cap equals the configured cap — the input ceiling is no
+    # longer the binding constraint for the current corpus shape.
+    assert reflections_cap == cfg.reflector_context_max_chars == 48000
+
+
+def test_diagnostic_surfaces_configured_and_effective_caps(monkeypatch, caplog):
+    # When the configured reflections cap is HIGHER than the effective per-call
+    # cap (a small input ceiling clamps it), the warning must report BOTH the
+    # configured and effective caps plus the binding ceiling — not just blame
+    # OM_REFLECTOR_CONTEXT_MAX_CHARS=<effective>, which the operator never set.
+    captured: list[tuple[str, str]] = []
+
+    def fake_compress(system_prompt, user_content, config, **kwargs):
+        captured.append((system_prompt, user_content))
+        return "# Reflections\n\n" + "U" * 60000
+
+    monkeypatch.setattr(reflect, "compress", fake_compress)
+    # Configured cap 48000, but a tiny input ceiling clamps the effective cap
+    # well below it -> the two values differ and must both be surfaced.
+    cfg = Config(reflector_context_max_chars=48000, reflector_max_input_tokens=12000)
+    sections = "".join(f"## 2026-05-{d:02d}\n\n" + ("- obs line\n" * 600) for d in range(10, 20))
+    observations = "# Observations\n\n" + sections
+    with caplog.at_level("WARNING", logger="observational_memory.reflect"):
+        reflect._reflect_chunked("S" * 4000, "R" * 60000, observations, cfg)
+
+    warnings = "\n".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    assert "configured_reflections_cap=48000" in warnings
+    assert "effective_reflections_cap=" in warnings
+    assert "configured_reflections_cap=48000 effective_reflections_cap=48000" not in warnings
+    assert "max_input_tokens=12000" in warnings
+    assert "observation_chunk_budget=" in warnings
+
+
+def test_two_x_corpus_reflects_without_dropping_most_reflections(monkeypatch):
+    # A ~2x-corpus scenario (reflections.md grown to ~96k, ~2x the 48k target)
+    # must still reflect while keeping the bulk of the reflections context —
+    # the raised default ceiling means the configured 48000 cap binds, so the
+    # re-sent context is ~48k (most of a target doc), not the old ~12k clamp.
+    captured: list[tuple[str, str]] = []
+
+    def fake_compress(system_prompt, user_content, config, **kwargs):
+        captured.append((system_prompt, user_content))
+        return "# Reflections\n\n" + "R" * 96000
+
+    monkeypatch.setattr(reflect, "compress", fake_compress)
+    cfg = Config()  # defaults: 48000 cap, 45000 input tokens
+    reflections = "# Reflections\n\n" + "R" * 96000  # ~2x the 48k target
+    # Enough observations to force the chunked path (several large day sections).
+    sections = "".join(f"## 2026-05-{d:02d}\n\n" + ("- obs line\n" * 5000) for d in range(10, 16))
+    observations = "# Observations\n\n" + sections
+    reflect._reflect_chunked("S" * 4312, reflections, observations, cfg)
+
+    assert len(captured) >= 2, "expected the chunked path"
+    # The reflections context re-sent on each fold keeps ~48k chars (the
+    # configured cap), i.e. half of the 96k doc — NOT clamped down near 12k.
+    reflections_blocks = [uc.split("---", 1)[0] for _, uc in captured]
+    max_reflections_chars = max(len(b) for b in reflections_blocks)
+    assert max_reflections_chars >= 40000, (
+        f"reflections context dropped to {max_reflections_chars} chars; "
+        "the raised input ceiling should keep ~48k, not the old ~12k clamp"
+    )
 
 
 def test_bound_reflections_context_keeps_head_and_marks_truncation():
@@ -107,7 +185,7 @@ def test_bound_reflections_context_keeps_head_and_marks_truncation():
     out = _bound_reflections_context(big, 1000)
     assert len(out) <= 1000
     assert out.startswith("HEAD")
-    assert "truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS" in out
+    assert "truncated to fit the reflector input budget" in out
 
 
 def test_reflect_single_applies_bound(monkeypatch):
@@ -120,7 +198,7 @@ def test_reflect_single_applies_bound(monkeypatch):
     monkeypatch.setattr(reflect, "compress", fake_compress)
     cfg = Config(reflector_context_max_chars=1000)
     reflect._reflect_single("sys", "R" * 5000, "some observations", cfg)
-    assert "truncated to fit OM_REFLECTOR_CONTEXT_MAX_CHARS" in captured["user"]
+    assert "truncated to fit the reflector input budget" in captured["user"]
 
 
 # --- Codex reasoning effort resolution ---
