@@ -417,10 +417,14 @@ def _cap_reflector_output(result: str, max_chars: int) -> str:
     budget = max(max_chars - len(marker), 0)
     boundary = result.rfind("\n## ", 0, budget)
     if boundary <= 0:
-        # No section boundary fits under the cap (e.g. a giant first section or a
-        # cap smaller than the head). Keep the head up to the budget rather than
-        # dropping everything — still never exceeding max_chars.
-        head = result[:budget]
+        # No complete section fits under the cap (a giant first section, or a cap
+        # smaller than the head). NEVER slice mid-section — that would persist a
+        # half-written entry. Fall back to the document preamble before the first
+        # "## " heading (the title block — a complete, safe unit); if even that
+        # doesn't fit, emit the marker only.
+        first = result.find("\n## ")
+        preamble = result[:first] if first > 0 else ""
+        head = preamble if len(preamble) <= budget else ""
     else:
         head = result[: boundary + 1]  # keep the trailing newline before the next "## "
 

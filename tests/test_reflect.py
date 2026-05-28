@@ -506,6 +506,31 @@ class TestCapReflectorOutput:
         assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" in result  # truncation marker
         assert len(result) <= cap
 
+    def test_no_section_boundary_fits_keeps_preamble_not_mid_section(self):
+        # A runaway FIRST section: no "## " boundary fits under the cap. The trim
+        # must fall back to the document preamble (title block) — never a
+        # mid-section slice that would persist a half-written entry.
+        text = "# Reflections\n\n## Core Identity\n" + ("a" * 5000) + "\n"
+        cap = 500  # smaller than the first section
+        result = _cap_reflector_output(text, cap)
+
+        assert "aaaaa" not in result  # never a mid-section fragment
+        assert "## Core Identity" not in result  # the unfinished section is dropped whole
+        assert "# Reflections" in result  # the safe preamble is preserved
+        assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" in result  # truncation marker
+        assert len(result) <= cap
+
+    def test_no_boundary_and_oversized_preamble_emits_marker_only(self):
+        # Even the preamble exceeds the cap: emit the marker only, never a
+        # fragment of any section.
+        text = "# Reflections " + ("z" * 5000) + "\n\n## A\n- ok\n"
+        cap = 200
+        result = _cap_reflector_output(text, cap)
+
+        assert "zzzzz" not in result  # no preamble/section fragment
+        assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" in result  # marker only
+        assert len(result) <= cap
+
     def test_warns_when_cap_fires(self, caplog):
         text = "# Reflections\n\n## A\n" + ("x" * 200) + "\n\n## B\n" + ("y" * 200) + "\n"
         with caplog.at_level(logging.WARNING, logger="observational_memory.reflect"):
