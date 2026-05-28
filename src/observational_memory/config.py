@@ -177,6 +177,11 @@ ENV_FILE_TEMPLATE = """\
 # Fraction of the reflector's per-call budget given to the observations chunk;
 # the rest is the reflections context. Higher = fewer folds (default 0.6):
 # OM_REFLECTOR_OBSERVATION_CHUNK_RATIO=0.6
+# Reflector output cap: hard ceiling (chars) on the reflector's emitted document,
+# applied post-call so it also bounds the openai-chatgpt (Codex) path, which
+# rejects max_output_tokens. Generous default; trims at a section boundary and
+# warns only on a runaway. 0 disables:
+# OM_REFLECTOR_OUTPUT_MAX_CHARS=200000
 #
 # Startup context: mark operational facts (tool versions/install status) older
 # than this many days with "(as of <date> — verify)" (default 14):
@@ -377,6 +382,17 @@ class Config:
     # so a higher ratio minimizes the repeated re-send cost. Range (0, 1).
     reflector_observation_chunk_ratio: float = field(
         default_factory=lambda: _safe_float(os.environ.get("OM_REFLECTOR_OBSERVATION_CHUNK_RATIO"), 0.6)
+    )
+    # Operator-side cap on the reflector's *output* size, applied post-call so it
+    # works on every backend — including the openai-chatgpt (Codex) Responses path,
+    # which rejects max_output_tokens. The default is deliberately generous: a
+    # target-size reflections.md (200-600 lines) is well under this, and the
+    # pathological run that motivated the cap emitted ~121k chars, so the default
+    # only fires on a genuine runaway. When the output overruns, the reflect
+    # pipeline trims at a section ("## ") boundary — never mid-section, which would
+    # corrupt reflections.md — and logs a warning. 0 disables the cap.
+    reflector_output_max_chars: int = field(
+        default_factory=lambda: int(os.environ.get("OM_REFLECTOR_OUTPUT_MAX_CHARS", "200000"))
     )
 
     # Reflector settings

@@ -114,4 +114,5 @@ development, fellowship applications, etc.
 9. **Never fabricate.** Only reflect what's in the observations.
 10. **Never include secrets.** Note existence, never values.
 11. **Target 200–600 lines.** Compress harder or archive if growing beyond.
-12. **When reflections are already good, make minimal changes.**
+12. **Hard length budget: never exceed ~800 lines or ~120 lines per section.** This is a ceiling, not a goal — stay near the 200–600 line target. If a section runs long, merge entries, summarize, or move detail to Archive rather than letting it sprawl. Output past this budget is trimmed at a section boundary and the overrun is lost, so self-limit first.
+13. **When reflections are already good, make minimal changes.**

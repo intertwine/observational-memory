@@ -1,10 +1,14 @@
 """Tests for the reflector module."""
 
+import logging
+import sys
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from observational_memory.config import Config
 from observational_memory.reflect import (
+    _cap_reflector_output,
     _chunk_observations,
     _extract_latest_observation_date,
     _filter_new_observations,
@@ -468,3 +472,156 @@ class TestRunReflectorTimestampIntegration:
         user_content = mock_compress.call_args[0][1]
         assert "Day 1" in user_content
         assert "Day 4" in user_content
+
+
+class TestCapReflectorOutput:
+    def test_under_cap_is_untouched(self):
+        text = "# Reflections\n\n## Core Identity\n- Name: Alex\n\n## Active Projects\n- Thing\n"
+        assert _cap_reflector_output(text, 200000) == text
+
+    def test_zero_disables_cap(self):
+        text = "# Reflections\n\n## A\n" + "x" * 1000
+        assert _cap_reflector_output(text, 0) == text
+
+    def test_trims_at_section_boundary_never_mid_section(self):
+        # Three sections; cap lands inside the third. The trim must drop the whole
+        # third section, never leave it half-written.
+        text = (
+            "# Reflections\n\n"
+            "## Core Identity\n" + ("a" * 100) + "\n\n"
+            "## Active Projects\n" + ("b" * 100) + "\n\n"
+            "## Life & Operations\n" + ("c" * 5000) + "\n"
+        )
+        # Cap so the post-marker budget lands a little past the start of the third
+        # heading: the only "## " boundary at/under the budget is the one before
+        # "## Life & Operations", so the trim keeps the first two sections whole and
+        # drops the runaway third entirely.
+        cap = text.index("## Life & Operations") + 200
+        result = _cap_reflector_output(text, cap)
+
+        assert "## Core Identity" in result
+        assert "## Active Projects" in result
+        assert "## Life & Operations" not in result  # whole runaway section dropped
+        assert "ccccc" not in result  # no mid-section fragment
+        assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" in result  # truncation marker
+        assert len(result) <= cap
+
+    def test_no_section_boundary_fits_keeps_preamble_not_mid_section(self):
+        # A runaway FIRST section: no "## " boundary fits under the cap. The trim
+        # must fall back to the document preamble (title block) — never a
+        # mid-section slice that would persist a half-written entry.
+        text = "# Reflections\n\n## Core Identity\n" + ("a" * 5000) + "\n"
+        cap = 500  # smaller than the first section
+        result = _cap_reflector_output(text, cap)
+
+        assert "aaaaa" not in result  # never a mid-section fragment
+        assert "## Core Identity" not in result  # the unfinished section is dropped whole
+        assert "# Reflections" in result  # the safe preamble is preserved
+        assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" in result  # truncation marker
+        assert len(result) <= cap
+
+    def test_no_boundary_and_oversized_preamble_emits_marker_only(self):
+        # Even the preamble exceeds the cap: emit the marker only, never a
+        # fragment of any section.
+        text = "# Reflections " + ("z" * 5000) + "\n\n## A\n- ok\n"
+        cap = 200
+        result = _cap_reflector_output(text, cap)
+
+        assert "zzzzz" not in result  # no preamble/section fragment
+        assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" in result  # marker only
+        assert len(result) <= cap
+
+    def test_warns_when_cap_fires(self, caplog):
+        text = "# Reflections\n\n## A\n" + ("x" * 200) + "\n\n## B\n" + ("y" * 200) + "\n"
+        with caplog.at_level(logging.WARNING, logger="observational_memory.reflect"):
+            _cap_reflector_output(text, 250)
+        assert any("OM_REFLECTOR_OUTPUT_MAX_CHARS" in r.message for r in caplog.records)
+
+    def test_no_warning_when_under_cap(self, caplog):
+        text = "# Reflections\n\n## A\n- ok\n"
+        with caplog.at_level(logging.WARNING, logger="observational_memory.reflect"):
+            _cap_reflector_output(text, 200000)
+        assert not caplog.records
+
+
+def _fake_openai_returning(text):
+    """Fake `openai` SDK whose Responses.create streams a single completed event.
+
+    Mirrors the streaming shape `_call_codex_responses` consumes so the reflect
+    pipeline runs through the real openai-chatgpt (Codex) path - the path that
+    can't honor max_output_tokens - with a controllable output payload.
+    """
+
+    class FakeResponses:
+        def create(self, **_kwargs):
+            done = SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(
+                    output_text=text,
+                    usage=SimpleNamespace(input_tokens=10, output_tokens=5, total_tokens=15),
+                ),
+            )
+            return iter([done])
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.responses = FakeResponses()
+
+    return SimpleNamespace(OpenAI=FakeOpenAI)
+
+
+class TestReflectorOutputCapOnCodexPath:
+    """The output cap must hold on the openai-chatgpt (Codex) Responses path,
+    which rejects max_output_tokens - so the cap is purely post-call."""
+
+    def _codex_config(self, tmp_path, monkeypatch, *, output_cap):
+        monkeypatch.setenv("OM_USAGE_TRACKING", "0")
+        monkeypatch.setenv("OM_LLM_REFLECTOR_PROVIDER", "openai-chatgpt")
+        monkeypatch.setenv("OM_REFLECTOR_OUTPUT_MAX_CHARS", str(output_cap))
+        # Subscription tokens + cloudflare headers are mocked so routing reaches
+        # the real Responses caller without a live login.
+        monkeypatch.setattr("observational_memory.config._has_subscription_tokens", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "observational_memory.auth.resolve_runtime_credentials",
+            lambda *a, **k: {"base_url": "https://x", "access_token": "t"},
+        )
+        monkeypatch.setattr("observational_memory.auth.openai_chatgpt.cloudflare_headers", lambda token: {})
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.observations_path.write_text("# Observations\n\n## 2026-02-10\n\n- \U0001f534 14:00 Test\n")
+        return config
+
+    def test_over_cap_codex_output_trimmed_at_section_boundary(self, tmp_path, monkeypatch, caplog):
+        over_cap = (
+            "# Reflections\n\n"
+            "## Core Identity\n" + ("a" * 200) + "\n\n"
+            "## Active Projects\n" + ("b" * 200) + "\n\n"
+            "## Life & Operations\n" + ("c" * 5000) + "\n"
+        )
+        cap = over_cap.index("## Life & Operations") + 200
+        config = self._codex_config(tmp_path, monkeypatch, output_cap=cap)
+        monkeypatch.setitem(sys.modules, "openai", _fake_openai_returning(over_cap))
+
+        with caplog.at_level(logging.WARNING, logger="observational_memory.reflect"):
+            result = run_reflector(config, dry_run=True)
+
+        assert result is not None
+        assert "## Core Identity" in result
+        assert "## Active Projects" in result
+        assert "## Life & Operations" not in result  # runaway section dropped whole
+        assert "ccccc" not in result  # never trimmed mid-section
+        assert any("OM_REFLECTOR_OUTPUT_MAX_CHARS" in r.message for r in caplog.records)
+
+    def test_under_cap_codex_output_untouched(self, tmp_path, monkeypatch, caplog):
+        under_cap = "# Reflections\n\n## Core Identity\n- Name: Alex\n\n## Active Projects\n- Thing\n"
+        config = self._codex_config(tmp_path, monkeypatch, output_cap=200000)
+        monkeypatch.setitem(sys.modules, "openai", _fake_openai_returning(under_cap))
+
+        with caplog.at_level(logging.WARNING, logger="observational_memory.reflect"):
+            result = run_reflector(config, dry_run=True)
+
+        assert result is not None
+        assert "- Name: Alex" in result
+        assert "- Thing" in result
+        assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" not in result  # no truncation marker
+        assert not any("OM_REFLECTOR_OUTPUT_MAX_CHARS" in r.message for r in caplog.records)

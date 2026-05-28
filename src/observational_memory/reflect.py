@@ -181,6 +181,12 @@ def finalize_reflection(result: str, config: Config, raw_observations: str, dry_
     timestamps, ensure metadata, prune stale snapshots, then (unless dry-run)
     write reflections.md, trim consumed observations, and reindex search.
     """
+    # Cap a runaway reflector output before it's stamped and persisted. The cap
+    # is provider-agnostic — it runs here, where the sync and async paths
+    # converge, so it also covers the openai-chatgpt (Codex) Responses path that
+    # can't honor max_output_tokens.
+    result = _cap_reflector_output(result, config.reflector_output_max_chars)
+
     # Programmatically stamp the "Last reflected" timestamp so we don't
     # rely on the LLM to format it correctly.
     latest_obs_date = _extract_latest_observation_date(raw_observations)
@@ -386,6 +392,49 @@ def _bound_reflections_context(
             max_chars,
         )
     return head + marker
+
+
+def _cap_reflector_output(result: str, max_chars: int) -> str:
+    """Cap a runaway reflector *output* at a section boundary.
+
+    Provider-agnostic safety net for the prompt-side length budget: a strong
+    reasoning model can blow past the target, and the openai-chatgpt (Codex)
+    Responses path can't enforce max_output_tokens, so nothing else bounds the
+    emitted document. When the output overruns ``max_chars`` (see
+    ``Config.reflector_output_max_chars``), trim back to the last complete
+    "## " section heading before the cap — never mid-section, which would leave
+    reflections.md with a half-written entry — append a marker, and log a
+    warning naming the cap. ``max_chars <= 0`` disables the cap. The default is
+    generous, so this only fires on a genuine runaway.
+    """
+    if max_chars <= 0 or len(result) <= max_chars:
+        return result
+
+    marker = "\n\n[... reflections truncated to fit OM_REFLECTOR_OUTPUT_MAX_CHARS ...]\n"
+    # Find the last "## " section boundary that starts at or before the cap (after
+    # reserving room for the marker) so the trimmed document never exceeds the cap
+    # and never ends mid-section.
+    budget = max(max_chars - len(marker), 0)
+    boundary = result.rfind("\n## ", 0, budget)
+    if boundary <= 0:
+        # No complete section fits under the cap (a giant first section, or a cap
+        # smaller than the head). NEVER slice mid-section — that would persist a
+        # half-written entry. Fall back to the document preamble before the first
+        # "## " heading (the title block — a complete, safe unit); if even that
+        # doesn't fit, emit the marker only.
+        first = result.find("\n## ")
+        preamble = result[:first] if first > 0 else ""
+        head = preamble if len(preamble) <= budget else ""
+    else:
+        head = result[: boundary + 1]  # keep the trailing newline before the next "## "
+
+    _LOGGER.warning(
+        "reflector output (%d chars) exceeds OM_REFLECTOR_OUTPUT_MAX_CHARS=%d; "
+        "trimmed at a section boundary. Tighten the reflector prompt or raise the cap.",
+        len(result),
+        max_chars,
+    )
+    return head.rstrip() + marker
 
 
 def _reflect_single(
@@ -814,6 +863,10 @@ def _run_cluster_reflector(config: Config, dry_run: bool = False) -> str | None:
         result = _reflect_single(system_prompt, reflections, raw_observations, config, auto_memory, amem_changed)
     else:
         result = _reflect_chunked(system_prompt, reflections, raw_observations, config, auto_memory, amem_changed)
+
+    # Same provider-agnostic output cap as finalize_reflection (the cluster
+    # reflector persists through its own path, so apply it here too).
+    result = _cap_reflector_output(result, config.reflector_output_max_chars)
 
     latest_obs_date = _extract_latest_observation_date(raw_observations)
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
