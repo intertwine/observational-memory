@@ -363,6 +363,45 @@ def test_budget_block_is_clean_clickexception_both_modes(cfg, monkeypatch):
             cli._reflect_async(cfg, explicit=explicit)
 
 
+def test_sync_run_propagates_budget_error_not_reflection_failed(cfg, monkeypatch):
+    from observational_memory import cli
+    from observational_memory.usage.budgets import BudgetExceededError
+
+    # BudgetExceededError subclasses RuntimeError; _run_reflector_sync must let it
+    # through (terminal, dedicated wording) rather than rewrap it as the generic
+    # "Reflection failed" used for retry-exhausted RuntimeErrors.
+    def blocked(config):
+        raise BudgetExceededError("daily budget exceeded")
+
+    monkeypatch.setattr("observational_memory.reflect.run_reflector", blocked)
+    with pytest.raises(BudgetExceededError):
+        cli._run_reflector_sync(cfg)
+
+
+def test_degrade_path_budget_block_keeps_dedicated_wording(cfg, monkeypatch):
+    import click
+
+    from observational_memory import cli, jobs
+    from observational_memory.reflect import ChunkingRequired
+    from observational_memory.usage.budgets import BudgetExceededError
+
+    # Async degrades to a synchronous run (ChunkingRequired); the sync llm.compress
+    # pre-call gate then hits the budget cap. The budget block must surface with its
+    # own wording, not the generic "Reflection failed" rewrap from _run_reflector_sync.
+    def needs_chunking(config):
+        raise ChunkingRequired("input too large")
+
+    def blocked(config):
+        raise BudgetExceededError("daily budget exceeded")
+
+    monkeypatch.setattr(jobs, "submit_reflect_batch", needs_chunking)
+    monkeypatch.setattr("observational_memory.reflect.run_reflector", blocked)
+    with pytest.raises(click.ClickException) as excinfo:
+        cli._reflect_async(cfg, explicit=False)
+    assert "daily budget exceeded" in str(excinfo.value)
+    assert "Reflection failed" not in str(excinfo.value)
+
+
 def _install_failing_openai(monkeypatch, error):
     """Install a fake openai whose batch submit (POST /batches) raises ``error``.
 
@@ -393,13 +432,24 @@ def _install_failing_openai(monkeypatch, error):
 
 
 def _openai_error(cls, message, code):
+    """Build a provider error the way the real OpenAI SDK does.
+
+    The SDK's ``_make_status_error_from_response`` sets ``exc.message`` to the
+    verbose ``"Error code: <status> - {'error': {...}}"`` envelope (the full body
+    dict embedded, NOT the clean inner message) and ``exc.body`` to the inner
+    error mapping (``body.get("error", body)``). Constructing it this way keeps
+    the fallback-message test honest about what production actually sees.
+    """
     import httpx
     import openai
 
     request = httpx.Request("POST", "https://api.openai.com/v1/batches")
     status = 429 if cls is openai.RateLimitError else 400
-    response = httpx.Response(status, request=request, json={"error": {"message": message, "code": code}})
-    return cls(message, response=response, body={"code": code})
+    payload = {"error": {"message": message, "code": code, "type": "invalid_request_error"}}
+    response = httpx.Response(status, request=request, json=payload)
+    err = openai.OpenAI(api_key="sk-test")._make_status_error_from_response(response)
+    assert isinstance(err, cls)
+    return err
 
 
 def test_async_submit_billing_error_is_clean_clickexception(cfg, monkeypatch):
@@ -453,6 +503,10 @@ def test_async_submit_other_provider_error_uses_provider_message(cfg, monkeypatc
         cli._reflect_async(cfg, explicit=True)
     assert "OpenAI Batch submission failed: model is not supported for batch" in str(excinfo.value)
     assert "Traceback" not in str(excinfo.value)
+    # Regression: the clean inner message surfaces, not the verbose SDK envelope
+    # ("Error code: 400 - {'error': {...}}") that exc.message actually carries.
+    assert "Error code:" not in str(excinfo.value)
+    assert "{'error'" not in str(excinfo.value)
 
 
 def test_sync_fallback_surfaces_retry_exhausted_runtimeerror_cleanly(cfg, monkeypatch):

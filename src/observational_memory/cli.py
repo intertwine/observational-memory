@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -203,15 +204,36 @@ def reflect(ctx: click.Context, dry_run: bool, async_mode: bool) -> None:
 
 def _run_reflector_sync(config: Config) -> None:
     from .reflect import run_reflector
+    from .usage.budgets import BudgetExceededError
 
     # The synchronous LLM path raises a retry-exhausted RuntimeError from
     # llm.compress (after _is_retryable's 429/5xx retries are spent); surface it
-    # as a clean CLI error instead of a raw traceback.
+    # as a clean CLI error instead of a raw traceback. BudgetExceededError also
+    # subclasses RuntimeError but is terminal with its own dedicated wording, so
+    # let it propagate (_reflect_async handles it on both submit and degrade paths).
     try:
         result = run_reflector(config)
+    except BudgetExceededError:
+        raise
     except RuntimeError as exc:
         raise click.ClickException(f"Reflection failed: {exc}") from exc
     click.echo(f"Reflections updated ({len(result)} chars)" if result else "No observations to reflect on.")
+
+
+def _run_reflector_sync_degrade(config: Config) -> None:
+    """Run the synchronous reflector on the async->sync degrade path.
+
+    A BudgetExceededError raised by the synchronous llm.compress pre-call gate
+    is terminal (the same cap applies sync or async), so surface it with the
+    dedicated budget wording — matching how _reflect_async handles a budget
+    block on the submit path — rather than the generic "Reflection failed".
+    """
+    from .usage.budgets import BudgetExceededError
+
+    try:
+        _run_reflector_sync(config)
+    except BudgetExceededError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _openai_batch_submit_message(exc: Exception) -> str:
@@ -226,7 +248,14 @@ def _openai_batch_submit_message(exc: Exception) -> str:
             "OpenAI Batch submission failed: billing hard limit reached. "
             "Check your OpenAI plan/limits (project-scoped keys have per-project spend caps)."
         )
-    detail = getattr(exc, "message", None) or str(exc)
+    # Prefer the clean inner provider message. The SDK puts the parsed error
+    # object on exc.body (a mapping with "message"), while exc.message is the
+    # verbose "Error code: 400 - {'error': {...}}" envelope dump — not actionable.
+    body = getattr(exc, "body", None)
+    if isinstance(body, Mapping) and body.get("message"):
+        detail = str(body["message"])
+    else:
+        detail = str(getattr(exc, "code", None) or exc) or "provider error"
     return f"OpenAI Batch submission failed: {detail}"
 
 
@@ -249,7 +278,7 @@ def _reflect_async(config: Config, explicit: bool) -> None:
         record = submit_reflect_batch(config)
     except ChunkingRequired as exc:
         click.echo(f"Input too large for a single Batch request ({exc}); running synchronously instead.", err=True)
-        _run_reflector_sync(config)
+        _run_reflector_sync_degrade(config)
         return
     except BudgetExceededError as exc:
         # A budget block is terminal: a synchronous fallback would hit the same cap.
@@ -265,7 +294,7 @@ def _reflect_async(config: Config, explicit: bool) -> None:
         if explicit:
             raise click.ClickException(str(exc)) from exc
         click.echo(f"Async Batch unavailable ({exc}); running synchronously instead.", err=True)
-        _run_reflector_sync(config)
+        _run_reflector_sync_degrade(config)
         return
 
     if record is None:

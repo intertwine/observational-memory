@@ -4,7 +4,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+/.venv
 .venv/
+
+# Node
+node_modules
 
 # Memory files (generated locally)
 memory/
