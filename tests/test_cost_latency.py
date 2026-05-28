@@ -150,6 +150,45 @@ def test_diagnostic_surfaces_configured_and_effective_caps(monkeypatch, caplog):
     assert "observation_chunk_budget=" in warnings
 
 
+def test_reflect_chunked_zero_cap_sends_marker_not_full_document(monkeypatch, caplog):
+    # Regression for the #74 review P1: a too-low OM_REFLECTOR_MAX_INPUT_TOKENS can
+    # derive an effective reflections cap of 0. That must mean "send a marker only",
+    # NOT "unbounded" — _bound_reflections_context reads max_chars<=0 as unbounded,
+    # so without the guard the full running reflections.md was re-sent on every
+    # fold, blowing the per-call budget the cap exists to enforce.
+    from observational_memory.reflect import _REFLECTIONS_BUDGET_EXHAUSTED, _reflector_budgets
+
+    captured: list[tuple[str, str]] = []
+
+    def fake_compress(system_prompt, user_content, config, **kwargs):
+        captured.append((system_prompt, user_content))
+        return "# Reflections\n\n" + "U" * 60000  # a large running document
+
+    monkeypatch.setattr(reflect, "compress", fake_compress)
+    # The reviewer's repro: configured cap 48000 but an input ceiling so low the
+    # budget leaves no room for any reflections context.
+    cfg = Config(reflector_context_max_chars=48000, reflector_max_input_tokens=1000)
+    system_prompt = "S" * 200
+    reflections_cap, chunk_budget = _reflector_budgets(system_prompt, "", cfg)
+    assert reflections_cap == 0  # precondition: budget truly leaves no room
+
+    sections = "".join(f"## 2026-05-{d:02d}\n\n" + ("- obs line\n" * 200) for d in range(10, 16))
+    observations = "# Observations\n\n" + sections
+    with caplog.at_level("WARNING", logger="observational_memory.reflect"):
+        reflect._reflect_chunked(system_prompt, "R" * 60000, observations, cfg)
+
+    assert len(captured) >= 2, "expected multiple folds"
+    for sys_prompt, user_content in captured:
+        # The full running document is NOT re-sent — the marker stands in for it.
+        assert _REFLECTIONS_BUDGET_EXHAUSTED in user_content
+        assert "U" * 1000 not in user_content  # not the 60k running output
+        assert "R" * 1000 not in user_content  # not the 60k seed reflections
+        # Each fold is bounded near the chunk budget, not chunk + the 60k document.
+        assert len(sys_prompt) + len(user_content) <= chunk_budget + 2000
+    # The operator is told the config left no room, so it isn't a silent clamp.
+    assert any("leaves no room for reflections context" in r.getMessage() for r in caplog.records)
+
+
 def test_two_x_corpus_reflects_without_dropping_most_reflections(monkeypatch):
     # A ~2x-corpus scenario (reflections.md grown to ~96k, ~2x the 48k target)
     # must still reflect while keeping the bulk of the reflections context —

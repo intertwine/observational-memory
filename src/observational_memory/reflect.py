@@ -31,6 +31,10 @@ _MIN_CHUNK_CHARS = 4000
 _DEFAULT_CHUNK_BUDGET_CHARS = int(45_000 * _CHARS_PER_TOKEN * 0.6)
 # max_tokens for reflector output (200-600 lines needs room)
 _REFLECTOR_MAX_OUTPUT_TOKENS = 8192
+# Sent as the per-fold reflections context when the input budget leaves no room
+# for any reflections at all (a pathological config). Keeps the fold under the
+# per-call ceiling instead of re-sending the full running document.
+_REFLECTIONS_BUDGET_EXHAUSTED = "[... reflections context omitted: reflector input budget exhausted ...]"
 _MAX_COMPETING_SNAPSHOT_CHARS = 4000
 
 # Regex for the "Last reflected" timestamp line in reflections.md
@@ -468,6 +472,25 @@ def _reflect_chunked(
         "observation_chunk_budget": chunk_budget,
     }
 
+    # A pathological config (too-low OM_REFLECTOR_MAX_INPUT_TOKENS, or an extreme
+    # observation chunk ratio) can leave no room for reflections context at all.
+    # An effective cap of 0 must mean "send a marker only" here — NOT "unbounded",
+    # which is how _bound_reflections_context reads max_chars<=0 — otherwise the
+    # full running document is re-sent and the per-call ceiling this budget exists
+    # to enforce is violated. Warn once so the operator can fix the config.
+    budget_exhausted = reflections_cap <= 0
+    if budget_exhausted:
+        _LOGGER.warning(
+            "reflector input budget leaves no room for reflections context "
+            "(configured_reflections_cap=%d effective_reflections_cap=0 "
+            "max_input_tokens=%d observation_chunk_budget=%d); folding with a marker "
+            "only. Raise OM_REFLECTOR_MAX_INPUT_TOKENS or lower "
+            "OM_REFLECTOR_OBSERVATION_CHUNK_RATIO.",
+            config.reflector_context_max_chars,
+            config.reflector_max_input_tokens,
+            chunk_budget,
+        )
+
     running_reflections = reflections
 
     for i, chunk in enumerate(chunks, 1):
@@ -487,8 +510,13 @@ def _reflect_chunked(
         # Bound the *re-sent* running document so the chunked fold isn't
         # O(chunks x reflections_size) and stays under the per-call budget.
         # running_reflections itself keeps the full latest output; only the
-        # per-fold context is capped.
-        bounded = _bound_reflections_context(running_reflections, reflections_cap, budget_diagnostics)
+        # per-fold context is capped. A 0 cap means no room at all -> marker only
+        # (never the full document, which _bound_reflections_context would re-send
+        # for max_chars<=0).
+        if budget_exhausted:
+            bounded = _REFLECTIONS_BUDGET_EXHAUSTED
+        else:
+            bounded = _bound_reflections_context(running_reflections, reflections_cap, budget_diagnostics)
         user_content = (
             f"## Current reflections\n\n{bounded}\n\n"
             f"---\n\n"
