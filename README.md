@@ -11,8 +11,12 @@
 
 Observational Memory, or `om`, gives Claude Code, Codex, Grok Build TUI, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
 
-The current release is `v0.6.6`. It includes:
+The current release is `v0.6.7`. It includes:
 
+- **Fail-closed startup context** — the Claude, Grok, and Cowork hooks route through bounded `om context` only; if it's unavailable they emit nothing (plus a stderr hint) instead of dumping raw, unbounded memory files
+- **Configurable, honest reflector budgets** — `OM_REFLECTOR_MAX_INPUT_TOKENS` / `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO` knobs, a default that no longer silently clamps your configured cap, and diagnostics that report configured-vs-effective limits
+- **Codex-safe reflector output cap** — `OM_REFLECTOR_OUTPUT_MAX_CHARS` bounds the emitted document on every backend (trimming at a section boundary), even the ChatGPT Codex path that rejects `max_output_tokens`
+- **Clean async-Batch errors** — `om reflect --async` reports billing/quota failures as a one-line message, not a raw traceback
 - **See and cap LLM spend** — every observe/reflect call records tokens and an estimated cost, with token/dollar budgets (hard or soft, per day/month/session) that stop a runaway job before it bills (`om usage status`, `om usage budget`)
 - **Offline reflection via OpenAI Batch** — `om reflect --async` submits a job and `om jobs poll` applies it later, at ~50% token cost on a metered OpenAI key
 - **Cheaper, faster observe/reflect** — bounded reflector input, ChatGPT Codex reasoning-effort control, and Anthropic prompt caching
@@ -181,7 +185,7 @@ The short version:
 
 ## Release State
 
-`v0.6.6` is the current release. It adds a host-local usage/cost/budget subsystem (`om usage`), offline reflection through the OpenAI Batch API (`om reflect --async`, `om jobs`), observe/reflect cost-and-latency improvements (bounded reflector input, Codex reasoning-effort control, Anthropic prompt caching), and startup-context quality controls (cross-section de-duplication, freshness markers, cwd/task scope, `om context --quality-report`). It builds on v0.6.5 subscription auth (`om login`) and the v0.6.4 `SessionStart` timeout hardening (`make verify-session-start`).
+`v0.6.7` is the current release. It is a hardening pass on v0.6.6: fail-closed startup hooks (route through bounded `om context`, never dump raw memory files), a configurable and honestly-diagnosed reflector input budget (`OM_REFLECTOR_MAX_INPUT_TOKENS`, `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO`), a Codex-safe reflector output cap (`OM_REFLECTOR_OUTPUT_MAX_CHARS`), and clean async-Batch error messages. It builds on the v0.6.6 usage/cost/budget subsystem (`om usage`), OpenAI Batch async reflection (`om reflect --async`, `om jobs`), and startup-context quality controls (`om context --quality-report`).
 
 Before the next release, maintainers should run:
 

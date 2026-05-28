@@ -4,10 +4,14 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.6.6`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.6.7`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
+- fail-closed startup hooks (Claude/Grok/Cowork `SessionStart` route through bounded `om context` only; never dump raw `profile.md`/`active.md`/`reflections.md`/`observations.md` on failure)
+- configurable, honestly-diagnosed reflector input budget (`OM_REFLECTOR_MAX_INPUT_TOKENS`, `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO`; configured-vs-effective cap reporting)
+- Codex-safe reflector output cap (`OM_REFLECTOR_OUTPUT_MAX_CHARS`, section-boundary trim, applied post-call so it bounds the `openai-chatgpt` path too)
+- clean async-Batch error UX (`om reflect --async` reports billing/quota failures as one-line CLI errors, not tracebacks)
 - host-local usage/cost tracking and budgets with `om usage` (SQLite `usage.sqlite`, shipped pricing snapshot, hard/soft token & dollar budgets, `om doctor` integration)
 - offline reflection via the API-key OpenAI Batch API (`om reflect --async`, `om jobs list|poll|show|cancel`, `OM_OPENAI_ASYNC_MODE`)
 - observe/reflect cost & latency controls (bounded reflector input via `OM_REFLECTOR_CONTEXT_MAX_CHARS`, Codex reasoning effort via `OM_OPENAI_CHATGPT_REASONING_EFFORT`, Anthropic prompt caching)
@@ -136,4 +140,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-`v0.6.6` has release notes in `docs/RELEASE-0.6.6.md`. Future release steps require explicit user approval.
+`v0.6.7` has release notes in `docs/RELEASE-0.6.7.md`. Future release steps require explicit user approval.
