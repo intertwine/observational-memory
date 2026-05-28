@@ -27,8 +27,8 @@ If you already pay for ChatGPT Plus / Pro / Team / Enterprise or for SuperGrok, 
 | Provider           | Auth                       | Default model       | Marginal cost per call |
 |--------------------|----------------------------|---------------------|------------------------|
 | `openai-chatgpt`   | ChatGPT subscription OAuth | `gpt-5.5`           | $0 (your plan)         |
-| `xai-oauth`        | SuperGrok OAuth (PKCE)     | `grok-code-fast-1`  | $0 (your plan)         |
-| `xai`              | `XAI_API_KEY`              | `grok-code-fast-1`  | Metered                |
+| `xai-oauth`        | SuperGrok OAuth (PKCE)     | `grok-4.3`          | $0 (your plan)         |
+| `xai`              | `XAI_API_KEY`              | `grok-4.3`          | Metered                |
 | `openai`           | `OPENAI_API_KEY`           | `gpt-4o-mini`       | Metered                |
 | `anthropic`        | `ANTHROPIC_API_KEY`        | `claude-sonnet-4-5` | Metered                |
 
@@ -72,7 +72,7 @@ xAI Grok subscription (SuperGrok):
 
 ```bash
 OM_LLM_PROVIDER=xai-oauth
-OM_XAI_OAUTH_MODEL=grok-code-fast-1
+OM_XAI_OAUTH_MODEL=grok-4.3
 # Optional overrides:
 # OM_XAI_OAUTH_BASE_URL=https://api.x.ai/v1
 # OM_XAI_OAUTH_CLIENT_ID=b1a00492-073a-47ea-816f-4c329264a828
@@ -93,7 +93,7 @@ xAI Grok with an API key (metered fallback):
 ```bash
 OM_LLM_PROVIDER=xai
 XAI_API_KEY=xai-...
-OM_XAI_MODEL=grok-code-fast-1
+OM_XAI_MODEL=grok-4.3
 # Optional:
 # OM_XAI_BASE_URL=https://api.x.ai/v1
 ```
