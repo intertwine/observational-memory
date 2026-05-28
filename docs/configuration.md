@@ -154,7 +154,24 @@ The reflector folds new observations into `reflections.md`. For large observatio
 
 When the cap does trim, it keeps the head of the document (durable identity and active projects sit at the top) and logs a warning. In single-pass reflection it bounds only the *input* context — the reflector still emits a complete document — so a normal run never shrinks your stored memory, and raising the cap restores the full context.
 
-The chunked path (only reached for very large observation sets) is stricter: every fold must fit one per-call input budget shared between the reflections context and the observation chunk, so the reflections context is automatically reduced — below your configured cap if necessary — to keep each call within budget. Folding against a reduced head means tail sections beyond that limit may not carry forward. The practical guidance is to keep `reflections.md` compact (the prompt targets 200–600 lines); the deeper fix, incremental section-targeted reflection, is tracked separately.
+#### Per-call input budget
+
+The chunked path (only reached for very large observation sets) shares one per-call input budget between the reflections context and the observation chunk. Two knobs control it:
+
+```bash
+OM_REFLECTOR_MAX_INPUT_TOKENS=45000        # per-call input ceiling (~3.5 chars/token)
+OM_REFLECTOR_OBSERVATION_CHUNK_RATIO=0.6   # fraction of the budget for the obs chunk
+```
+
+`OM_REFLECTOR_MAX_INPUT_TOKENS` (default `45000`) is the ceiling for one reflector call, converted to chars at ~3.5 chars/token. The default is sized so the *effective* reflections context cap is not silently clamped below the configured `OM_REFLECTOR_CONTEXT_MAX_CHARS` (default `48000`): observations get the chunk ratio of the budget, and what remains — after the system prompt, auto-memory section, and a fixed wrapper allowance — leaves room for the full configured cap. `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO` (default `0.6`) is how much of that budget goes to the observation chunk on each fold; larger chunks mean fewer folds and less repeated re-sending of the reflections context.
+
+If you lower the input ceiling (or raise the chunk ratio) far enough, the effective reflections cap can drop below the configured one. When that happens the warning reports **both** values plus the binding ceiling, so you can tell which limit is actually clamping the context:
+
+```text
+configured_reflections_cap=48000 effective_reflections_cap=12143 max_input_tokens=12000 observation_chunk_budget=25200
+```
+
+Here the operator set `OM_REFLECTOR_CONTEXT_MAX_CHARS=48000`, but a low `max_input_tokens` clamped the effective cap to `12143`. Raise `OM_REFLECTOR_MAX_INPUT_TOKENS` (or compress `reflections.md`) to let the configured cap bind again. The deeper fix, incremental section-targeted reflection, is tracked separately.
 
 ### Latency: Codex reasoning effort
 

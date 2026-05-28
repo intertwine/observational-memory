@@ -109,6 +109,26 @@ class TestEnvFile:
         assert config.codex_checkpoint_state_path == memory_dir / ".codex-checkpoint-state.json"
         assert config.codex_checkpoint_lock_dir == memory_dir / ".codex-checkpoint-locks"
 
+    def test_reflector_budget_defaults(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OM_REFLECTOR_MAX_INPUT_TOKENS", raising=False)
+        monkeypatch.delenv("OM_REFLECTOR_OBSERVATION_CHUNK_RATIO", raising=False)
+
+        config = Config(env_file=tmp_path / "env")
+
+        # The settled #65 default raises the input ceiling so the configured
+        # 48000-char reflections cap is not silently clamped below it.
+        assert config.reflector_max_input_tokens == 45000
+        assert config.reflector_observation_chunk_ratio == 0.6
+
+    def test_reflector_budget_reads_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OM_REFLECTOR_MAX_INPUT_TOKENS", "30000")
+        monkeypatch.setenv("OM_REFLECTOR_OBSERVATION_CHUNK_RATIO", "0.5")
+
+        config = Config(env_file=tmp_path / "env")
+
+        assert config.reflector_max_input_tokens == 30000
+        assert config.reflector_observation_chunk_ratio == 0.5
+
     def test_qmd_config_reads_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OM_SEARCH_BACKEND", "qmd-hybrid")
         monkeypatch.setenv("OM_QMD_INDEX_NAME", "om-review")

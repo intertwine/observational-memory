@@ -170,6 +170,13 @@ ENV_FILE_TEMPLATE = """\
 # re-sent to the reflector (0 = send all; default 48000, comfortably fits a
 # target-size doc; bounds the chunked fold's re-send cost):
 # OM_REFLECTOR_CONTEXT_MAX_CHARS=48000
+# Reflector per-call input ceiling in tokens (~3.5 chars/token). Sized so the
+# configured OM_REFLECTOR_CONTEXT_MAX_CHARS actually binds rather than being
+# silently clamped by the input ceiling (default 45000):
+# OM_REFLECTOR_MAX_INPUT_TOKENS=45000
+# Fraction of the reflector's per-call budget given to the observations chunk;
+# the rest is the reflections context. Higher = fewer folds (default 0.6):
+# OM_REFLECTOR_OBSERVATION_CHUNK_RATIO=0.6
 #
 # Startup context: mark operational facts (tool versions/install status) older
 # than this many days with "(as of <date> — verify)" (default 14):
@@ -344,6 +351,32 @@ class Config:
     # head, where durable identity/projects live, and logging a warning. 0 disables.
     reflector_context_max_chars: int = field(
         default_factory=lambda: int(os.environ.get("OM_REFLECTOR_CONTEXT_MAX_CHARS", "48000"))
+    )
+    # Maximum input tokens to send in a single reflector call. The chunked
+    # reflector keeps every fold (system prompt + reflections context + obs
+    # chunk + wrappers) under this ceiling, converted to chars via the
+    # reflector's ~3.5 chars/token estimate.
+    #
+    # The default is sized so the *effective* reflections context cap is not
+    # silently clamped below the configured OM_REFLECTOR_CONTEXT_MAX_CHARS
+    # (default 48000). The chunked path gives observations the chunk ratio
+    # (default 0.6) of the budget and leaves the rest for reflections, minus
+    # the system prompt (~4.3k chars), auto-memory section (up to ~4k), and a
+    # fixed wrapper allowance (400). At 45000 tokens:
+    #   45000 * 3.5 = 157500 chars total
+    #   157500 * (1 - 0.6) - 4312 - 4000 - 400 = ~54288 chars for reflections
+    # which comfortably exceeds the 48000 configured cap, so the configured cap
+    # binds (not the input ceiling) for the current corpus shape. 0 is invalid
+    # (a positive ceiling is required); raise this to send more per call.
+    reflector_max_input_tokens: int = field(
+        default_factory=lambda: int(os.environ.get("OM_REFLECTOR_MAX_INPUT_TOKENS", "45000"))
+    )
+    # Fraction of the per-call input budget the chunked reflector allocates to
+    # the observations chunk; the rest goes to the reflections context. Larger
+    # chunks mean fewer folds, and each fold re-sends the reflections context,
+    # so a higher ratio minimizes the repeated re-send cost. Range (0, 1).
+    reflector_observation_chunk_ratio: float = field(
+        default_factory=lambda: _safe_float(os.environ.get("OM_REFLECTOR_OBSERVATION_CHUNK_RATIO"), 0.6)
     )
 
     # Reflector settings

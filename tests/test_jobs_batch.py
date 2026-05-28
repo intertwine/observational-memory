@@ -140,8 +140,9 @@ def test_provider_guard_requires_api_key(cfg, monkeypatch):
 
 def test_chunking_required_for_large_input(cfg, monkeypatch):
     _install_fake_openai(monkeypatch, {})
-    # A huge observations file forces the chunked path -> not single-pass.
-    big = "# Observations\n\n## 2026-05-20\n\n" + ("- 🔴 10:00 " + "x" * 100 + "\n") * 800
+    # A huge observations file (well past the default per-call input ceiling)
+    # forces the chunked path -> not single-pass.
+    big = "# Observations\n\n## 2026-05-20\n\n" + ("- 🔴 10:00 " + "x" * 100 + "\n") * 2000
     cfg.observations_path.write_text(big)
     with pytest.raises(ChunkingRequired):
         submit_reflect_batch(cfg)

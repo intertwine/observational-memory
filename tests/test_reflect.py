@@ -294,8 +294,9 @@ class TestChunkObservations:
         assert "# Observations" in chunks[0]
 
     def test_splits_large_observations(self):
-        # Create observations that exceed the budget per chunk
-        # Budget is ~63k chars (30000 * 3.5 * 0.6)
+        # Create observations that exceed the budget per chunk.
+        # Standalone fallback budget is ~94.5k chars (45000 * 3.5 * 0.6); three
+        # ~40k sections still force more than one chunk.
         big_section = "## 2026-02-0{i}\n\n" + "- 🔴 10:00 " + "x" * 40000 + "\n\n"
         obs = "# Observations\n\n"
         obs += big_section.format(i=1)
@@ -327,7 +328,8 @@ class TestChunkObservations:
 class TestReflectChunked:
     @patch("observational_memory.reflect.compress")
     def test_folds_chunks_sequentially(self, mock_compress, tmp_path):
-        config = Config(memory_dir=tmp_path / "memory")
+        # Use a small input ceiling so two ~25k sections force exactly 2 chunks.
+        config = Config(memory_dir=tmp_path / "memory", reflector_max_input_tokens=12000)
 
         # Simulate two chunks: compress called twice, each time returns updated reflections
         mock_compress.side_effect = [
@@ -336,7 +338,7 @@ class TestReflectChunked:
         ]
 
         # Build observations large enough to force 2 chunks.
-        # Each section must exceed _MAX_INPUT_TOKENS when combined with
+        # Each section must exceed the per-call ceiling when combined with
         # system prompt + reflections, but each individual section must fit
         # in a single chunk so we get exactly 2 calls.
         big = "- 🔴 10:00 " + "x" * 25000 + "\n\n"
@@ -349,7 +351,7 @@ class TestReflectChunked:
 
     @patch("observational_memory.reflect.compress")
     def test_intermediate_chunks_get_note(self, mock_compress, tmp_path):
-        config = Config(memory_dir=tmp_path / "memory")
+        config = Config(memory_dir=tmp_path / "memory", reflector_max_input_tokens=12000)
 
         mock_compress.side_effect = [
             "# Reflections after 1",
@@ -371,7 +373,7 @@ class TestReflectChunked:
 
     @patch("observational_memory.reflect.compress")
     def test_final_chunk_gets_auto_memory_cleanup_note_on_deletion(self, mock_compress, tmp_path):
-        config = Config(memory_dir=tmp_path / "memory")
+        config = Config(memory_dir=tmp_path / "memory", reflector_max_input_tokens=12000)
 
         mock_compress.side_effect = [
             "# Reflections after 1",
