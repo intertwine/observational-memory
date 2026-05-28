@@ -106,7 +106,7 @@ def test_doctor_codex_startup_warns_when_only_agents_fallback_present(monkeypatc
     codex_agents = tmp_path / "codex" / "AGENTS.md"
     codex_agents.write_text(
         "<!-- observational-memory -->\n"
-        "<!-- observational-memory:codex-hooks-fallback-v1 -->\n"
+        "<!-- observational-memory:codex-hooks-fallback-v2 -->\n"
         "Codex startup context is normally injected through hooks.\n"
         "<!-- observational-memory -->\n"
     )
@@ -203,7 +203,7 @@ def test_doctor_codex_startup_passes_with_hooks_enabled(monkeypatch, tmp_path):
 
     (codex_home / "AGENTS.md").write_text(
         "<!-- observational-memory -->\n"
-        "<!-- observational-memory:codex-hooks-fallback-v1 -->\n"
+        "<!-- observational-memory:codex-hooks-fallback-v2 -->\n"
         "Codex startup context is normally injected through hooks.\n"
         "<!-- observational-memory -->\n"
     )
