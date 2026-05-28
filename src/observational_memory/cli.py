@@ -204,8 +204,30 @@ def reflect(ctx: click.Context, dry_run: bool, async_mode: bool) -> None:
 def _run_reflector_sync(config: Config) -> None:
     from .reflect import run_reflector
 
-    result = run_reflector(config)
+    # The synchronous LLM path raises a retry-exhausted RuntimeError from
+    # llm.compress (after _is_retryable's 429/5xx retries are spent); surface it
+    # as a clean CLI error instead of a raw traceback.
+    try:
+        result = run_reflector(config)
+    except RuntimeError as exc:
+        raise click.ClickException(f"Reflection failed: {exc}") from exc
     click.echo(f"Reflections updated ({len(result)} chars)" if result else "No observations to reflect on.")
+
+
+def _openai_batch_submit_message(exc: Exception) -> str:
+    """Map an OpenAI submit error to a one-line, actionable CLI message.
+
+    Billing/quota failures (``billing_hard_limit_reached`` / ``insufficient_quota``)
+    get a plan/limits hint; everything else falls back to the provider message.
+    """
+    code = getattr(exc, "code", None) or ""
+    if code in ("billing_hard_limit_reached", "insufficient_quota"):
+        return (
+            "OpenAI Batch submission failed: billing hard limit reached. "
+            "Check your OpenAI plan/limits (project-scoped keys have per-project spend caps)."
+        )
+    detail = getattr(exc, "message", None) or str(exc)
+    return f"OpenAI Batch submission failed: {detail}"
 
 
 def _reflect_async(config: Config, explicit: bool) -> None:
@@ -217,6 +239,8 @@ def _reflect_async(config: Config, explicit: bool) -> None:
     from the persistent ``OM_OPENAI_ASYNC_MODE=batch`` env mode — so a scheduled
     reflect never hard-fails just because Batch isn't usable on this host.
     """
+    import openai
+
     from .jobs import BatchProviderError, submit_reflect_batch
     from .reflect import ChunkingRequired
     from .usage.budgets import BudgetExceededError
@@ -230,6 +254,13 @@ def _reflect_async(config: Config, explicit: bool) -> None:
     except BudgetExceededError as exc:
         # A budget block is terminal: a synchronous fallback would hit the same cap.
         raise click.ClickException(str(exc)) from exc
+    except openai.APIStatusError as exc:
+        # Raw provider errors from the file upload + POST /batches (e.g. 400
+        # billing_hard_limit_reached / BadRequestError, 429 insufficient_quota /
+        # RateLimitError). Surface a clean, actionable message — no traceback.
+        # The job record is only saved after a successful submit, so a failed
+        # submit leaves no dangling job and writes nothing.
+        raise click.ClickException(_openai_batch_submit_message(exc)) from exc
     except BatchProviderError as exc:
         if explicit:
             raise click.ClickException(str(exc)) from exc

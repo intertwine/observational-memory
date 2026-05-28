@@ -363,6 +363,114 @@ def test_budget_block_is_clean_clickexception_both_modes(cfg, monkeypatch):
             cli._reflect_async(cfg, explicit=explicit)
 
 
+def _install_failing_openai(monkeypatch, error):
+    """Install a fake openai whose batch submit (POST /batches) raises ``error``.
+
+    The file upload succeeds; ``batches.create`` raises the given provider error,
+    mirroring a real ``POST /batches`` rejection. The fake namespace re-exports the
+    real ``APIStatusError`` so ``cli._reflect_async``'s ``except`` clause resolves.
+    """
+    import openai
+
+    class _FakeFiles:
+        def create(self, file, purpose):
+            return SimpleNamespace(id="file-input-1")
+
+    class _FakeBatches:
+        def create(self, input_file_id, endpoint, completion_window):
+            raise error
+
+    class _FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.files = _FakeFiles()
+            self.batches = _FakeBatches()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "openai",
+        SimpleNamespace(OpenAI=_FakeOpenAI, APIStatusError=openai.APIStatusError),
+    )
+
+
+def _openai_error(cls, message, code):
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "https://api.openai.com/v1/batches")
+    status = 429 if cls is openai.RateLimitError else 400
+    response = httpx.Response(status, request=request, json={"error": {"message": message, "code": code}})
+    return cls(message, response=response, body={"code": code})
+
+
+def test_async_submit_billing_error_is_clean_clickexception(cfg, monkeypatch):
+    import click
+    import openai
+
+    from observational_memory import cli
+
+    error = _openai_error(openai.BadRequestError, "Billing hard limit has been reached", "billing_hard_limit_reached")
+    _install_failing_openai(monkeypatch, error)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        cli._reflect_async(cfg, explicit=True)
+    # Actionable one-line message, no raw traceback / provider class leaking out.
+    assert "billing hard limit reached" in str(excinfo.value)
+    assert "plan/limits" in str(excinfo.value)
+    assert "Traceback" not in str(excinfo.value)
+    # Regression: a failed submit leaves no dangling job and writes nothing new.
+    assert ProviderJobStore(cfg.openai_batch_jobs_dir).list() == []
+    assert cfg.reflections_path.read_text() == _REFLECTIONS
+
+
+def test_async_submit_rate_limit_error_is_clean_clickexception(cfg, monkeypatch):
+    import click
+    import openai
+
+    from observational_memory import cli
+
+    error = _openai_error(openai.RateLimitError, "You exceeded your current quota", "insufficient_quota")
+    _install_failing_openai(monkeypatch, error)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        cli._reflect_async(cfg, explicit=True)
+    assert "billing hard limit reached" in str(excinfo.value)
+    assert "Traceback" not in str(excinfo.value)
+    # Regression: no dangling job record, reflections.md untouched.
+    assert ProviderJobStore(cfg.openai_batch_jobs_dir).list() == []
+    assert cfg.reflections_path.read_text() == _REFLECTIONS
+
+
+def test_async_submit_other_provider_error_uses_provider_message(cfg, monkeypatch):
+    import click
+    import openai
+
+    from observational_memory import cli
+
+    error = _openai_error(openai.BadRequestError, "model is not supported for batch", "model_not_found")
+    _install_failing_openai(monkeypatch, error)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        cli._reflect_async(cfg, explicit=True)
+    assert "OpenAI Batch submission failed: model is not supported for batch" in str(excinfo.value)
+    assert "Traceback" not in str(excinfo.value)
+
+
+def test_sync_fallback_surfaces_retry_exhausted_runtimeerror_cleanly(cfg, monkeypatch):
+    import click
+
+    from observational_memory import cli
+
+    # Mirror the retry-exhausted RuntimeError raised by llm.compress after retries.
+    def boom(config):
+        raise RuntimeError("LLM request failed for provider 'openai' using model 'gpt-4o': 429 rate limited")
+
+    monkeypatch.setattr("observational_memory.reflect.run_reflector", boom)
+    with pytest.raises(click.ClickException) as excinfo:
+        cli._run_reflector_sync(cfg)
+    assert "Reflection failed:" in str(excinfo.value)
+    assert "Traceback" not in str(excinfo.value)
+
+
 def test_cancel_leaves_job_pending_on_failure(cfg, monkeypatch):
     state: dict = {"cancel_raises": True}
     _install_fake_openai(monkeypatch, state)
