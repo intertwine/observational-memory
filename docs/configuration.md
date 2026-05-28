@@ -173,6 +173,12 @@ configured_reflections_cap=48000 effective_reflections_cap=12143 max_input_token
 
 Here the operator set `OM_REFLECTOR_CONTEXT_MAX_CHARS=48000`, but a low `max_input_tokens` clamped the effective cap to `12143`. Raise `OM_REFLECTOR_MAX_INPUT_TOKENS` (or compress `reflections.md`) to let the configured cap bind again. The deeper fix, incremental section-targeted reflection, is tracked separately.
 
+### Reflector output cap
+
+`OM_REFLECTOR_OUTPUT_MAX_CHARS` (default `200000`) caps the reflector's *output* — the document it emits — applied after the model returns. The reflector prompt already carries a length budget, but a strong reasoning model can blow past it, and the `openai-chatgpt` (Codex) Responses backend rejects `max_output_tokens`, so nothing API-side bounds the result on that path. This cap is provider-agnostic: it runs in the reflect pipeline where the synchronous and async (Batch) paths converge, so it covers every backend, Codex included.
+
+The default is deliberately generous. A target-size `reflections.md` (200–600 lines) is well under it, and even the runaway run that motivated the cap emitted about 121k chars — so the default only fires on a genuine runaway, never on a normal run. When the output does overrun, the pipeline trims back to the last complete `## ` section heading before the cap (never mid-section, which would leave a half-written entry in `reflections.md`), appends a truncation marker, and logs a warning naming the cap. Set it to `0` to disable the cap.
+
 ### Latency: Codex reasoning effort
 
 ChatGPT Codex (`openai-chatgpt`) accepts a reasoning effort — `low`, `medium`, `high`, or `xhigh`. Lower effort cuts `gpt-5.5` latency sharply. Observe runs default to `low` (it's frequent and latency-sensitive); reflect is left at the backend default to protect consolidation quality. Override globally or per operation:
