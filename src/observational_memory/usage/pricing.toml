@@ -2,7 +2,8 @@
 #
 # Prices are USD per 1,000,000 tokens (input / output), the unit every major
 # provider quotes. This is a DATED SNAPSHOT and is intentionally easy to PR:
-# bump `snapshot_date` and the values when a provider changes prices.
+# bump `snapshot_date` to the newest refreshed row date when a provider changes
+# prices.
 #
 # These figures are approximate published list prices as of the snapshot date
 # and may not match your negotiated/enterprise rate. Override per host with a
@@ -15,7 +16,7 @@
 # Subscription-backed providers (openai-chatgpt, xai-oauth) always record
 # $0.00 marginal cost regardless of this table.
 
-snapshot_date = "2026-05-24"
+snapshot_date = "2026-05-28"
 
 [models]
 # Anthropic
@@ -33,5 +34,7 @@ snapshot_date = "2026-05-24"
 "o4-mini" = { input = 1.10, output = 4.40 }
 
 # xAI
+# Source: https://docs.x.ai/developers/models/grok-4.3
+"grok-4.3" = { input = 1.25, output = 2.50 }
 "grok-4" = { input = 3.00, output = 15.00 }
 "grok-code-fast-1" = { input = 0.20, output = 1.50 }

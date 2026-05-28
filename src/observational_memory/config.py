@@ -193,8 +193,8 @@ ENV_FILE_TEMPLATE = """\
 #
 # Subscription providers (preferred for cheap-feeling features; run `om login`):
 # OM_OPENAI_CHATGPT_MODEL=gpt-5.5
-# OM_XAI_OAUTH_MODEL=grok-code-fast-1
-# OM_XAI_MODEL=grok-code-fast-1
+# OM_XAI_OAUTH_MODEL=grok-4.3
+# OM_XAI_MODEL=grok-4.3
 # Endpoint overrides (validated against chatgpt.com / api.x.ai):
 # OM_OPENAI_CHATGPT_BASE_URL=
 # OM_XAI_OAUTH_BASE_URL=
@@ -310,8 +310,8 @@ class Config:
     codex_reflector_reasoning_effort: str | None = field(
         default_factory=lambda: os.environ.get("OM_OPENAI_CHATGPT_REFLECTOR_REASONING_EFFORT")
     )
-    xai_oauth_model: str = field(default_factory=lambda: os.environ.get("OM_XAI_OAUTH_MODEL", "grok-code-fast-1"))
-    xai_model: str = field(default_factory=lambda: os.environ.get("OM_XAI_MODEL", "grok-code-fast-1"))
+    xai_oauth_model: str = field(default_factory=lambda: os.environ.get("OM_XAI_OAUTH_MODEL", "grok-4.3"))
+    xai_model: str = field(default_factory=lambda: os.environ.get("OM_XAI_MODEL", "grok-4.3"))
     vertex_project_id: str | None = field(default_factory=lambda: os.environ.get("OM_VERTEX_PROJECT_ID"))
     vertex_region: str | None = field(default_factory=lambda: os.environ.get("OM_VERTEX_REGION"))
     bedrock_region: str | None = field(

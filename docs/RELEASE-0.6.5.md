@@ -16,8 +16,8 @@ Both flows are also reachable as zero-prompt imports if you already have Codex C
 | Provider id        | Transport                                                          | Auth                              | Default model         |
 |--------------------|--------------------------------------------------------------------|-----------------------------------|-----------------------|
 | `openai-chatgpt`   | Codex **Responses API**, `base_url=chatgpt.com/backend-api/codex`  | OAuth (subscription, device-code) | `gpt-5.5`             |
-| `xai-oauth`        | OpenAI-compatible Chat Completions, `base_url=api.x.ai/v1`         | OIDC loopback + PKCE              | `grok-code-fast-1`    |
-| `xai`              | OpenAI-compatible Chat Completions, `base_url=api.x.ai/v1`         | `XAI_API_KEY` (metered fallback)  | `grok-code-fast-1`    |
+| `xai-oauth`        | OpenAI-compatible Chat Completions, `base_url=api.x.ai/v1`         | OIDC loopback + PKCE              | `grok-4.3`            |
+| `xai`              | OpenAI-compatible Chat Completions, `base_url=api.x.ai/v1`         | `XAI_API_KEY` (metered fallback)  | `grok-4.3`            |
 
 > Note: the `openai-chatgpt` transport/model row reflects what live testing
 > proved (see the E2E section) — the Codex backend is the streaming Responses
@@ -251,8 +251,13 @@ skew and the 401-triggered single retry keep scheduled jobs from blocking on it.
 Unlike the Codex backend, `api.x.ai/v1` is a genuine OpenAI-compatible Chat
 Completions endpoint, so the xAI path works through the shared client with no
 special headers. (Note: a global `OM_LLM_MODEL=gpt-5.5` is not a valid xAI
-model, so we pass `grok-code-fast-1` explicitly; the subscription-sticky routing
-fix keeps the call on `xai-oauth` instead of bouncing it to metered OpenAI.)
+model, so pass the current xAI default explicitly; the subscription-sticky
+routing fix keeps the call on `xai-oauth` instead of bouncing it to metered
+OpenAI.)
+
+> Current xAI default: use `grok-4.3`. The historical proof transcript below
+> shows `grok-code-fast-1` because that was the live xAI default during the
+> v0.6.5 validation window; xAI later retired it.
 
 ```text
 $ OM_LLM_PROVIDER=xai-oauth OM_LLM_MODEL=grok-code-fast-1 uv run om observe --source claude
@@ -279,7 +284,7 @@ Running reflector...
 Reflections updated (75935 chars)
 ```
 
-A full grok-code-fast-1 reflection through the SuperGrok subscription:
+A full historical grok-code-fast-1 reflection through the SuperGrok subscription:
 `reflections.md` was rewritten (`*Last updated: 2026-05-23 12:11 UTC*`), 75,935
 characters of model output. (grok produced a more concise reflection than
 gpt-5.5 — 243 lines vs. 400 — which is expected model-to-model variation.)

@@ -17,6 +17,14 @@ def test_builtin_snapshot_loads_with_known_model():
     assert est.input_usd == 1.25  # gpt-5.5 input per 1M tokens
 
 
+def test_builtin_snapshot_includes_current_xai_default():
+    pricing = load_pricing(None)
+    est = pricing.estimate(provider="xai", model="grok-4.3", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    assert est.source == "builtin"
+    assert est.input_usd == 1.25
+    assert est.output_usd == 2.50
+
+
 def test_date_suffixed_model_resolves_to_base_key():
     pricing = load_pricing(None)
     est = pricing.estimate(
