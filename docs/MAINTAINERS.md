@@ -133,6 +133,22 @@ What to look for:
 
 If you changed local Codex or agent skill files as part of the same upgrade, run the relevant skill validator too before declaring the machine green.
 
+## Startup Hook Fail-Closed Contract
+
+The shell `SessionStart` hooks route all startup context through `om context` and nothing else:
+
+- `src/observational_memory/hooks/claude/session-start.sh` → `om context --for claude --cwd "$PWD"`
+- `src/observational_memory/hooks/grok/session-start.sh` → `om context --for grok --cwd "$PWD"`
+- `src/observational_memory/cowork_plugin/hooks/scripts/session-start.sh` → `om context --for cowork --cwd "$PWD"`
+
+`om context` is the only startup-context producer. It enforces the startup budget, dedup, freshness, cwd/task routing, and recall handles. When `om context` is unavailable (no `om` on PATH) or exits non-zero, the hooks fail closed:
+
+- emit no additional agent context,
+- write one diagnostic line to stderr (`observational-memory: om context unavailable - run om doctor`),
+- exit cleanly (0).
+
+Maintainer rule: never reintroduce raw `cat profile.md|active.md|reflections.md|observations.md` fallbacks (or any unbounded generated-file read) into a `SessionStart` path. The raw fallback bypasses the startup budget and in large-memory installs dumped roughly four times the bounded payload. Regression coverage lives in `tests/test_session_start_hooks_fail_closed.py`.
+
 ## Codex Integration Model
 
 Codex is now hooks-first, not AGENTS-first.
