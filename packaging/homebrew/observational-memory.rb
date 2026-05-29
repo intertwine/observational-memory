@@ -7,8 +7,8 @@ class ObservationalMemory < Formula
 
   desc "Local cross-agent memory and search for coding agents"
   homepage "https://github.com/intertwine/observational-memory"
-  url "https://files.pythonhosted.org/packages/14/26/17e3781b1eb264b618003746ab6a16db1d8f6801824dc6cb36197998f499/observational_memory-0.6.6.tar.gz"
-  sha256 "9263b1345d3bba5b1899b8e38eea7f5e2f1ac257f5f757a74adeee5af0d78378"
+  url "https://files.pythonhosted.org/packages/21/70/6fd5efa8827a5e378afcbbda6cc41f0008ea336cf3d13d3164f861e695d1/observational_memory-0.6.7.tar.gz"
+  sha256 "cfa961d8bc0e31b6f6783fb12a81c4094f51f4bb89b575d8f6be0b64c1409d17"
   license "MIT"
 
   depends_on "jq"
@@ -66,8 +66,8 @@ class ObservationalMemory < Formula
   end
 
   resource "anthropic" do
-    url "https://files.pythonhosted.org/packages/b8/12/d9ab42790494d7c428391a46cd28492395566a6a8ccb138d681978594455/anthropic-0.104.1-py3-none-any.whl"
-    sha256 "35c8cb456f5a4405aafe1f10f03f6fcc54fa51fa8ec01d655cc4b437d120e9b7"
+    url "https://files.pythonhosted.org/packages/e9/90/a0a74482fd9a7fe6e8edfb4e4470e42ebce9e04d5a2052bda0a4a4cc98e7/anthropic-0.105.0-py3-none-any.whl"
+    sha256 "0565975f37a8ac7bdcf97c2002aa5b133376c157d9265997721c7f131e69724d"
   end
 
   resource "anyio" do
@@ -116,8 +116,8 @@ class ObservationalMemory < Formula
   end
 
   resource "idna" do
-    url "https://files.pythonhosted.org/packages/94/16/70255075a9859a0e3adb789b68ceb0e210dec03934245fd98d248226572f/idna-3.16-py3-none-any.whl"
-    sha256 "cc246e3a3f89580c3a951b5ad298ca4638078b2cdd4f115654332b5c26daded5"
+    url "https://files.pythonhosted.org/packages/de/a7/f76514cc40ad6234098ecdebda08732d75964776c51a42845b7da10649e2/idna-3.17-py3-none-any.whl"
+    sha256 "466e48829084efe2548012b855df21540b96f2e20e51bd124c851536556a592c"
   end
 
   resource "openai" do
