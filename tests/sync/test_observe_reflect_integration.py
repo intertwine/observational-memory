@@ -86,3 +86,38 @@ def test_cluster_reflector_writes_snapshot(mock_observe_compress, mock_reflect_c
     store = ClusterStore.from_config(config)
     assert len(store.list_records(kind="reflection_snapshot")) == 1
     assert "Reflected" in config.reflections_path.read_text()
+
+
+@patch("observational_memory.reflect.compress")
+@patch("observational_memory.observe.compress")
+def test_cluster_reflector_stays_legacy_even_under_sectioned_strategy(
+    mock_observe_compress, mock_reflect_compress, tmp_path, monkeypatch
+):
+    # Cluster mode builds its own cross-machine merge system prompt and is pinned
+    # to the LEGACY chunked path regardless of OM_REFLECTOR_STRATEGY. If it routed
+    # through sectioned, the sectioned prompt would replace the merge prompt and
+    # the model would never see the merge guidance. Force a large merged corpus so
+    # the chunked branch runs, set strategy=sectioned, and assert the merge prompt
+    # (not the sectioned section-patch prompt) reached compress.
+    monkeypatch.setenv("OM_REFLECTOR_STRATEGY", "sectioned")
+    monkeypatch.setenv("OM_REFLECTOR_MAX_INPUT_TOKENS", "2000")  # tiny budget -> chunked
+    mock_observe_compress.return_value = "# Observations\n\n## 2026-05-08\n\n- " + ("x " * 5000)
+    captured: list[str] = []
+
+    def fake_reflect(system_prompt, user_content, config, **kwargs):
+        captured.append(system_prompt)
+        # A legacy whole-document rewrite is expected; return a valid doc.
+        return "# Reflections\n\n## Core Identity\n- Reflected once\n"
+
+    mock_reflect_compress.side_effect = fake_reflect
+    config = _init_cluster(tmp_path)
+    run_observer(_messages(), config, dry_run=False)
+
+    run_reflector(config, dry_run=False)
+
+    assert captured, "cluster reflector never called compress"
+    # The legacy whole-document reflector prompt must be in force (so a merge
+    # system prompt can be appended to it), and the sectioned section-patch
+    # envelope prompt must NOT have replaced it.
+    assert any("condense accumulated observations" in p for p in captured)
+    assert not any("SECTION_HANDLE" in p for p in captured)

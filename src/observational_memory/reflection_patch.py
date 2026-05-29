@@ -34,6 +34,10 @@ from dataclasses import dataclass
 
 # An H2 header line (mirrors reflection_sections._H2_RE).
 _H2_RE = re.compile(r"^## (?!#)(.+)$", re.MULTILINE)
+# An H3 header line (mirrors reflection_sections._H3_RE), used for in-place
+# subsection (``ref:<section>:<sub>``) patches whose body is a single ``### ``
+# entry rather than a whole ``## `` section.
+_H3_RE = re.compile(r"^### (?!#)(.+)$", re.MULTILINE)
 # The envelope markers. Anchored at line start; the value is the rest of the
 # SAME line ([^\n] so a blank value cannot swallow the next marker line).
 _SECTION_HANDLE_RE = re.compile(r"^SECTION_HANDLE:[ \t]*([^\n]*?)[ \t]*$", re.MULTILINE)
@@ -86,7 +90,24 @@ def parse_section_patches(raw: str) -> list[SectionPatch]:
     if text[:first].strip():
         raise PatchParseError("unexpected content before the first SECTION_HANDLE marker")
 
-    blocks = [block for block in _PATCH_SPLIT_RE.split(text[first:]) if block.strip()]
+    raw_blocks = [block for block in _PATCH_SPLIT_RE.split(text[first:]) if block.strip()]
+    if not raw_blocks:
+        raise PatchParseError("no section patches found")
+
+    # A line beginning with ``SECTION_HANDLE:`` inside a patch's UPDATED_MARKDOWN
+    # body would otherwise split the patch in two (the envelope format is even
+    # documented in reflections.md, so a reflection ABOUT this feature can contain
+    # such a line). A genuine patch boundary always introduces its own
+    # ``UPDATED_MARKDOWN:`` marker; a body line that merely starts with
+    # ``SECTION_HANDLE:`` does not. So re-join any split fragment that lacks its
+    # own ``UPDATED_MARKDOWN:`` marker back onto the preceding block — that text
+    # belongs to the previous patch's markdown.
+    blocks: list[str] = []
+    for block in raw_blocks:
+        if _UPDATED_MARKDOWN_RE.search(block) is None and blocks:
+            blocks[-1] = blocks[-1] + block
+        else:
+            blocks.append(block)
     if not blocks:
         raise PatchParseError("no section patches found")
 
@@ -129,14 +150,24 @@ def _parse_one(block: str) -> SectionPatch:
     if not markdown.strip():
         raise PatchParseError(f"section patch for {handle!r} has empty UPDATED_MARKDOWN")
 
-    header_count = len(_H2_RE.findall(markdown))
+    # An in-place subsection patch (handle ``ref:<section>:<sub>``, two colons)
+    # carries a single ``### `` entry; everything else carries a single ``## ``
+    # section. An addition (``new_after`` set) is always a new H2 section.
+    is_subsection = new_after is None and handle.count(":") >= 2
+    header_re = _H3_RE if is_subsection else _H2_RE
+    level = "### " if is_subsection else "## "
+    header_count = len(header_re.findall(markdown))
     if header_count != 1:
         raise PatchParseError(
-            f"section patch for {handle!r} must contain exactly one '## ' header (found {header_count})"
+            f"section patch for {handle!r} must contain exactly one '{level}' header (found {header_count})"
         )
     # The markdown must START with its header (no stray preamble that would be
     # silently merged into the previous section on reassembly).
-    if not markdown.lstrip().startswith("## "):
-        raise PatchParseError(f"section patch for {handle!r} markdown must start with its '## ' header")
+    if not markdown.lstrip().startswith(level):
+        raise PatchParseError(f"section patch for {handle!r} markdown must start with its '{level}' header")
+    # A subsection patch must not smuggle a new ``## `` H2 header into the parent
+    # section (which would split it). Reject any H2 in an H3 patch body.
+    if is_subsection and _H2_RE.search(markdown):
+        raise PatchParseError(f"subsection patch for {handle!r} must not contain a '## ' header")
 
     return SectionPatch(handle=handle, markdown=markdown, new_after=new_after)

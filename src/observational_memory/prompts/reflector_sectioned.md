@@ -31,9 +31,27 @@ UPDATED_MARKDOWN:
 ...the full, complete markdown for this one section...
 ```
 
+Handles come in two shapes:
+
+- **H2 section handle** `ref:<section-slug>` — patch with the COMPLETE `## `
+  section (header + all its content).
+- **H3 subsection handle** `ref:<section-slug>:<sub-slug>` — patch IN PLACE with
+  just that one `### ` entry. Use this to UPDATE an existing project/archived
+  entry: only that entry changes; its sibling entries and parent header are
+  preserved automatically. Start the block with the `### ` header, not `## `.
+
+```
+SECTION_HANDLE: ref:active-projects:my-project
+UPDATED_MARKDOWN:
+### my-project
+
+- **Status:** active
+- **Current state:** ...the updated entry...
+```
+
 To add a brand-new section, include a `NEW_AFTER:` line naming the existing
 handle the new section should follow (use an empty `NEW_AFTER:` to append at the
-end), and use a fresh handle:
+end), and use a fresh handle whose heading does NOT duplicate an existing one:
 
 ```
 SECTION_HANDLE: ref:<new-slug>
@@ -49,11 +67,16 @@ Separate multiple patches with a blank line.
 
 1. **Output ONLY the envelope.** No prose before the first `SECTION_HANDLE:`,
    no commentary between patches, no closing remarks.
-2. **One `## ` header per `UPDATED_MARKDOWN` block**, and the block must START
-   with that header. Never emit a header-less fragment.
-3. **Patch only handles you were given** in "Available section handles".
-4. **Each `UPDATED_MARKDOWN` is the COMPLETE section**, not a diff — include the
-   parts you kept plus your changes.
+2. **One header per `UPDATED_MARKDOWN` block**, and the block must START with it:
+   a `## ` header for an H2 section handle, a `### ` header for an H3 subsection
+   handle. Never emit a header-less fragment.
+3. **Patch only handles you were given** in "Available section handles". The
+   system REJECTS any other handle and discards the whole fold — so never patch a
+   handle you were not offered, even if you remember it.
+4. **Each `UPDATED_MARKDOWN` is the COMPLETE section or subsection**, not a diff
+   — include the parts you kept plus your changes. Prefer patching the H3
+   subsection handle to UPDATE an existing project entry; only add a new section
+   when the work is genuinely new.
 5. **Never touch sections you were not shown.** They are preserved byte-for-byte
    by the system; reproducing them risks dropping content.
 6. **Do not write timestamps.** The system stamps `Last updated` / `Last

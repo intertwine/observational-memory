@@ -127,6 +127,80 @@ def test_current_work_pulls_recent_themes():
     assert "ref:recent-themes" in route.section_handles
 
 
+# A reflections doc with HYPHENATED project names, to exercise abbreviated refs.
+REFLECTIONS_HYPHEN = """\
+# Reflections
+
+*Last updated: 2026-05-01 09:00 UTC*
+*Last reflected: 2026-05-01*
+
+## Core Identity
+
+- **Name:** Alex
+
+## Active Projects
+
+### hermes-agent
+
+- **Status:** active
+
+### om-relay
+
+- **Status:** active
+
+## Recent Themes
+
+- shipping
+"""
+
+
+def test_route_matches_abbreviated_project_name():
+    # "hermes" must match the "hermes-agent" H3; "relay" must match "om-relay".
+    # Users routinely abbreviate, so a name component must reach its parent entry.
+    doc = parse_reflection_document(REFLECTIONS_HYPHEN)
+    route = route_chunk(doc, "Spent today on hermes: fixed the gateway auth bug.", fold_index=0, fold_total=1)
+    assert "ref:active-projects:hermes-agent" in route.subsection_handles
+    route2 = route_chunk(doc, "Poked at the relay health check.", fold_index=0, fold_total=1)
+    assert "ref:active-projects:om-relay" in route2.subsection_handles
+
+
+def test_route_full_hyphenated_name_still_matches():
+    doc = parse_reflection_document(REFLECTIONS_HYPHEN)
+    route = route_chunk(doc, "Worked on hermes-agent: completed the auth port.", fold_index=0, fold_total=1)
+    assert "ref:active-projects:hermes-agent" in route.subsection_handles
+
+
+def test_new_project_observation_is_not_rotation_routed_as_a_match():
+    # A genuinely new repo not in reflections.md must NOT be surfaced as a "real"
+    # match. The rotation fallback may surface SOMETHING for coverage, but the
+    # route must mark it rotation-only and report the unmatched name token so the
+    # caller steers toward NEW_AFTER instead of editing an unrelated sibling.
+    doc = parse_reflection_document(REFLECTIONS)
+    route = route_chunk(doc, "set up brand-new repo zeta-service with CI", fold_index=1, fold_total=3)
+    assert route.rotation_only is True
+    assert "zeta-service" in route.unmatched_name_tokens or "zeta" in route.unmatched_name_tokens
+
+
+def test_rotation_only_fold_offers_no_subsection_as_patchable(monkeypatch):
+    # On a rotation-only fold (nothing matched), the arbitrary rotated entry must
+    # NOT be advertised as patchable, so the model is not biased to edit it.
+    captured: list[str] = []
+
+    def fake_compress(system_prompt, user_content, config, **kwargs):
+        captured.append(user_content)
+        return user_content  # invalid -> fail closed; we only inspect the prompt
+
+    monkeypatch.setattr(reflect, "compress", fake_compress)
+    new_proj_obs = "# Observations\n\n## 2026-05-10\n\n- set up brand-new repo zeta-service with CI\n"
+    _reflect_sectioned("SYS", REFLECTIONS, new_proj_obs, _config())
+    assert captured
+    handles_block = captured[0].rsplit("## Available section handles", 1)[1]
+    # No Active Projects child handle is advertised as patchable on this fold.
+    assert "ref:active-projects:" not in handles_block
+    # And the new-project steering hint is present.
+    assert "ADD a new section" in handles_block
+
+
 # --------------------------------------------------------------------------- #
 # Per-fold prompt scales with selected sections, not the full document.
 # --------------------------------------------------------------------------- #
@@ -240,6 +314,104 @@ def test_patch_for_unknown_handle_fails_closed(monkeypatch):
     assert result == REFLECTIONS
 
 
+def test_patch_for_known_but_not_offered_heavy_h2_fails_closed(monkeypatch):
+    # The corruption Validation gate 3 forbids: the model echoes back a heavy H2
+    # (## Active Projects) it was only shown ONE H3 of, restating just one child.
+    # Active Projects is a KNOWN handle but was NOT in the offered patchable set,
+    # so the fold must FAIL CLOSED — siblings widget-factory and the rest survive.
+    def fake_compress(system_prompt, user_content, config, **kwargs):
+        return (
+            "SECTION_HANDLE: ref:active-projects\n"
+            "UPDATED_MARKDOWN:\n"
+            "## Active Projects\n\n"
+            "### observational-memory\n\n- only this one survives, the rest are dropped\n"
+        )
+
+    monkeypatch.setattr(reflect, "compress", fake_compress)
+    result = _reflect_sectioned("SYS", REFLECTIONS, OBSERVATIONS, _config())
+    # Unchanged on disk: the not-offered heavy-H2 patch was rejected.
+    assert result == REFLECTIONS
+    out = parse_reflection_document(result)
+    active = out.section_by_handle("ref:active-projects")
+    assert "widget-factory" in active.text
+
+
+def test_full_section_patch_dropping_h3_children_fails_closed(monkeypatch):
+    # If a full-section patch is somehow offered for a section that HAS H3 children
+    # and the patch drops one, fail closed rather than lose the dropped entry.
+    # Build a doc where Active Projects is a SMALL section so routing offers it
+    # whole, with two children; the model returns it minus one child.
+    small_active = """\
+# Reflections
+
+*Last updated: 2026-05-01 09:00 UTC*
+*Last reflected: 2026-05-01*
+
+## Core Identity
+
+- **Name:** Alex
+
+## Active Projects
+
+### keep-me
+
+- **Status:** active
+
+### drop-me
+
+- **Status:** active
+"""
+    # Force Active Projects to be offered as a full patchable section by patching
+    # the apply path directly: route would normally surface H3s, so test the guard
+    # at the apply layer where the offered set includes the H2.
+    from observational_memory.reflect import _apply_section_patches
+    from observational_memory.reflection_patch import parse_section_patches
+
+    doc = parse_reflection_document(small_active)
+    raw = (
+        "SECTION_HANDLE: ref:active-projects\n"
+        "UPDATED_MARKDOWN:\n"
+        "## Active Projects\n\n### keep-me\n\n- **Status:** active\n"
+    )
+    patches = parse_section_patches(raw)
+    # Offer the H2 as patchable (simulating a small-section route).
+    result = _apply_section_patches(doc, patches, ["ref:active-projects"])
+    assert result is None  # dropped 'drop-me' -> fail closed
+
+
+def test_in_place_subsection_update_updates_only_that_project(monkeypatch):
+    # An exact-name observation must be able to UPDATE the existing project H3 in
+    # place — not just add a duplicate top-level section. The router surfaces the
+    # H3 as patchable; the model patches it; siblings are preserved byte-for-byte.
+    doc = parse_reflection_document(REFLECTIONS)
+
+    def fake_compress(system_prompt, user_content, config, **kwargs):
+        # The H3 handle must be advertised as patchable.
+        assert "ref:active-projects:observational-memory" in user_content
+        return (
+            "SECTION_HANDLE: ref:active-projects:observational-memory\n"
+            "UPDATED_MARKDOWN:\n"
+            "### observational-memory\n\n"
+            "- **Status:** active\n- **Current state:** section router shipped\n"
+        )
+
+    monkeypatch.setattr(reflect, "compress", fake_compress)
+    result = _reflect_sectioned("SYS", REFLECTIONS, OBSERVATIONS, _config())
+    out = parse_reflection_document(result)
+    active = out.section_by_handle("ref:active-projects")
+    assert "section router shipped" in active.text
+    # The sibling project is untouched.
+    assert "widget-factory" in active.text
+    assert "on hold pending review" in active.text
+    # No duplicate Active Projects section was created.
+    assert out.handles().count("ref:active-projects") == 1
+    # Every other section byte-identical.
+    for section in doc.sections:
+        if section.handle == "ref:active-projects":
+            continue
+        assert out.section_by_handle(section.handle).text == section.text
+
+
 # --------------------------------------------------------------------------- #
 # Adding a new section/project works.
 # --------------------------------------------------------------------------- #
@@ -293,3 +465,25 @@ def test_parser_rejects_duplicate_handle():
 def test_parser_fails_closed_on_malformed(bad):
     with pytest.raises(PatchParseError):
         parse_section_patches(bad)
+
+
+def test_parser_does_not_split_on_section_handle_inside_markdown_body():
+    # OM's own memory/docs describe the envelope, so a reflection ABOUT this
+    # feature can contain a body line starting with "SECTION_HANDLE:". That line
+    # must stay part of the ONE patch's markdown, not synthesize a second patch
+    # that truncates the real section. (A body line beginning with the marker has
+    # no UPDATED_MARKDOWN of its own, so it is re-joined to its patch.)
+    raw = (
+        "SECTION_HANDLE: ref:core-identity\n"
+        "UPDATED_MARKDOWN:\n"
+        "## Core Identity\n\n"
+        "- The reflector emits an envelope:\n"
+        "SECTION_HANDLE: ref:archive\n"
+        "- ...and then the markdown body.\n"
+    )
+    patches = parse_section_patches(raw)
+    assert len(patches) == 1
+    assert patches[0].handle == "ref:core-identity"
+    # The injected line stays inside the body, NOT a second patch.
+    assert "SECTION_HANDLE: ref:archive" in patches[0].markdown
+    assert "...and then the markdown body." in patches[0].markdown

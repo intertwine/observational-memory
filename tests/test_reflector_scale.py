@@ -254,6 +254,13 @@ def test_diagnostics_report_binding_limit(monkeypatch, caplog):
 
 
 def test_2x_keeps_bulk_of_reflections_context(monkeypatch):
+    # This asserts the LEGACY v0.6.7 chunked ceiling (keep ~48k of context, not
+    # the old ~12k clamp). Under the corrected auto threshold (which compares
+    # against the EFFECTIVE ~48k per-fold reflections cap, not the ~157.5k input
+    # budget), a ~96k 2x document now routes to sectioned — so pin legacy here to
+    # keep testing the ceiling this test was written for, exactly as the
+    # companion test_diagnostics_report_binding_limit does.
+    monkeypatch.setenv("OM_REFLECTOR_STRATEGY", "legacy")
     scenario = SCENARIOS["2x"]
     reflections, _o, captured, _cfg = _run_chunked_capture(scenario, monkeypatch)
     assert len(captured) >= 2, "2x should still take the chunked path"

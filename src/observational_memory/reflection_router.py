@@ -83,10 +83,20 @@ class RouteResult:
     small whole-section like Recent Themes). ``subsection_handles`` are individual
     H3 entries (one project / archived item) surfaced WITHOUT their whole parent
     H2, so the per-fold context stays proportional to the touched work.
+
+    ``unmatched_name_tokens`` are name-ish tokens in the chunk that did NOT match
+    any existing section/subsection — a strong signal the observation concerns a
+    brand-new project/repo that should be ADDED (NEW_AFTER) rather than folded
+    into an unrelated existing entry. ``rotation_only`` is True when the only
+    surfaced entry came from the deterministic rotation fallback (nothing in the
+    chunk actually matched), so the caller can avoid advertising an arbitrary,
+    unrelated entry as patchable.
     """
 
     section_handles: list[str] = field(default_factory=list)
     subsection_handles: list[str] = field(default_factory=list)
+    unmatched_name_tokens: list[str] = field(default_factory=list)
+    rotation_only: bool = False
 
 
 def core_bundle_handles(document: ReflectionDocument) -> list[str]:
@@ -95,14 +105,27 @@ def core_bundle_handles(document: ReflectionDocument) -> list[str]:
 
 
 def _name_tokens(text: str) -> set[str]:
-    """Lowercased slugified name-ish tokens found in an observation chunk."""
+    """Lowercased slugified name-ish tokens found in an observation chunk.
+
+    A compound name like ``hermes-agent`` or ``om-relay`` is kept WHOLE (the full
+    slug) *and* split into its hyphen components (``hermes``, ``agent`` / ``om``,
+    ``relay``). Users routinely abbreviate a project by one component ("worked on
+    hermes today"), so matching a component against its parent project is what
+    keeps those updates routed to the right H3 entry instead of misrouted into
+    Recent Themes / core.
+    """
     tokens: set[str] = set()
     for match in _NAME_TOKEN_RE.finditer(text):
         raw = match.group(0)
-        for piece in re.split(r"[/.]", raw):
+        for piece in re.split(r"[/.\-]", raw):
             slug = slugify(piece)
             if len(slug) >= 3:
                 tokens.add(slug)
+        # Keep the whole compound slug too (e.g. ``hermes-agent``) so an exact
+        # full-name reference still matches.
+        whole = slugify(raw)
+        if len(whole) >= 3:
+            tokens.add(whole)
     return tokens
 
 
@@ -120,14 +143,28 @@ def _all_subsections(document: ReflectionDocument) -> list[Subsection]:
     return subs
 
 
+def _subsection_match_tokens(heading: str, slug: str) -> set[str]:
+    """Match tokens for an H3 heading.
+
+    Split on slashes, dots, hyphens, AND whitespace so a compound project name
+    like ``hermes-agent`` contributes both its whole slug and each component
+    (``hermes``, ``agent``). This lets an abbreviated chunk reference ("hermes")
+    match its parent project entry.
+    """
+    sub_tokens = {slugify(part) for part in re.split(r"[/.\-\s]", heading) if part}
+    sub_tokens.add(slug)
+    # Also add the hyphen components of the slug itself.
+    sub_tokens.update(slugify(part) for part in slug.split("-") if len(part) >= 2)
+    return {t for t in sub_tokens if t}
+
+
 def _matching_subsections(document: ReflectionDocument, tokens: set[str]) -> list[Subsection]:
     """H3 entries whose heading/name tokens appear in the chunk's name tokens."""
     if not tokens:
         return []
     matched: list[Subsection] = []
     for sub in _all_subsections(document):
-        sub_tokens = {slugify(part) for part in re.split(r"[/.\s]", sub.heading) if part}
-        sub_tokens.add(sub.slug)
+        sub_tokens = _subsection_match_tokens(sub.heading, sub.slug)
         if tokens & sub_tokens:
             matched.append(sub)
     return matched
@@ -172,6 +209,9 @@ def route_chunk(
     non_core = [section for section in document.sections if section.slug not in _CORE_SLUGS]
 
     matched_touched = False
+    # Track which chunk tokens actually matched an existing section/subsection so
+    # we can tell the caller which look like brand-new project/repo names.
+    matched_tokens: set[str] = set()
 
     # Recent Themes (whole) when the update is about current work.
     if _is_about_current_work(chunk_lower) and _RECENT_THEMES_SLUG in handles_by_slug:
@@ -183,21 +223,33 @@ def route_chunk(
         if section.slug in tokens:
             section_handles.add(section.handle)
             matched_touched = True
+            matched_tokens.add(section.slug)
 
     # Matching H3 project/archive entries by repo/project name.
     for sub in _matching_subsections(document, tokens):
         subsection_handles.add(sub.handle)
         matched_touched = True
+        matched_tokens |= tokens & _subsection_match_tokens(sub.heading, sub.slug)
 
     # Direct heading match: a non-core H2 named in the chunk (surfaced whole).
     for section in non_core:
         if section.slug in tokens and section.slug not in _SMALL_WHOLE_SECTION_SLUGS:
             section_handles.add(section.handle)
             matched_touched = True
+            matched_tokens.add(section.slug)
 
+    # Tokens that matched no existing section/subsection. When the chunk names a
+    # brand-new project/repo, these are how the caller knows to steer toward a
+    # NEW_AFTER addition instead of an unrelated rotation sibling.
+    unmatched = sorted(tokens - matched_tokens)
+
+    rotation_only = False
     # Deterministic rotation fallback: surface ONE touched entry per fold so
-    # coverage reaches past the head across folds.
+    # coverage reaches past the head across folds. This is coverage, not a real
+    # match — flag it so the caller does not advertise the arbitrary entry as
+    # patchable (which would bias the model toward editing the wrong entry).
     if not matched_touched:
+        rotation_only = True
         all_subs = _all_subsections(document)
         if all_subs:
             subsection_handles.add(all_subs[fold_index % len(all_subs)].handle)
@@ -213,4 +265,6 @@ def route_chunk(
     return RouteResult(
         section_handles=sorted(section_handles, key=lambda h: order.get(h, 1_000_000)),
         subsection_handles=sorted(subsection_handles, key=lambda h: sub_order.get(h, (1_000_000, 0))),
+        unmatched_name_tokens=unmatched,
+        rotation_only=rotation_only,
     )

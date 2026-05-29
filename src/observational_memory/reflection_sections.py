@@ -195,24 +195,100 @@ def _normalize_section_text(text: str) -> str:
     return text.rstrip("\n") + "\n\n"
 
 
+def _ensure_trailing_blank_line(text: str) -> str:
+    """Ensure *text* ends with a blank line so an inserted header is separated.
+
+    Used to normalize the PRECEDING section's text right before a NEW_AFTER
+    insertion: when an anchor section's slice ends with a single ``\\n`` (the
+    normal case for the document's last section, or any section parsed up to
+    EOF), inserting a header straight after it would jam ``- last bullet\\n##
+    New`` together with no blank line. We only apply this to the boundary
+    immediately before an inserted section — sections with nothing inserted after
+    them are emitted byte-for-byte and never touched.
+    """
+    if not text:
+        return text
+    return text.rstrip("\n") + "\n\n"
+
+
+def _replace_subsections_in_section(section: Section, replacements: dict[str, str]) -> str:
+    """Return *section*'s text with one or more H3 subsections replaced in place.
+
+    The parent H2 header, the section preamble, and every SIBLING H3 entry are
+    preserved byte-for-byte; only the slices of the named H3 entries (each from
+    its ``### `` header to the next H3 / end of section) are substituted. This is
+    the in-place project-update path: an observation about one project updates
+    ONLY that project's H3 entry without re-sending or risking its siblings.
+
+    Substitutions are applied from the LAST H3 to the FIRST so earlier slice
+    offsets stay valid as later ones are spliced in.
+
+    Fails closed: raises ``KeyError`` if a handle is not an H3 of this section,
+    and ``ValueError`` if a replacement is not a single ``### `` subsection.
+    """
+    handle_to_index = {sub.handle: i for i, sub in enumerate(section.subsections)}
+    for sub_handle, markdown in replacements.items():
+        if sub_handle not in handle_to_index:
+            raise KeyError(f"reflection_sections: unknown subsection handle: {sub_handle!r}")
+        if len(_H3_RE.findall(markdown)) != 1:
+            raise ValueError(
+                f"reflection_sections: subsection replacement for {sub_handle!r} must contain exactly one H3 header"
+            )
+        if not markdown.lstrip().startswith("### "):
+            raise ValueError(
+                f"reflection_sections: subsection replacement for {sub_handle!r} must start with its '### ' header"
+            )
+
+    text = section.text
+    matches = list(_H3_RE.finditer(text))
+    body_end = len(text.rstrip("\n"))
+    # Apply in descending index order so splicing one slice never shifts the
+    # offsets of an unprocessed earlier slice.
+    for sub_handle in sorted(replacements, key=lambda h: handle_to_index[h], reverse=True):
+        index = handle_to_index[sub_handle]
+        start = matches[index].start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        tail = text[end:]
+        is_last_entry = index + 1 >= len(matches) and end >= body_end
+        # One trailing blank line keeps the next sibling H3 separated; the final
+        # H3 keeps the section's single-trailing-newline shape instead of adding
+        # a blank line at the very end of the section body.
+        if is_last_entry and not tail.strip():
+            new_sub = replacements[sub_handle].rstrip("\n") + "\n"
+        else:
+            new_sub = replacements[sub_handle].rstrip("\n") + "\n\n"
+        text = text[:start] + new_sub + tail
+    return text
+
+
 def reassemble_document(
     document: ReflectionDocument,
     *,
     replacements: dict[str, str] | None = None,
+    subsection_replacements: dict[str, str] | None = None,
     additions: list[tuple[str, str]] | None = None,
 ) -> str:
     """Deterministically reassemble ``reflections.md`` from parsed sections.
 
     Args:
         document: The parsed source document.
-        replacements: Map of existing section handle -> replacement markdown
+        replacements: Map of existing H2 section handle -> replacement markdown
             (the full section including its ``## `` header). Every handle must
             exist in ``document`` or the call fails closed with ``KeyError`` so a
             stale/hallucinated handle never silently drops a section.
+        subsection_replacements: Map of existing H3 subsection handle
+            (``ref:<section>:<sub>``) -> replacement markdown (a single ``### ``
+            subsection). The parent H2 header, preamble, and every sibling H3 are
+            preserved byte-for-byte; only the named H3's slice is substituted.
+            This is the in-place project-update path. A handle whose parent H2 is
+            also in ``replacements`` is rejected (the two would fight over the
+            same section). Unknown/malformed handles fail closed.
         additions: Ordered ``(after_handle, markdown)`` pairs appending a new
             section immediately after the named existing section. ``after_handle``
             may be ``""`` to append at the very end. The markdown must contain a
-            single H2 header; a malformed addition fails closed with ``ValueError``.
+            single H2 header whose slug does NOT collide with an existing section
+            (or an earlier addition); a malformed/colliding addition fails closed
+            with ``ValueError``.
 
     Returns:
         The reassembled document. Unchanged sections are emitted byte-for-byte,
@@ -223,6 +299,7 @@ def reassemble_document(
     ``reflections.md`` unchanged.
     """
     replacements = replacements or {}
+    subsection_replacements = subsection_replacements or {}
     additions = additions or []
 
     known = set(document.handles())
@@ -237,6 +314,27 @@ def reassemble_document(
         if len(_H2_RE.findall(markdown)) != 1:
             raise ValueError(f"reflection_sections: replacement for {handle!r} must contain exactly one H2 header")
 
+    # Resolve subsection replacements to their parent section, validating up front.
+    sub_parent_handle: dict[str, str] = {}
+    for section in document.sections:
+        for sub in section.subsections:
+            sub_parent_handle[sub.handle] = section.handle
+    subs_by_parent: dict[str, dict[str, str]] = {}
+    for sub_handle, markdown in subsection_replacements.items():
+        parent_handle = sub_parent_handle.get(sub_handle)
+        if parent_handle is None:
+            raise KeyError(f"reflection_sections: unknown subsection handle: {sub_handle!r}")
+        if parent_handle in replacements:
+            raise ValueError(
+                f"reflection_sections: subsection {sub_handle!r} and its parent {parent_handle!r} "
+                "cannot both be patched in the same fold"
+            )
+        subs_by_parent.setdefault(parent_handle, {})[sub_handle] = markdown
+
+    # Existing section slugs an addition's heading must not collide with — a
+    # NEW_AFTER must create a genuinely new section, never a duplicate H2.
+    existing_slugs = {section.slug for section in document.sections}
+
     # Validate additions up front (fail closed before emitting anything).
     valid_after = known | {""}
     appended_by_anchor: dict[str, list[str]] = {}
@@ -244,8 +342,16 @@ def reassemble_document(
     for after_handle, markdown in additions:
         if after_handle not in valid_after:
             raise KeyError(f"reflection_sections: unknown addition anchor handle: {after_handle!r}")
-        if len(_H2_RE.findall(markdown)) != 1:
+        headings = _H2_RE.findall(markdown)
+        if len(headings) != 1:
             raise ValueError("reflection_sections: each added section must contain exactly one H2 header")
+        new_slug = slugify(headings[0].strip())
+        if new_slug in existing_slugs:
+            raise ValueError(
+                f"reflection_sections: added section heading collides with existing section slug {new_slug!r}; "
+                "update the existing section instead of adding a duplicate"
+            )
+        existing_slugs.add(new_slug)  # also catch collisions between two additions
         normalized = _normalize_section_text(markdown)
         if after_handle == "":
             end_appends.append(normalized)
@@ -254,13 +360,26 @@ def reassemble_document(
 
     parts: list[str] = [document.prelude]
     for section in document.sections:
+        has_addition = bool(appended_by_anchor.get(section.handle))
         if section.handle in replacements:
-            parts.append(_normalize_section_text(replacements[section.handle]))
+            section_text = _normalize_section_text(replacements[section.handle])
+        elif section.handle in subs_by_parent:
+            section_text = _replace_subsections_in_section(section, subs_by_parent[section.handle])
         else:
-            parts.append(section.text)
+            section_text = section.text
+        # If a new section will be inserted right after this one, make sure this
+        # section's text ends with a blank line so the inserted ``## `` header is
+        # not jammed onto the previous content line.
+        if has_addition:
+            section_text = _ensure_trailing_blank_line(section_text)
+        parts.append(section_text)
         for added in appended_by_anchor.get(section.handle, []):
             parts.append(added)
 
+    # An addition appended at the very end must also be separated from the
+    # document's last section by a blank line.
+    if end_appends and parts:
+        parts[-1] = _ensure_trailing_blank_line(parts[-1])
     parts.extend(end_appends)
 
     return "".join(parts)

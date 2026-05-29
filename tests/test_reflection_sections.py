@@ -402,3 +402,130 @@ def test_substitution_round_trips_on_scale_fixture() -> None:
         if original.handle != "ref:active-projects":
             assert rebuilt.text == original.text
     assert "An appended durable note." in result
+
+
+# ---------------------------------------------------------------------------
+# In-place H3 subsection replacement (the project-update path).
+# ---------------------------------------------------------------------------
+
+
+def test_subsection_replacement_updates_one_h3_and_preserves_siblings() -> None:
+    # Updating one project H3 in place must leave its sibling H3 entries AND every
+    # other section byte-for-byte. This is the in-place project-update path that
+    # makes "an observation about one project updates only that subsection" real.
+    parsed = parse_reflection_document(_FULL)
+    new_sub = "### observational-memory\n\n- Section-targeted reflection SHIPPED.\n"
+    result = reassemble_document(
+        parsed,
+        subsection_replacements={"ref:active-projects:observational-memory": new_sub},
+    )
+    reparsed = parse_reflection_document(result)
+    active = reparsed.section_by_handle("ref:active-projects")
+    assert active is not None
+    assert "SHIPPED." in active.text
+    # The sibling project H3 survived verbatim.
+    assert "Porting auth flows from upstream." in active.text
+    # Every section OTHER than Active Projects is byte-identical.
+    for original in parsed.sections:
+        if original.handle == "ref:active-projects":
+            continue
+        rebuilt = reparsed.section_by_handle(original.handle)
+        assert rebuilt is not None
+        assert rebuilt.text == original.text
+
+
+def test_subsection_replacement_last_h3_keeps_section_shape() -> None:
+    # Replacing the LAST H3 in a section must not introduce a trailing blank-line
+    # change that would corrupt the byte shape of following sections.
+    parsed = parse_reflection_document(_FULL)
+    new_sub = "### hermes-agent\n\n- Auth port complete.\n"
+    result = reassemble_document(
+        parsed,
+        subsection_replacements={"ref:active-projects:hermes-agent": new_sub},
+    )
+    reparsed = parse_reflection_document(result)
+    assert "Auth port complete." in reparsed.section_by_handle("ref:active-projects").text
+    # The first H3 sibling is untouched.
+    assert "Reflector scaling work, issue #71." in reparsed.section_by_handle("ref:active-projects").text
+    # Sections after Active Projects are byte-identical (no jammed header).
+    for original in parsed.sections:
+        if original.handle == "ref:active-projects":
+            continue
+        assert reparsed.section_by_handle(original.handle).text == original.text
+
+
+def test_unknown_subsection_handle_fails_closed() -> None:
+    parsed = parse_reflection_document(_FULL)
+    with pytest.raises(KeyError):
+        reassemble_document(parsed, subsection_replacements={"ref:active-projects:nope": "### nope\n\n- x\n"})
+
+
+def test_subsection_replacement_must_be_single_h3() -> None:
+    parsed = parse_reflection_document(_FULL)
+    with pytest.raises(ValueError):
+        reassemble_document(
+            parsed,
+            subsection_replacements={"ref:active-projects:observational-memory": "## Wrong Level\n\n- x\n"},
+        )
+
+
+def test_subsection_and_parent_cannot_both_be_patched() -> None:
+    parsed = parse_reflection_document(_FULL)
+    with pytest.raises(ValueError):
+        reassemble_document(
+            parsed,
+            replacements={"ref:active-projects": "## Active Projects\n\n### observational-memory\n\n- a\n"},
+            subsection_replacements={"ref:active-projects:observational-memory": "### observational-memory\n\n- b\n"},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Addition safety: no duplicate H2, no jammed header against prior content.
+# ---------------------------------------------------------------------------
+
+
+def test_addition_with_colliding_heading_fails_closed() -> None:
+    # A NEW_AFTER whose heading slug collides with an existing section must be
+    # rejected — otherwise the document grows a second "## Active Projects" and
+    # the core bundle / materializer see a duplicate, conflicting section.
+    parsed = parse_reflection_document(_FULL)
+    with pytest.raises(ValueError):
+        reassemble_document(
+            parsed,
+            additions=[("ref:core-identity", "## Active Projects\n\n### dup\n\n- x\n")],
+        )
+
+
+def test_two_additions_with_same_heading_fail_closed() -> None:
+    parsed = parse_reflection_document(_FULL)
+    with pytest.raises(ValueError):
+        reassemble_document(
+            parsed,
+            additions=[
+                ("", "## Brand New\n\n- one\n"),
+                ("", "## Brand New\n\n- two\n"),
+            ],
+        )
+
+
+def test_addition_after_single_newline_section_is_separated_by_blank_line() -> None:
+    # When the anchor section's text ends with a single "\n" (the normal case for
+    # the document's last section), a NEW_AFTER insertion must still leave a blank
+    # line between the previous content and the new "## " header — never "alpha\n##
+    # New". Build a doc whose last section ends with exactly one newline.
+    doc = "# Reflections\n\n## Core Identity\n\n- Alex\n"
+    parsed = parse_reflection_document(doc)
+    result = reassemble_document(parsed, additions=[("ref:core-identity", "## New Area\n\n- fresh\n")])
+    assert "- Alex\n\n## New Area" in result
+    assert "- Alex\n## New Area" not in result
+    # And it still parses into two clean sections.
+    reparsed = parse_reflection_document(result)
+    assert reparsed.handles() == ["ref:core-identity", "ref:new-area"]
+
+
+def test_end_addition_after_single_newline_section_is_separated() -> None:
+    doc = "# Reflections\n\n## Core Identity\n\n- Alex\n"
+    parsed = parse_reflection_document(doc)
+    result = reassemble_document(parsed, additions=[("", "## Appended\n\n- end\n")])
+    assert "- Alex\n\n## Appended" in result
+    assert "- Alex\n## Appended" not in result

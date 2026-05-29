@@ -625,3 +625,112 @@ class TestReflectorOutputCapOnCodexPath:
         assert "- Thing" in result
         assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" not in result  # no truncation marker
         assert not any("OM_REFLECTOR_OUTPUT_MAX_CHARS" in r.message for r in caplog.records)
+
+
+class TestExplicitSectionedHonoredOnSinglePass:
+    """OM_REFLECTOR_STRATEGY=sectioned must use section-targeted folding even for
+    a single-pass-sized corpus that has sections — not silently fall back to a
+    legacy whole-document rewrite."""
+
+    def test_small_corpus_with_sections_routes_to_sectioned(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OM_USAGE_TRACKING", "0")
+        monkeypatch.setenv("OM_REFLECTOR_STRATEGY", "sectioned")
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.reflections_path.write_text(
+            "# Reflections\n\n*Last reflected: 2026-05-01*\n\n## Core Identity\n\n- **Name:** Alex\n"
+        )
+        config.observations_path.write_text(
+            "# Observations\n\n## 2026-05-10\n\n- Updated identity: Alex is a staff engineer.\n"
+        )
+        captured: list[str] = []
+
+        def fake_compress(system_prompt, user_content, config, **kwargs):
+            captured.append(system_prompt)
+            return (
+                "SECTION_HANDLE: ref:core-identity\nUPDATED_MARKDOWN:\n## Core Identity\n\n- **Name:** Alex (staff)\n"
+            )
+
+        with patch("observational_memory.reflect.compress", side_effect=fake_compress):
+            result = run_reflector(config, dry_run=True)
+
+        assert result is not None
+        # The sectioned section-patch prompt was used (not the legacy rewrite).
+        assert any("do **NOT** rewrite the whole document" in p or "SECTION_HANDLE" in p for p in captured)
+        assert "Alex (staff)" in result
+
+    def test_fresh_empty_reflections_still_uses_single_pass(self, tmp_path, monkeypatch):
+        # Sectioning needs sections to target; a fresh/empty reflections.md has
+        # none, so the explicit override must NOT force a doomed sectioned run.
+        monkeypatch.setenv("OM_USAGE_TRACKING", "0")
+        monkeypatch.setenv("OM_REFLECTOR_STRATEGY", "sectioned")
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.observations_path.write_text("# Observations\n\n## 2026-05-10\n\n- A first note.\n")
+        captured: list[str] = []
+
+        def fake_compress(system_prompt, user_content, config, **kwargs):
+            captured.append(system_prompt)
+            return "# Reflections\n\n## Core Identity\n\n- First reflection.\n"
+
+        with patch("observational_memory.reflect.compress", side_effect=fake_compress):
+            result = run_reflector(config, dry_run=True)
+
+        assert result is not None
+        # Legacy single-pass prompt (no section-patch envelope) on an empty doc.
+        assert not any("SECTION_HANDLE" in p for p in captured)
+
+
+class TestSectionedOutputExemptFromCap:
+    """A deterministically reassembled sectioned document must NOT be trimmed by
+    the runaway-output cap. The cap trims at a '## ' boundary, which on a large
+    reassembled doc would drop untouched TAIL sections — the exact memory loss
+    Validation gate 3 forbids. The reassembly is bounded by construction, so it
+    is exempt."""
+
+    def test_large_reassembled_doc_keeps_untouched_tail_section(self, tmp_path, monkeypatch, caplog):
+        # Build a reflections.md large enough that (a) sectioned auto activates and
+        # (b) the reassembled output exceeds OM_REFLECTOR_OUTPUT_MAX_CHARS, then
+        # have the reflector change ONLY Core Identity and assert the untouched
+        # tail '## Archive' survives whole.
+        big_archive = "## Archive\n\n" + "".join(f"- [2024-01-{i:02d}] old note line\n" for i in range(1, 60)) * 200
+        reflections = (
+            "# Reflections\n\n"
+            "*Last updated: 2026-05-01 09:00 UTC*\n"
+            "*Last reflected: 2026-05-01*\n\n"
+            "## Core Identity\n\n- **Name:** Alex\n\n"
+            "## Active Projects\n\n### proj-a\n\n- **Status:** active\n\n" + big_archive
+        )
+        assert len(reflections) > 200_000  # past the default output cap
+
+        monkeypatch.setenv("OM_USAGE_TRACKING", "0")
+        monkeypatch.setenv("OM_REFLECTOR_STRATEGY", "sectioned")
+        monkeypatch.setenv("OM_REFLECTOR_OUTPUT_MAX_CHARS", "200000")
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.reflections_path.write_text(reflections)
+        config.observations_path.write_text(
+            "# Observations\n\n## 2026-05-10\n\n- Updated identity: Alex is now a staff engineer.\n"
+        )
+
+        def fake_compress(system_prompt, user_content, config, **kwargs):
+            return (
+                "SECTION_HANDLE: ref:core-identity\nUPDATED_MARKDOWN:\n## Core Identity\n\n- **Name:** Alex (staff)\n"
+            )
+
+        with patch("observational_memory.reflect.compress", side_effect=fake_compress):
+            with caplog.at_level(logging.WARNING, logger="observational_memory.reflect"):
+                result = run_reflector(config, dry_run=True)
+
+        assert result is not None
+        # The touched section changed...
+        assert "Alex (staff)" in result
+        # ...and the untouched tail Archive section is fully preserved, NOT trimmed:
+        # every Archive line survives (the cap would have dropped the whole tail).
+        assert "## Archive" in result
+        assert result.count("old note line") == reflections.count("old note line")
+        # The reassembled document stays large (not trimmed back under the cap).
+        assert len(result) > 200_000
+        # The output cap never fired on the reassembled document.
+        assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" not in result
+        assert not any("OM_REFLECTOR_OUTPUT_MAX_CHARS" in r.message for r in caplog.records)
