@@ -171,7 +171,21 @@ If you lower the input ceiling (or raise the chunk ratio) far enough, the effect
 configured_reflections_cap=48000 effective_reflections_cap=12143 max_input_tokens=12000 observation_chunk_budget=25200
 ```
 
-Here the operator set `OM_REFLECTOR_CONTEXT_MAX_CHARS=48000`, but a low `max_input_tokens` clamped the effective cap to `12143`. Raise `OM_REFLECTOR_MAX_INPUT_TOKENS` (or compress `reflections.md`) to let the configured cap bind again. The deeper fix, incremental section-targeted reflection, is tracked separately.
+Here the operator set `OM_REFLECTOR_CONTEXT_MAX_CHARS=48000`, but a low `max_input_tokens` clamped the effective cap to `12143`. Raise `OM_REFLECTOR_MAX_INPUT_TOKENS` (or compress `reflections.md`) to let the configured cap bind again. For very large memory the deeper fix is the section-targeted strategy below.
+
+#### Folding strategy
+
+`OM_REFLECTOR_STRATEGY` (default `auto`) picks how the reflector folds new observations into `reflections.md`:
+
+```bash
+OM_REFLECTOR_STRATEGY=auto   # auto | legacy | sectioned
+```
+
+- `legacy` — single-pass when the input is small, otherwise chunked: each chunked fold re-sends a bounded prefix of the running document. Simple, but the re-sent prefix grows with both the number of chunks and the document size, and once the document outgrows one fold's input budget the prefix is head-truncated every fold (older sections stop being seen).
+- `sectioned` — section-targeted folding. Each fold routes its observation chunk to the reflection sections it touches (using headings, repo/project names, paths, and keywords — no extra LLM call), sends only those sections plus an always-visible durable core bundle (Core Identity, Preferences & Opinions, Relationship & Communication, Key Facts & Context, the matching project entry, and Recent Themes when the update is about current work), then reassembles the full document byte-for-byte from the unchanged sections. Per-fold resend stays proportional to the touched sections, not the whole document, so it scales to large memory. Invalid model output fails closed: the affected fold is skipped and `reflections.md` is left unchanged rather than written partially.
+- `auto` — the default. Uses `legacy` while the document still fits inside one fold's input budget (small corpora), and switches to `sectioned` once it grows past that — exactly the point where `legacy` would otherwise head-truncate every fold.
+
+Set `legacy` or `sectioned` explicitly to override the automatic choice.
 
 ### Reflector output cap
 

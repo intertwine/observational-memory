@@ -11,10 +11,14 @@ from pathlib import Path
 from .config import Config
 from .llm import compress
 from .reflection_metadata import ensure_reflection_metadata, prune_stale_snapshots
+from .reflection_patch import PatchParseError, parse_section_patches
+from .reflection_router import core_bundle_handles, route_chunk
+from .reflection_sections import parse_reflection_document, reassemble_document
 
 _LOGGER = logging.getLogger(__name__)
 
 REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
+REFLECTOR_SECTIONED_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector_sectioned.md"
 
 # Approximate chars-per-token ratio for estimating input size.
 _CHARS_PER_TOKEN = 3.5
@@ -505,7 +509,24 @@ def _reflect_chunked(
     auto_memory: str = "",
     amem_changed: bool = False,
 ) -> str:
-    """Chunked reflection: split observations into date sections, fold each into reflections."""
+    """Chunked reflection: split observations into date sections, fold each into reflections.
+
+    Dispatches on ``OM_REFLECTOR_STRATEGY`` (legacy | sectioned | auto). In
+    ``sectioned`` mode — and in ``auto`` once the document outgrows a single
+    fold's input budget — each fold routes its observation chunk to the
+    reflection sections it touches and re-sends only those (plus the durable core
+    bundle) instead of a bounded prefix of the whole running document.
+    """
+    if _use_sectioned_strategy(config, reflections):
+        return _reflect_sectioned(
+            system_prompt,
+            reflections,
+            observations,
+            config,
+            auto_memory,
+            amem_changed,
+        )
+
     # Reserve the auto-memory section for every fold (it actually rides only on
     # the last) so the conservative budget keeps even that fold under the ceiling.
     amem_section = _auto_memory_section(auto_memory, amem_changed)
@@ -562,6 +583,280 @@ def _reflect_chunked(
         # per-fold context is capped. A 0 cap means no room at all -> marker only
         # (never the full document, which _bound_reflections_context would re-send
         # for max_chars<=0).
+        if budget_exhausted:
+            bounded = _REFLECTIONS_BUDGET_EXHAUSTED
+        else:
+            bounded = _bound_reflections_context(running_reflections, reflections_cap, budget_diagnostics)
+        user_content = (
+            f"## Current reflections\n\n{bounded}\n\n"
+            f"---\n\n"
+            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}{fold_amem}"
+        )
+        running_reflections = compress(
+            fold_prompt,
+            user_content,
+            config,
+            max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS,
+            operation="reflector",
+        )
+
+    return running_reflections
+
+
+def _sectioned_reflector_prompt() -> str:
+    """Load the section-targeted reflector system prompt (fallback if missing)."""
+    if REFLECTOR_SECTIONED_PROMPT_PATH.exists():
+        return REFLECTOR_SECTIONED_PROMPT_PATH.read_text()
+    return (
+        "You are the section-targeted Reflector. You are shown only the relevant "
+        "reflection sections. Return section patches in the envelope:\n"
+        "SECTION_HANDLE: ref:<slug>\nUPDATED_MARKDOWN:\n## <Heading>\n...\n"
+        "Emit ONLY sections you changed. Output nothing else."
+    )
+
+
+def _use_sectioned_strategy(config: Config, reflections: str) -> bool:
+    """Decide whether to fold with the section-targeted strategy.
+
+    ``OM_REFLECTOR_STRATEGY`` selects explicitly: ``sectioned`` always uses it,
+    ``legacy`` never does. ``auto`` (the default) uses sectioned once the existing
+    reflections document can no longer fit inside a single fold's full input
+    budget — the regime where the legacy chunked path would otherwise head-
+    truncate the document on every fold, dropping tail sections the observations
+    might touch. Below that threshold the document fits and legacy single-pass /
+    chunked reflection is simpler and cheaper, so auto stays on legacy.
+    """
+    strategy = config.reflector_strategy
+    if strategy == "sectioned":
+        return True
+    if strategy == "legacy":
+        return False
+    # auto: switch to sectioned once the document outgrows one fold's input
+    # budget (the point past which legacy must head-truncate every fold).
+    max_input_chars = int(config.reflector_max_input_tokens * _CHARS_PER_TOKEN)
+    return len(reflections) > max_input_chars
+
+
+def _section_targeted_context(document, route) -> str:
+    """Build the section-targeted reflections context for one fold.
+
+    Emits, byte-for-byte and in document order:
+
+      - each routed full section (the durable core bundle plus any small whole
+        section like Recent Themes), and
+      - each routed H3 entry on its own under a short parent marker, so a touched
+        project/archived item is surfaced WITHOUT its whole heavy parent H2.
+
+    The result is proportional to the touched work (core bundle + a couple of
+    entries), not the document size, which is what bounds the per-fold resend.
+    """
+    by_handle = {section.handle: section for section in document.sections}
+    sub_parent = {sub.handle: section for section in document.sections for sub in section.subsections}
+    sub_by_handle = {sub.handle: sub for section in document.sections for sub in section.subsections}
+
+    parts: list[str] = []
+    # Full sections first, in document order.
+    for handle in route.section_handles:
+        section = by_handle.get(handle)
+        if section is not None:
+            parts.append(section.text.rstrip("\n"))
+
+    # Then the individual touched H3 entries, grouped under their parent header so
+    # the reflector knows where they live without re-sending the whole parent.
+    for handle in route.subsection_handles:
+        sub = sub_by_handle.get(handle)
+        parent = sub_parent.get(handle)
+        if sub is None or parent is None:
+            continue
+        parts.append(f"## {parent.heading}\n\n{sub.text.rstrip(chr(10))}")
+
+    return "\n\n".join(parts).rstrip("\n")
+
+
+def _patchable_handles(document, route) -> list[str]:
+    """Handles the reflector may safely patch this fold.
+
+    Only sections shown IN FULL are patchable (the core bundle and any small
+    whole section). Heavy H2 sections are NOT patchable when we only showed one
+    of their H3 entries — replacing such an H2 would drop its sibling entries,
+    the exact corruption the milestone forbids. New/updated work for a touched
+    project is expressed by adding a section with ``NEW_AFTER:``.
+    """
+    return list(route.section_handles)
+
+
+def _available_handles_block(handles: list[str]) -> str:
+    """List the handles the reflector may patch (bounded; never the whole doc)."""
+    patchable = "\n".join(f"- {h}" for h in handles) or "- (none — add new sections only)"
+    return (
+        "## Available section handles\n\n"
+        "Patch only these handles:\n"
+        f"{patchable}\n\n"
+        "To add a new section, use 'NEW_AFTER:' with one of the handles above, "
+        "or an empty 'NEW_AFTER:' to append at the end."
+    )
+
+
+def _apply_section_patches(document, patches) -> str | None:
+    """Apply parsed section patches to *document*, reassembling byte-faithfully.
+
+    Returns the reassembled document, or None if the patches cannot be applied
+    safely (an unknown handle, a malformed section). FAILS CLOSED: on any problem
+    it returns None so the caller leaves the running document unchanged rather
+    than write a partial/corrupt reflections.md.
+    """
+    replacements: dict[str, str] = {}
+    additions: list[tuple[str, str]] = []
+    known = set(document.handles())
+    for patch in patches:
+        if patch.new_after is not None:
+            # A new section: the target handle must NOT already exist; the anchor
+            # (if any) must exist.
+            if patch.handle in known:
+                _LOGGER.warning(
+                    "sectioned reflector: new-section handle %r already exists; skipping fold", patch.handle
+                )
+                return None
+            additions.append((patch.new_after, patch.markdown))
+        else:
+            if patch.handle not in known:
+                _LOGGER.warning("sectioned reflector: patch for unknown handle %r; skipping fold", patch.handle)
+                return None
+            replacements[patch.handle] = patch.markdown
+    try:
+        return reassemble_document(document, replacements=replacements, additions=additions)
+    except (KeyError, ValueError) as exc:
+        _LOGGER.warning("sectioned reflector: reassembly failed (%s); leaving reflections unchanged for this fold", exc)
+        return None
+
+
+def _reflect_sectioned(
+    system_prompt: str,
+    reflections: str,
+    observations: str,
+    config: Config,
+    auto_memory: str = "",
+    amem_changed: bool = False,
+) -> str:
+    """Section-targeted reflection (Milestone 3, #71).
+
+    Each fold routes its observation chunk to the reflection sections it touches
+    (deterministic heuristics, no extra LLM call), sends only those sections plus
+    the always-visible durable core bundle to the model, parses the strict
+    section-patch envelope it returns, and reassembles the full document
+    byte-for-byte from the unchanged sections. Per-fold resend is proportional to
+    the touched sections, not the whole document.
+
+    SAFETY: any unparseable/invalid patch FAILS CLOSED — that fold is skipped and
+    the running document is left unchanged rather than written partially. The core
+    ``system_prompt`` is replaced with the section-patch prompt; auto-memory rides
+    on the final fold as in the legacy path.
+    """
+    sectioned_prompt = _sectioned_reflector_prompt()
+    amem_section = _auto_memory_section(auto_memory, amem_changed)
+    _reflections_cap, chunk_budget = _reflector_budgets(sectioned_prompt, amem_section, config)
+    chunks = _chunk_observations(observations, chunk_budget)
+
+    running_reflections = reflections
+    for i, chunk in enumerate(chunks, 1):
+        is_last = i == len(chunks)
+        document = parse_reflection_document(running_reflections)
+        if not document.sections:
+            # No section structure to target (empty/fresh reflections). Fall back
+            # to legacy chunked folding for this run so we never silently drop the
+            # observations — sectioning needs sections to target.
+            return _reflect_chunked_legacy(system_prompt, reflections, observations, config, auto_memory, amem_changed)
+
+        route = route_chunk(document, chunk, fold_index=i - 1, fold_total=len(chunks))
+        # Guarantee the durable core bundle is always present even if routing
+        # somehow returned nothing (defensive; route_chunk always includes it).
+        for handle in core_bundle_handles(document):
+            if handle not in route.section_handles:
+                route.section_handles.append(handle)
+
+        targeted = _section_targeted_context(document, route)
+        handles_block = _available_handles_block(_patchable_handles(document, route))
+        fold_amem = amem_section if is_last else ""
+        user_content = (
+            f"## Current reflections (relevant sections)\n\n{targeted}\n\n"
+            f"---\n\n"
+            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}\n\n"
+            f"---\n\n"
+            f"{handles_block}{fold_amem}"
+        )
+        raw = compress(
+            sectioned_prompt,
+            user_content,
+            config,
+            max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS,
+            operation="reflector",
+        )
+        try:
+            patches = parse_section_patches(raw)
+        except PatchParseError as exc:
+            _LOGGER.warning(
+                "sectioned reflector: fold %d/%d produced unparseable output (%s); "
+                "leaving reflections unchanged for this fold (fail-closed)",
+                i,
+                len(chunks),
+                exc,
+            )
+            continue
+        updated = _apply_section_patches(document, patches)
+        if updated is None:
+            continue  # fail closed: keep the running document for this fold
+        running_reflections = updated
+
+    return running_reflections
+
+
+def _reflect_chunked_legacy(
+    system_prompt: str,
+    reflections: str,
+    observations: str,
+    config: Config,
+    auto_memory: str = "",
+    amem_changed: bool = False,
+) -> str:
+    """Legacy chunked folding (extracted so sectioned mode can fall back to it).
+
+    This is the body that ``_reflect_chunked`` runs when the strategy resolves to
+    legacy; sectioned mode delegates here when a document has no section structure
+    to target (e.g. a fresh/empty reflections.md).
+    """
+    amem_section = _auto_memory_section(auto_memory, amem_changed)
+    reflections_cap, chunk_budget = _reflector_budgets(system_prompt, amem_section, config)
+    chunks = _chunk_observations(observations, chunk_budget)
+    budget_diagnostics = {
+        "configured_reflections_cap": config.reflector_context_max_chars,
+        "effective_reflections_cap": reflections_cap,
+        "max_input_tokens": config.reflector_max_input_tokens,
+        "observation_chunk_budget": chunk_budget,
+    }
+    budget_exhausted = reflections_cap <= 0
+    if budget_exhausted:
+        _LOGGER.warning(
+            "reflector input budget leaves no room for reflections context "
+            "(configured_reflections_cap=%d effective_reflections_cap=0 "
+            "max_input_tokens=%d observation_chunk_budget=%d); folding with a marker "
+            "only. Raise OM_REFLECTOR_MAX_INPUT_TOKENS or lower "
+            "OM_REFLECTOR_OBSERVATION_CHUNK_RATIO.",
+            config.reflector_context_max_chars,
+            config.reflector_max_input_tokens,
+            chunk_budget,
+        )
+
+    running_reflections = reflections
+    for i, chunk in enumerate(chunks, 1):
+        is_last = i == len(chunks)
+        fold_prompt = system_prompt
+        if not is_last:
+            fold_prompt += (
+                "\n\n**NOTE:** This is chunk {i} of {total}. More observations follow. "
+                "Focus on integrating these observations into the reflections. "
+                "Produce the complete updated reflections document."
+            ).format(i=i, total=len(chunks))
+        fold_amem = amem_section if is_last else ""
         if budget_exhausted:
             bounded = _REFLECTIONS_BUDGET_EXHAUSTED
         else:

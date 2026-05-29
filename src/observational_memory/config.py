@@ -140,6 +140,18 @@ def _safe_float(value: str | None, default: float) -> float:
         return default
 
 
+# Valid OM_REFLECTOR_STRATEGY values (see Config.reflector_strategy).
+REFLECTOR_STRATEGIES = ("legacy", "sectioned", "auto")
+
+
+def _safe_strategy(value: str | None, default: str) -> str:
+    """Normalize OM_REFLECTOR_STRATEGY, falling back to *default* on bad input."""
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    return normalized if normalized in REFLECTOR_STRATEGIES else default
+
+
 ENV_FILE_TEMPLATE = """\
 # Observational Memory — API Keys
 # This file is sourced by om, its hooks, and its background scheduler jobs.
@@ -182,6 +194,13 @@ ENV_FILE_TEMPLATE = """\
 # rejects max_output_tokens. Generous default; trims at a section boundary and
 # warns only on a runaway. 0 disables:
 # OM_REFLECTOR_OUTPUT_MAX_CHARS=200000
+# Reflector folding strategy: legacy | sectioned | auto (default auto). 'legacy'
+# re-sends a bounded prefix of the running document on every chunked fold;
+# 'sectioned' routes each observation chunk to the reflection sections it touches
+# and re-sends only those plus the durable core bundle (Milestone 3, scales to
+# large memory); 'auto' uses legacy for small corpora and sectioned once the
+# document outgrows a single fold's input budget:
+# OM_REFLECTOR_STRATEGY=auto
 #
 # Startup context: mark operational facts (tool versions/install status) older
 # than this many days with "(as of <date> — verify)" (default 14):
@@ -393,6 +412,24 @@ class Config:
     # corrupt reflections.md — and logs a warning. 0 disables the cap.
     reflector_output_max_chars: int = field(
         default_factory=lambda: int(os.environ.get("OM_REFLECTOR_OUTPUT_MAX_CHARS", "200000"))
+    )
+    # Reflector folding strategy: how the reflector folds new observations into
+    # the existing reflections.md.
+    #   legacy    — single-pass when small, else chunked: each chunked fold
+    #               re-sends a (bounded) prefix of the running document. Simple,
+    #               but the re-sent prefix is O(chunks x reflections-size) and
+    #               head-truncates once the document outgrows one fold's budget.
+    #   sectioned — section-targeted (Milestone 3): route each observation chunk
+    #               to the reflection sections it touches, send only those (plus
+    #               an always-visible durable core bundle), and reassemble the
+    #               full document byte-for-byte from the unchanged sections. Per-
+    #               fold resend is proportional to the touched sections, not the
+    #               whole document.
+    #   auto      — default: legacy for small corpora (the document fits in one
+    #               fold's input budget), sectioned once it grows past that, where
+    #               legacy would otherwise head-truncate every fold.
+    reflector_strategy: str = field(
+        default_factory=lambda: _safe_strategy(os.environ.get("OM_REFLECTOR_STRATEGY"), "auto")
     )
 
     # Reflector settings
