@@ -4,10 +4,11 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.6.7`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.7.0`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
+- section-targeted reflection for scale (`OM_REFLECTOR_STRATEGY=legacy|sectioned|auto`, default `auto`): routes observations to impacted sections, always includes a core bundle, patches only touched sections, reassembles byte-for-byte, fails closed on invalid model output — ends the O(chunks×size) whole-document resend at 10x/100x
 - fail-closed startup hooks (Claude/Grok/Cowork `SessionStart` route through bounded `om context` only; never dump raw `profile.md`/`active.md`/`reflections.md`/`observations.md` on failure)
 - configurable, honestly-diagnosed reflector input budget (`OM_REFLECTOR_MAX_INPUT_TOKENS`, `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO`; configured-vs-effective cap reporting)
 - Codex-safe reflector output cap (`OM_REFLECTOR_OUTPUT_MAX_CHARS`, section-boundary trim, applied post-call so it bounds the `openai-chatgpt` path too)
@@ -140,4 +141,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-`v0.6.7` has release notes in `docs/RELEASE-0.6.7.md`. Future release steps require explicit user approval.
+`v0.7.0` has release notes in `docs/RELEASE-0.7.0.md`. Future release steps require explicit user approval.

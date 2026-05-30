@@ -11,8 +11,9 @@
 
 Observational Memory, or `om`, gives Claude Code, Codex, Grok Build TUI, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
 
-The current release is `v0.6.7`. It includes:
+The current release is `v0.7.0`. It includes:
 
+- **Reflection that scales** — section-targeted reflection (`OM_REFLECTOR_STRATEGY=auto`) routes observations to the sections they affect, keeps a core bundle in every fold, patches only touched sections, and reassembles the rest byte-for-byte — so a growing `reflections.md` no longer forces whole-document resend; invalid model output fails closed, leaving memory unchanged
 - **Fail-closed startup context** — the Claude, Grok, and Cowork hooks route through bounded `om context` only; if it's unavailable they emit nothing (plus a stderr hint) instead of dumping raw, unbounded memory files
 - **Configurable, honest reflector budgets** — `OM_REFLECTOR_MAX_INPUT_TOKENS` / `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO` knobs, a default that no longer silently clamps your configured cap, and diagnostics that report configured-vs-effective limits
 - **Codex-safe reflector output cap** — `OM_REFLECTOR_OUTPUT_MAX_CHARS` bounds the emitted document on every backend (trimming at a section boundary), even the ChatGPT Codex path that rejects `max_output_tokens`
@@ -185,7 +186,7 @@ The short version:
 
 ## Release State
 
-`v0.6.7` is the current release. It is a hardening pass on v0.6.6: fail-closed startup hooks (route through bounded `om context`, never dump raw memory files), a configurable and honestly-diagnosed reflector input budget (`OM_REFLECTOR_MAX_INPUT_TOKENS`, `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO`), a Codex-safe reflector output cap (`OM_REFLECTOR_OUTPUT_MAX_CHARS`), and clean async-Batch error messages. It builds on the v0.6.6 usage/cost/budget subsystem (`om usage`), OpenAI Batch async reflection (`om reflect --async`, `om jobs`), and startup-context quality controls (`om context --quality-report`).
+`v0.7.0` is the current release. It makes reflection scale with **section-targeted reflection** (`OM_REFLECTOR_STRATEGY=legacy|sectioned|auto`, default `auto`): observations route to the sections they affect, a core bundle rides every fold, only touched sections are patched, and the rest is reassembled byte-for-byte — ending the O(chunks×size) whole-document resend at 10x/100x scale, with invalid model output failing closed. It builds on the v0.6.7 reflector budget knobs + output cap and fail-closed startup hooks, the v0.6.6 usage/cost/budget subsystem (`om usage`) and OpenAI Batch async reflection (`om reflect --async`). The addressable memory-unit store and hierarchical compaction are deferred to v0.8.0+ (issue #71).
 
 Before the next release, maintainers should run:
 
