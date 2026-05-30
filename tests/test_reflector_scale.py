@@ -231,6 +231,10 @@ def test_diagnostics_report_binding_limit(monkeypatch, caplog):
     # At 10x the input ceiling clamps the effective reflections cap below the
     # configured cap. The system must report BOTH so the operator sees which
     # ceiling binds — not silently blame OM_REFLECTOR_CONTEXT_MAX_CHARS.
+    # Asserts the LEGACY head-clamp diagnostics, so pin to the legacy strategy:
+    # under the new auto default this corpus would route to sectioned (which does
+    # not emit the legacy clamp warning).
+    monkeypatch.setenv("OM_REFLECTOR_STRATEGY", "legacy")
     scenario = SCENARIOS["10x"]
     with caplog.at_level("WARNING", logger="observational_memory.reflect"):
         _run_chunked_capture(scenario, monkeypatch)
@@ -250,6 +254,13 @@ def test_diagnostics_report_binding_limit(monkeypatch, caplog):
 
 
 def test_2x_keeps_bulk_of_reflections_context(monkeypatch):
+    # This asserts the LEGACY v0.6.7 chunked ceiling (keep ~48k of context, not
+    # the old ~12k clamp). Under the corrected auto threshold (which compares
+    # against the EFFECTIVE ~48k per-fold reflections cap, not the ~157.5k input
+    # budget), a ~96k 2x document now routes to sectioned — so pin legacy here to
+    # keep testing the ceiling this test was written for, exactly as the
+    # companion test_diagnostics_report_binding_limit does.
+    monkeypatch.setenv("OM_REFLECTOR_STRATEGY", "legacy")
     scenario = SCENARIOS["2x"]
     reflections, _o, captured, _cfg = _run_chunked_capture(scenario, monkeypatch)
     assert len(captured) >= 2, "2x should still take the chunked path"
@@ -276,7 +287,6 @@ def test_2x_keeps_bulk_of_reflections_context(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=True, reason="section-targeted reflection lands in M3 / #71")
 @pytest.mark.parametrize("scenario_name", ["10x", "100x"])
 def test_large_scale_surfaces_touched_sections_not_head_only(scenario_name, monkeypatch):
     # M3 contract: each fold's reflections context carries the touched section
@@ -303,7 +313,6 @@ def test_large_scale_surfaces_touched_sections_not_head_only(scenario_name, monk
     )
 
 
-@pytest.mark.xfail(strict=True, reason="section-targeted reflection lands in M3 / #71")
 @pytest.mark.parametrize("scenario_name", ["10x", "100x"])
 def test_large_scale_keeps_core_bundle_in_every_fold(scenario_name, monkeypatch):
     # M3 contract: the always-visible core bundle (identity, preferences,
@@ -331,7 +340,6 @@ def test_large_scale_keeps_core_bundle_in_every_fold(scenario_name, monkeypatch)
     )
 
 
-@pytest.mark.xfail(strict=True, reason="section-targeted reflection lands in M3 / #71")
 @pytest.mark.parametrize("scenario_name", ["10x", "100x"])
 def test_large_scale_context_is_section_targeted_not_full_or_head(scenario_name, monkeypatch):
     # M3 contract: per-fold reflections context is proportional to the TOUCHED
@@ -411,6 +419,11 @@ def test_total_resend_grows_with_corpus_today(monkeypatch):
     # grows monotonically AND super-linearly across the tiers so a future "fix"
     # that merely shrinks the per-fold prefix while leaving folds x prefix large
     # is still caught.
+    #
+    # This documents LEGACY behavior (the O(chunks x prefix) problem M3 bounds),
+    # so pin to the legacy strategy — under the new auto default 10x/100x route to
+    # sectioned, whose total resend does NOT grow this way (that is the whole point).
+    monkeypatch.setenv("OM_REFLECTOR_STRATEGY", "legacy")
     totals = {}
     for name in ("2x", "10x", "100x"):
         _r, _o, captured, _cfg = _run_chunked_capture(SCENARIOS[name], monkeypatch)
@@ -429,6 +442,11 @@ def test_per_fold_resend_does_not_shrink_to_a_targeted_bundle_today(monkeypatch)
     # eliminated. (At 100x the effective cap is itself small, which is exactly why
     # the M3 guard pairs the size bound with touched-section coverage — see
     # test_resend_complexity_guard_large_scale.)
+    #
+    # Documents LEGACY per-fold resend, so pin to the legacy strategy — the auto
+    # default would route this corpus to sectioned (the compact bundle this test
+    # asserts legacy does NOT collapse to).
+    monkeypatch.setenv("OM_REFLECTOR_STRATEGY", "legacy")
     _r, _o, cap10, _c = _run_chunked_capture(SCENARIOS["10x"], monkeypatch)
     resend10 = resend_per_fold_chars(_reflections_blocks(cap10))
     assert resend10 > SECTION_TARGETED_RESEND_CEILING, (
@@ -437,7 +455,6 @@ def test_per_fold_resend_does_not_shrink_to_a_targeted_bundle_today(monkeypatch)
     )
 
 
-@pytest.mark.xfail(strict=True, reason="section-targeted reflection lands in M3 / #71")
 @pytest.mark.parametrize("scenario_name", ["10x", "100x"])
 def test_resend_complexity_guard_large_scale(scenario_name, monkeypatch):
     # The guard: a section-targeted reflector re-sends only a compact core bundle

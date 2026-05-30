@@ -171,13 +171,29 @@ If you lower the input ceiling (or raise the chunk ratio) far enough, the effect
 configured_reflections_cap=48000 effective_reflections_cap=12143 max_input_tokens=12000 observation_chunk_budget=25200
 ```
 
-Here the operator set `OM_REFLECTOR_CONTEXT_MAX_CHARS=48000`, but a low `max_input_tokens` clamped the effective cap to `12143`. Raise `OM_REFLECTOR_MAX_INPUT_TOKENS` (or compress `reflections.md`) to let the configured cap bind again. The deeper fix, incremental section-targeted reflection, is tracked separately.
+Here the operator set `OM_REFLECTOR_CONTEXT_MAX_CHARS=48000`, but a low `max_input_tokens` clamped the effective cap to `12143`. Raise `OM_REFLECTOR_MAX_INPUT_TOKENS` (or compress `reflections.md`) to let the configured cap bind again. For very large memory the deeper fix is the section-targeted strategy below.
+
+#### Folding strategy
+
+`OM_REFLECTOR_STRATEGY` (default `auto`) picks how the reflector folds new observations into `reflections.md`:
+
+```bash
+OM_REFLECTOR_STRATEGY=auto   # auto | legacy | sectioned
+```
+
+- `legacy` — single-pass when the input is small, otherwise chunked: each chunked fold re-sends a bounded prefix of the running document. Simple, but the re-sent prefix grows with both the number of chunks and the document size, and once the document outgrows one fold's input budget the prefix is head-truncated every fold (older sections stop being seen).
+- `sectioned` — section-targeted folding. Each fold routes its observation chunk to the reflection sections it touches (using headings, repo/project names, paths, and keywords — no extra LLM call; abbreviated names like `hermes` match a `hermes-agent` entry), sends only those sections plus an always-visible durable core bundle (Core Identity, Preferences & Opinions, Relationship & Communication, Key Facts & Context, the matching project entry, and Recent Themes when the update is about current work), then reassembles the full document byte-for-byte from the unchanged sections. Per-fold resend stays proportional to the touched sections, not the whole document, so it scales to large memory. An existing project entry is updated **in place** (only that one `### ` subsection changes; its siblings and parent header are preserved byte-for-byte); a genuinely new project is added as a new section. Invalid model output fails closed: the affected fold is skipped and `reflections.md` is left unchanged rather than written partially. The reflector can only patch the exact handles it was offered for that fold — a section it was not shown can never be replaced — so it cannot accidentally drop an unrelated section.
+- `auto` — the default. Uses `legacy` while the document still fits inside the legacy chunked path's effective per-fold reflections cap (the smaller of `OM_REFLECTOR_CONTEXT_MAX_CHARS` and the budget-derived cap — about 48k with the defaults), and switches to `sectioned` once it grows past that — exactly the point where `legacy` would otherwise head-truncate every fold.
+
+Set `legacy` or `sectioned` explicitly to override the automatic choice. An explicit `sectioned` is honored even for a small corpus that already has sections (it is not silently downgraded to a whole-document rewrite). OM Cluster reflection always uses the `legacy` cross-machine merge path regardless of this setting, so multi-machine snapshot merges keep their reconciliation guidance.
 
 ### Reflector output cap
 
 `OM_REFLECTOR_OUTPUT_MAX_CHARS` (default `200000`) caps the reflector's *output* — the document it emits — applied after the model returns. The reflector prompt already carries a length budget, but a strong reasoning model can blow past it, and the `openai-chatgpt` (Codex) Responses backend rejects `max_output_tokens`, so nothing API-side bounds the result on that path. This cap is provider-agnostic: it runs in the reflect pipeline where the synchronous and async (Batch) paths converge, so it covers every backend, Codex included.
 
 The default is deliberately generous. A target-size `reflections.md` (200–600 lines) is well under it, and even the runaway run that motivated the cap emitted about 121k chars — so the default only fires on a genuine runaway, never on a normal run. When the output does overrun, the pipeline trims back to the last complete `## ` section heading before the cap (never mid-section, which would leave a half-written entry in `reflections.md`), appends a truncation marker, and logs a warning naming the cap. Set it to `0` to disable the cap.
+
+The cap applies only to legacy single-pass / chunked output, where the model can genuinely run away. Section-targeted (`sectioned`) output is a deterministic reassembly of byte-faithful unchanged sections plus a few bounded patches — it is bounded by construction, so the cap is skipped for it. (Trimming a large reassembled document at a `## ` boundary would otherwise drop untouched tail sections, which sectioned mode exists to prevent.)
 
 ### Latency: Codex reasoning effort
 

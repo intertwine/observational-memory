@@ -11,10 +11,14 @@ from pathlib import Path
 from .config import Config
 from .llm import compress
 from .reflection_metadata import ensure_reflection_metadata, prune_stale_snapshots
+from .reflection_patch import PatchParseError, parse_section_patches
+from .reflection_router import core_bundle_handles, route_chunk
+from .reflection_sections import parse_reflection_document, reassemble_document, slugify
 
 _LOGGER = logging.getLogger(__name__)
 
 REFLECTOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector.md"
+REFLECTOR_SECTIONED_PROMPT_PATH = Path(__file__).parent / "prompts" / "reflector_sectioned.md"
 
 # Approximate chars-per-token ratio for estimating input size.
 _CHARS_PER_TOKEN = 3.5
@@ -69,7 +73,20 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
     if inputs is None:
         return None
 
-    if inputs.single_pass:
+    # An explicit OM_REFLECTOR_STRATEGY=sectioned must use section-targeted
+    # folding even for a single-pass-sized corpus — otherwise the operator's
+    # override is silently ignored and they get a whole-document rewrite. We only
+    # do this when the document actually has sections to target; a fresh/empty
+    # reflections.md has nothing to route, so the simple single-pass rewrite is
+    # correct there (and _reflect_sectioned would itself fall back to legacy).
+    force_sectioned = (
+        inputs.single_pass
+        and config.reflector_strategy == "sectioned"
+        and bool(parse_reflection_document(inputs.reflections).sections)
+    )
+
+    reassembled = False
+    if inputs.single_pass and not force_sectioned:
         result = _reflect_single(
             inputs.system_prompt,
             inputs.reflections,
@@ -78,6 +95,16 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
             inputs.auto_memory,
             inputs.amem_changed,
         )
+    elif force_sectioned:
+        result = _reflect_sectioned(
+            inputs.system_prompt,
+            inputs.reflections,
+            inputs.observations,
+            config,
+            inputs.auto_memory,
+            inputs.amem_changed,
+        )
+        reassembled = True
     else:
         # Too large — chunk observations and fold incrementally
         result = _reflect_chunked(
@@ -88,8 +115,11 @@ def run_reflector(config: Config | None = None, dry_run: bool = False) -> str | 
             inputs.auto_memory,
             inputs.amem_changed,
         )
+        reassembled = _use_sectioned_strategy(config, inputs.reflections, inputs.system_prompt) and bool(
+            parse_reflection_document(inputs.reflections).sections
+        )
 
-    return finalize_reflection(result, config, inputs.raw_observations, dry_run=dry_run)
+    return finalize_reflection(result, config, inputs.raw_observations, dry_run=dry_run, reassembled=reassembled)
 
 
 @dataclass
@@ -173,19 +203,37 @@ def prepare_single_pass_reflection(config: Config) -> tuple[str, str, int, Refle
     return inputs.system_prompt, user_content, _REFLECTOR_MAX_OUTPUT_TOKENS, inputs
 
 
-def finalize_reflection(result: str, config: Config, raw_observations: str, dry_run: bool = False) -> str:
+def finalize_reflection(
+    result: str,
+    config: Config,
+    raw_observations: str,
+    dry_run: bool = False,
+    reassembled: bool = False,
+) -> str:
     """Stamp, normalize, and persist a raw reflector output.
 
     Shared by the synchronous reflector and the async (Batch) apply path so a
     deferred result is processed identically to an immediate one: stamp the
     timestamps, ensure metadata, prune stale snapshots, then (unless dry-run)
     write reflections.md, trim consumed observations, and reindex search.
+
+    ``reassembled`` is True when ``result`` came from the section-targeted path,
+    which deterministically reassembles the WHOLE document from byte-faithful
+    unchanged sections plus a few bounded patches. That output is bounded by
+    construction, so the runaway-output cap must NOT run on it — the cap trims at
+    a ``## `` boundary, which on a large reassembled document would drop whole
+    UNTOUCHED tail sections (the exact memory loss Validation gate 3 forbids). The
+    cap exists only for legacy single-pass / chunked LLM rewrites, where the model
+    can genuinely run away.
     """
     # Cap a runaway reflector output before it's stamped and persisted. The cap
     # is provider-agnostic — it runs here, where the sync and async paths
     # converge, so it also covers the openai-chatgpt (Codex) Responses path that
-    # can't honor max_output_tokens.
-    result = _cap_reflector_output(result, config.reflector_output_max_chars)
+    # can't honor max_output_tokens. Skip it for deterministically reassembled
+    # sectioned output, which is bounded by construction and would otherwise lose
+    # untouched tail sections to the section-boundary trim.
+    if not reassembled:
+        result = _cap_reflector_output(result, config.reflector_output_max_chars)
 
     # Programmatically stamp the "Last reflected" timestamp so we don't
     # rely on the LLM to format it correctly.
@@ -505,7 +553,24 @@ def _reflect_chunked(
     auto_memory: str = "",
     amem_changed: bool = False,
 ) -> str:
-    """Chunked reflection: split observations into date sections, fold each into reflections."""
+    """Chunked reflection: split observations into date sections, fold each into reflections.
+
+    Dispatches on ``OM_REFLECTOR_STRATEGY`` (legacy | sectioned | auto). In
+    ``sectioned`` mode — and in ``auto`` once the document outgrows a single
+    fold's input budget — each fold routes its observation chunk to the
+    reflection sections it touches and re-sends only those (plus the durable core
+    bundle) instead of a bounded prefix of the whole running document.
+    """
+    if _use_sectioned_strategy(config, reflections, system_prompt):
+        return _reflect_sectioned(
+            system_prompt,
+            reflections,
+            observations,
+            config,
+            auto_memory,
+            amem_changed,
+        )
+
     # Reserve the auto-memory section for every fold (it actually rides only on
     # the last) so the conservative budget keeps even that fold under the ceiling.
     amem_section = _auto_memory_section(auto_memory, amem_changed)
@@ -562,6 +627,384 @@ def _reflect_chunked(
         # per-fold context is capped. A 0 cap means no room at all -> marker only
         # (never the full document, which _bound_reflections_context would re-send
         # for max_chars<=0).
+        if budget_exhausted:
+            bounded = _REFLECTIONS_BUDGET_EXHAUSTED
+        else:
+            bounded = _bound_reflections_context(running_reflections, reflections_cap, budget_diagnostics)
+        user_content = (
+            f"## Current reflections\n\n{bounded}\n\n"
+            f"---\n\n"
+            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}{fold_amem}"
+        )
+        running_reflections = compress(
+            fold_prompt,
+            user_content,
+            config,
+            max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS,
+            operation="reflector",
+        )
+
+    return running_reflections
+
+
+def _sectioned_reflector_prompt() -> str:
+    """Load the section-targeted reflector system prompt (fallback if missing)."""
+    if REFLECTOR_SECTIONED_PROMPT_PATH.exists():
+        return REFLECTOR_SECTIONED_PROMPT_PATH.read_text()
+    return (
+        "You are the section-targeted Reflector. You are shown only the relevant "
+        "reflection sections. Return section patches in the envelope:\n"
+        "SECTION_HANDLE: ref:<slug>\nUPDATED_MARKDOWN:\n## <Heading>\n...\n"
+        "Emit ONLY sections you changed. Output nothing else."
+    )
+
+
+def _use_sectioned_strategy(config: Config, reflections: str, system_prompt: str | None = None) -> bool:
+    """Decide whether to fold with the section-targeted strategy.
+
+    ``OM_REFLECTOR_STRATEGY`` selects explicitly: ``sectioned`` always uses it,
+    ``legacy`` never does. ``auto`` (the default) uses sectioned once the existing
+    reflections document can no longer fit inside the legacy chunked path's
+    EFFECTIVE per-fold reflections cap — the point past which legacy must head-
+    truncate the document on every fold, dropping tail sections the observations
+    might touch.
+
+    The threshold is the legacy per-fold reflections cap, which is the SMALLER of
+    ``OM_REFLECTOR_CONTEXT_MAX_CHARS`` and the budget-derived cap (input ceiling
+    minus the system prompt, observation chunk, and wrappers) — NOT the full
+    input-token budget. The two diverge sharply: with the defaults the input
+    budget is ~157.5k chars but the effective reflections cap is only ~48k, so a
+    100k document would have stayed on legacy under the old threshold and
+    head-truncated every fold. Comparing against the effective cap closes that
+    gap.
+    """
+    strategy = config.reflector_strategy
+    if strategy == "sectioned":
+        return True
+    if strategy == "legacy":
+        return False
+    # auto: switch to sectioned once the document outgrows the legacy per-fold
+    # reflections cap (the point past which legacy head-truncates every fold).
+    # Intermediate folds carry no auto-memory, so compute the cap with an empty
+    # auto-memory section — that is the cap that binds on every fold but the last.
+    prompt = system_prompt if system_prompt is not None else _load_reflector_prompt()
+    reflections_cap, _chunk_budget = _reflector_budgets(prompt, "", config)
+    return len(reflections) > reflections_cap
+
+
+def _section_targeted_context(document, route) -> str:
+    """Build the section-targeted reflections context for one fold.
+
+    Emits, byte-for-byte and in document order:
+
+      - each routed full section (the durable core bundle plus any small whole
+        section like Recent Themes), and
+      - each routed H3 entry on its own under a short parent marker, so a touched
+        project/archived item is surfaced WITHOUT its whole heavy parent H2.
+
+    The result is proportional to the touched work (core bundle + a couple of
+    entries), not the document size, which is what bounds the per-fold resend.
+    """
+    by_handle = {section.handle: section for section in document.sections}
+    sub_parent = {sub.handle: section for section in document.sections for sub in section.subsections}
+    sub_by_handle = {sub.handle: sub for section in document.sections for sub in section.subsections}
+
+    parts: list[str] = []
+    # Full sections first, in document order.
+    for handle in route.section_handles:
+        section = by_handle.get(handle)
+        if section is not None:
+            parts.append(section.text.rstrip("\n"))
+
+    # Then the individual touched H3 entries, grouped under their parent header so
+    # the reflector knows where they live without re-sending the whole parent.
+    for handle in route.subsection_handles:
+        sub = sub_by_handle.get(handle)
+        parent = sub_parent.get(handle)
+        if sub is None or parent is None:
+            continue
+        parts.append(f"## {parent.heading}\n\n{sub.text.rstrip(chr(10))}")
+
+    return "\n\n".join(parts).rstrip("\n")
+
+
+def _patchable_handles(document, route) -> list[str]:
+    """Handles the reflector may safely patch this fold.
+
+    Two kinds of handle are patchable:
+
+      - Full H2 sections shown IN FULL (the core bundle and any small whole
+        section). A heavy H2 of which we only showed ONE H3 entry is NEVER
+        patchable as a whole — replacing it would drop its sibling entries, the
+        exact corruption the milestone forbids.
+      - The individual H3 subsection handles we surfaced (one project / archived
+        item). These are patched IN PLACE: only the named H3's slice is replaced,
+        the parent H2 header and every sibling H3 are preserved byte-for-byte. A
+        rotation-only fold (nothing in the chunk actually matched) advertises NO
+        subsection as patchable — that entry is arbitrary coverage, not a real
+        target, so steering the model to edit it would be misrouting.
+
+    A brand-new project/section is added with ``NEW_AFTER:`` using a fresh handle.
+    """
+    handles = list(route.section_handles)
+    if not route.rotation_only:
+        handles.extend(route.subsection_handles)
+    return handles
+
+
+def _available_handles_block(handles: list[str], *, unmatched: list[str] | None = None) -> str:
+    """List the handles the reflector may patch (bounded; never the whole doc).
+
+    Full-section (H2) handles are patched with the COMPLETE section markdown; H3
+    subsection handles (``ref:<section>:<sub>``) are patched IN PLACE with that one
+    ``### `` entry's markdown, so an existing project entry can be UPDATED rather
+    than only duplicated by a new section. ``unmatched`` carries name-ish tokens
+    that matched no existing entry — a hint that the observation is about a
+    brand-new project that should be ADDED via ``NEW_AFTER:`` instead of folded
+    into an unrelated entry.
+    """
+    lines: list[str] = []
+    for h in handles:
+        # ``ref:<section>:<sub>`` (two colons) is an H3 subsection handle.
+        if h.count(":") >= 2:
+            lines.append(f"- {h}  (H3 subsection — patch with just its '### ' entry)")
+        else:
+            lines.append(f"- {h}  (H2 section — patch with the complete '## ' section)")
+    patchable = "\n".join(lines) or "- (none — add new sections only)"
+    block = (
+        "## Available section handles\n\n"
+        "Patch only these handles:\n"
+        f"{patchable}\n\n"
+        "To add a new section, use 'NEW_AFTER:' with one of the handles above, "
+        "or an empty 'NEW_AFTER:' to append at the end. A new section's heading "
+        "must not duplicate an existing section."
+    )
+    if unmatched:
+        names = ", ".join(unmatched)
+        block += (
+            "\n\nThe observations mention name(s) not found in any shown section: "
+            f"{names}. If these are new projects/repos, ADD a new section with "
+            "'NEW_AFTER:' rather than editing an unrelated entry."
+        )
+    return block
+
+
+def _apply_section_patches(document, patches, allowed_handles) -> str | None:
+    """Apply parsed section patches to *document*, reassembling byte-faithfully.
+
+    ``allowed_handles`` is the bounded set this fold actually offered the model
+    (the ``_patchable_handles`` list). A replacement/in-place patch whose handle
+    is NOT in that set is REJECTED even if the handle exists in the document — a
+    known-but-not-offered handle (e.g. a heavy H2 the model only saw one H3 of)
+    must never be replaced wholesale, or its sibling entries are silently dropped.
+    This closes the gap where the allowlist was merely advisory prompt text.
+
+    A handle that names an H2 section is applied as a full-section replacement; a
+    handle that names a surfaced H3 subsection is applied IN PLACE (only that H3's
+    slice changes, siblings preserved byte-for-byte).
+
+    Returns the reassembled document, or None if the patches cannot be applied
+    safely (an unknown/not-offered handle, a malformed section). FAILS CLOSED: on
+    any problem it returns None so the caller leaves the running document
+    unchanged rather than write a partial/corrupt reflections.md.
+    """
+    replacements: dict[str, str] = {}
+    subsection_replacements: dict[str, str] = {}
+    additions: list[tuple[str, str]] = []
+    section_handles = set(document.handles())
+    subsection_handles = {sub.handle for section in document.sections for sub in section.subsections}
+    allowed = set(allowed_handles)
+    for patch in patches:
+        if patch.new_after is not None:
+            # A new section: the target handle must NOT already exist; the anchor
+            # (if any) must exist. (reassemble_document also rejects a heading-slug
+            # collision, so a fresh handle that maps to an existing heading is
+            # caught there and fails closed.)
+            if patch.handle in section_handles or patch.handle in subsection_handles:
+                _LOGGER.warning(
+                    "sectioned reflector: new-section handle %r already exists; skipping fold", patch.handle
+                )
+                return None
+            additions.append((patch.new_after, patch.markdown))
+            continue
+        # An in-place edit: the handle must have been OFFERED this fold, not merely
+        # exist in the document. Reject otherwise (fail closed) so a model echoing
+        # back a heavy H2 (or any not-offered handle) cannot drop sibling content.
+        if patch.handle not in allowed:
+            _LOGGER.warning(
+                "sectioned reflector: patch for handle %r was not offered this fold "
+                "(offered=%s); skipping fold (fail-closed)",
+                patch.handle,
+                sorted(allowed),
+            )
+            return None
+        if patch.handle in section_handles:
+            # Content-preservation guard: a full-section patch must not silently
+            # drop the section's existing H3 child entries. The offered patchable
+            # sections are small (core bundle / Recent Themes) and normally have no
+            # H3s, so dropping one is a strong signal of lossy rewriting, not a
+            # legitimate consolidation. Fail closed if any prior H3 slug is gone.
+            existing = document.section_by_handle(patch.handle)
+            prior_h3_slugs = {sub.slug for sub in existing.subsections} if existing else set()
+            if prior_h3_slugs:
+                new_h3_slugs = {
+                    slugify(line[4:].strip()) for line in patch.markdown.splitlines() if line.startswith("### ")
+                }
+                dropped = prior_h3_slugs - new_h3_slugs
+                if dropped:
+                    _LOGGER.warning(
+                        "sectioned reflector: full-section patch for %r drops H3 entries %s; "
+                        "skipping fold (fail-closed). Update the H3 subsection handle in place instead.",
+                        patch.handle,
+                        sorted(dropped),
+                    )
+                    return None
+            replacements[patch.handle] = patch.markdown
+        elif patch.handle in subsection_handles:
+            subsection_replacements[patch.handle] = patch.markdown
+        else:
+            _LOGGER.warning("sectioned reflector: patch for unknown handle %r; skipping fold", patch.handle)
+            return None
+    try:
+        return reassemble_document(
+            document,
+            replacements=replacements,
+            subsection_replacements=subsection_replacements,
+            additions=additions,
+        )
+    except (KeyError, ValueError) as exc:
+        _LOGGER.warning("sectioned reflector: reassembly failed (%s); leaving reflections unchanged for this fold", exc)
+        return None
+
+
+def _reflect_sectioned(
+    system_prompt: str,
+    reflections: str,
+    observations: str,
+    config: Config,
+    auto_memory: str = "",
+    amem_changed: bool = False,
+) -> str:
+    """Section-targeted reflection (Milestone 3, #71).
+
+    Each fold routes its observation chunk to the reflection sections it touches
+    (deterministic heuristics, no extra LLM call), sends only those sections plus
+    the always-visible durable core bundle to the model, parses the strict
+    section-patch envelope it returns, and reassembles the full document
+    byte-for-byte from the unchanged sections. Per-fold resend is proportional to
+    the touched sections, not the whole document.
+
+    SAFETY: any unparseable/invalid patch FAILS CLOSED — that fold is skipped and
+    the running document is left unchanged rather than written partially. The core
+    ``system_prompt`` is replaced with the section-patch prompt; auto-memory rides
+    on the final fold as in the legacy path.
+    """
+    sectioned_prompt = _sectioned_reflector_prompt()
+    amem_section = _auto_memory_section(auto_memory, amem_changed)
+    _reflections_cap, chunk_budget = _reflector_budgets(sectioned_prompt, amem_section, config)
+    chunks = _chunk_observations(observations, chunk_budget)
+
+    running_reflections = reflections
+    for i, chunk in enumerate(chunks, 1):
+        is_last = i == len(chunks)
+        document = parse_reflection_document(running_reflections)
+        if not document.sections:
+            # No section structure to target (empty/fresh reflections). Fall back
+            # to legacy chunked folding for this run so we never silently drop the
+            # observations — sectioning needs sections to target.
+            return _reflect_chunked_legacy(system_prompt, reflections, observations, config, auto_memory, amem_changed)
+
+        route = route_chunk(document, chunk, fold_index=i - 1, fold_total=len(chunks))
+        # Guarantee the durable core bundle is always present even if routing
+        # somehow returned nothing (defensive; route_chunk always includes it).
+        for handle in core_bundle_handles(document):
+            if handle not in route.section_handles:
+                route.section_handles.append(handle)
+
+        targeted = _section_targeted_context(document, route)
+        patchable = _patchable_handles(document, route)
+        handles_block = _available_handles_block(patchable, unmatched=route.unmatched_name_tokens)
+        fold_amem = amem_section if is_last else ""
+        user_content = (
+            f"## Current reflections (relevant sections)\n\n{targeted}\n\n"
+            f"---\n\n"
+            f"## Observations (chunk {i}/{len(chunks)})\n\n{chunk}\n\n"
+            f"---\n\n"
+            f"{handles_block}{fold_amem}"
+        )
+        raw = compress(
+            sectioned_prompt,
+            user_content,
+            config,
+            max_tokens=_REFLECTOR_MAX_OUTPUT_TOKENS,
+            operation="reflector",
+        )
+        try:
+            patches = parse_section_patches(raw)
+        except PatchParseError as exc:
+            _LOGGER.warning(
+                "sectioned reflector: fold %d/%d produced unparseable output (%s); "
+                "leaving reflections unchanged for this fold (fail-closed)",
+                i,
+                len(chunks),
+                exc,
+            )
+            continue
+        updated = _apply_section_patches(document, patches, patchable)
+        if updated is None:
+            continue  # fail closed: keep the running document for this fold
+        running_reflections = updated
+
+    return running_reflections
+
+
+def _reflect_chunked_legacy(
+    system_prompt: str,
+    reflections: str,
+    observations: str,
+    config: Config,
+    auto_memory: str = "",
+    amem_changed: bool = False,
+) -> str:
+    """Legacy chunked folding (extracted so sectioned mode can fall back to it).
+
+    This is the body that ``_reflect_chunked`` runs when the strategy resolves to
+    legacy; sectioned mode delegates here when a document has no section structure
+    to target (e.g. a fresh/empty reflections.md).
+    """
+    amem_section = _auto_memory_section(auto_memory, amem_changed)
+    reflections_cap, chunk_budget = _reflector_budgets(system_prompt, amem_section, config)
+    chunks = _chunk_observations(observations, chunk_budget)
+    budget_diagnostics = {
+        "configured_reflections_cap": config.reflector_context_max_chars,
+        "effective_reflections_cap": reflections_cap,
+        "max_input_tokens": config.reflector_max_input_tokens,
+        "observation_chunk_budget": chunk_budget,
+    }
+    budget_exhausted = reflections_cap <= 0
+    if budget_exhausted:
+        _LOGGER.warning(
+            "reflector input budget leaves no room for reflections context "
+            "(configured_reflections_cap=%d effective_reflections_cap=0 "
+            "max_input_tokens=%d observation_chunk_budget=%d); folding with a marker "
+            "only. Raise OM_REFLECTOR_MAX_INPUT_TOKENS or lower "
+            "OM_REFLECTOR_OBSERVATION_CHUNK_RATIO.",
+            config.reflector_context_max_chars,
+            config.reflector_max_input_tokens,
+            chunk_budget,
+        )
+
+    running_reflections = reflections
+    for i, chunk in enumerate(chunks, 1):
+        is_last = i == len(chunks)
+        fold_prompt = system_prompt
+        if not is_last:
+            fold_prompt += (
+                "\n\n**NOTE:** This is chunk {i} of {total}. More observations follow. "
+                "Focus on integrating these observations into the reflections. "
+                "Produce the complete updated reflections document."
+            ).format(i=i, total=len(chunks))
+        fold_amem = amem_section if is_last else ""
         if budget_exhausted:
             bounded = _REFLECTIONS_BUDGET_EXHAUSTED
         else:
@@ -862,7 +1305,17 @@ def _run_cluster_reflector(config: Config, dry_run: bool = False) -> str | None:
     if estimated_tokens <= config.reflector_max_input_tokens:
         result = _reflect_single(system_prompt, reflections, raw_observations, config, auto_memory, amem_changed)
     else:
-        result = _reflect_chunked(system_prompt, reflections, raw_observations, config, auto_memory, amem_changed)
+        # The cluster path builds its OWN merge system prompt (cross-machine
+        # snapshot reconciliation) and appends competing-snapshot bodies that carry
+        # their own H2 headers. The section-targeted strategy ignores the passed
+        # system_prompt (substituting the sectioned prompt, which has no merge
+        # guidance) and would parse the appended snapshot headers as additional
+        # sections — wrong for a merge. So pin the cluster reflector to LEGACY
+        # chunked folding regardless of OM_REFLECTOR_STRATEGY. (Plan constraint #3:
+        # cluster mode keeps its existing path safely.)
+        result = _reflect_chunked_legacy(
+            system_prompt, reflections, raw_observations, config, auto_memory, amem_changed
+        )
 
     # Same provider-agnostic output cap as finalize_reflection (the cluster
     # reflector persists through its own path, so apply it here too).
