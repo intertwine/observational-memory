@@ -753,6 +753,113 @@ def recall(
         click.echo()
 
 
+@cli.command()
+@click.option("--query", help="Optional opening utterance to start the conversation.")
+@click.option(
+    "--backend",
+    "backend_override",
+    help="Search backend used for recall: moss, bm25, qmd, qmd-hybrid, or none. Defaults to OM_SEARCH_BACKEND.",
+)
+@click.option("--limit", default=5, show_default=True, help="Max memory snippets recalled per turn.")
+@click.option("--max-turns", type=int, default=None, help="Stop after this many turns (default: until you exit).")
+@click.option("--reindex", is_flag=True, help="Rebuild the search index before talking.")
+@click.option("--for", "agent", help="Host agent name for profile/recall routing, e.g. claude, codex.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the full transcript as JSON when the conversation ends.")
+@click.pass_context
+def talk(
+    ctx: click.Context,
+    query: str | None,
+    backend_override: str | None,
+    limit: int,
+    max_turns: int | None,
+    reindex: bool,
+    agent: str | None,
+    as_json: bool,
+) -> None:
+    """Have a spoken-style conversation with your memories. (Experimental, 0.7.x.)
+
+    Each turn runs recall over your memories in the background and grounds the
+    reply in what it finds. Type 'exit' (or Ctrl-D) to end. Text-only for now;
+    pluggable voice providers (mic + speech) are planned for 0.8.0+ on the same
+    loop. Flags and output may change. See docs/talk-to-memories.md.
+    """
+    import json as json_mod
+
+    from .search import reindex as reindex_index
+    from .talk import Conversation, RecallEngine, TextTransport
+
+    config = ctx.obj["config"]
+    if backend_override:
+        config.search_backend = backend_override
+
+    if reindex:
+        try:
+            count = reindex_index(config)
+            click.echo(f"Indexed {count} memory section(s) into '{config.search_backend}'.", err=True)
+        except Exception as exc:  # never block the conversation on an index failure
+            click.echo(f"om: reindex failed ({exc}); continuing with the existing index.", err=True)
+
+    engine = RecallEngine(config)
+    conversation = Conversation(config, engine, agent=agent, recall_limit=limit)
+    # In --json mode stdout is reserved for the machine-readable transcript, so
+    # the live conversation is rendered to stderr instead.
+    transport = TextTransport(output_stream=sys.stderr if as_json else sys.stdout)
+
+    # prepare() warms the recall backend (for Moss this downloads the index into
+    # memory, which can take a few seconds), so flag it before the pause.
+    click.echo(f"Preparing recall backend '{config.search_backend}'…", err=True)
+    ready = conversation.prepare()
+    status = "ready" if ready else "unavailable (replies will be ungrounded — try `om talk --reindex`)"
+    click.echo(f"om talk — recall backend '{config.search_backend}' is {status}.", err=True)
+    click.echo("Talking to your memories. Type 'exit' or press Ctrl-D to end.", err=True)
+
+    turns: list[dict[str, object]] = []
+    pending = (query or "").strip() or None
+    try:
+        while True:
+            if max_turns is not None and len(turns) >= max_turns:
+                break
+            utterance = pending if pending is not None else transport.listen()
+            pending = None
+            if utterance is None:
+                break
+            turn = conversation.reply(utterance)
+            transport.speak(turn.assistant)
+            if turn.recalled:
+                click.echo(f"  ⟢ grounded in {len(turn.recalled)} memory snippet(s)", err=True)
+            turns.append(
+                {
+                    "user": turn.user,
+                    "assistant": turn.assistant,
+                    "grounded": turn.grounded,
+                    "error": turn.error,
+                    "recalled": [
+                        {
+                            "doc_id": s.doc_id,
+                            "heading": s.heading,
+                            "source": s.source,
+                            "score": s.score,
+                        }
+                        for s in turn.recalled
+                    ],
+                }
+            )
+    except KeyboardInterrupt:
+        click.echo("", err=True)
+    finally:
+        conversation.close()
+        transport.close()
+
+    if as_json:
+        click.echo(
+            json_mod.dumps(
+                {"backend": config.search_backend, "backend_ready": ready, "turns": turns},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+
+
 @cli.group()
 def cluster() -> None:
     """Manage OM Cluster sync."""
@@ -3153,6 +3260,34 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
             else:
                 _check("QMD 2.1 features", "WARN", "skipped (qmd not installed)")
                 _check("QMD collection", "WARN", "skipped (qmd not installed)")
+
+    # 9b. Moss search backend health (cloud-backed; opt-in). Never prints the key.
+    if config.search_backend == "moss":
+        try:
+            import moss as _moss  # noqa: F401
+
+            sdk_ok = True
+        except Exception:
+            sdk_ok = False
+        if not sdk_ok:
+            _check(
+                "Moss SDK", "FAIL", "moss package not installed", fix='Run: pip install "observational-memory[voice]"'
+            )
+        else:
+            _check("Moss SDK", "PASS", "installed")
+        if config.moss_credentials() is not None:
+            _check(
+                "Moss credentials",
+                "PASS",
+                f"project configured; recall uploads memory to service.usemoss.dev (index '{config.moss_index_name}')",
+            )
+        else:
+            _check(
+                "Moss credentials",
+                "FAIL",
+                "OM_MOSS_PROJECT_ID / OM_MOSS_PROJECT_KEY not set",
+                fix="Set both, or use OM_SEARCH_BACKEND=bm25 to stay fully local",
+            )
 
     # 10. Claude hooks
     if config.claude_settings_path.exists():

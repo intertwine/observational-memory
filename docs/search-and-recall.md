@@ -92,9 +92,10 @@ Use `om recall` for agent-friendly retrieval. Use `om search` when you want dire
 
 | Backend | Default | What it does |
 | --- | --- | --- |
-| `bm25` | Yes | Built-in keyword search. No extra setup. |
+| `bm25` | Yes | Built-in keyword search. No extra setup, fully local. |
 | `qmd` | No | QMD keyword search. |
 | `qmd-hybrid` | No | QMD keyword plus vector search. |
+| `moss` | No | [Moss](https://www.moss.dev) cloud semantic search. Opt-in; uploads memory text. See [Talk to your memories](talk-to-memories.md). |
 | `none` | No | Disables search. |
 
 Set the backend in your env file:
