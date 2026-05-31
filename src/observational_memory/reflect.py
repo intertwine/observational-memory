@@ -250,6 +250,15 @@ def finalize_reflection(
     if dry_run:
         return result
 
+    # Gate 1: snapshot the last-good state BEFORE overwriting reflections.md so a
+    # bad reflect is fully rollback-able. This is the single convergence point for
+    # the legacy, chunked, AND sectioned strategies and the async Batch apply, so
+    # one call here covers every non-cluster reflect write path. Fail-closed: a
+    # snapshot failure must never crash reflect or lose the new write.
+    from .backup import create_snapshot_failclosed
+
+    create_snapshot_failclosed(config, reason="pre-reflect")
+
     _write_reflections(result, config)
     _trim_old_observations(config)
     _reindex_if_enabled(config)
@@ -1223,9 +1232,12 @@ def _load_reflector_prompt() -> str:
 def _write_reflections(reflections: str, config: Config) -> None:
     """Write the reflections file."""
     from .startup_memory import refresh_startup_memory
+    from .sync.atomic import atomic_write_text
 
     config.ensure_memory_dir()
-    config.reflections_path.write_text(reflections.rstrip() + "\n")
+    # Atomic so a concurrent reader (e.g. `om backup` snapshotting) never sees a
+    # torn/truncated reflections.md and hashes corruption into a "verified" snapshot.
+    atomic_write_text(config.reflections_path, reflections.rstrip() + "\n")
     refresh_startup_memory(config)
 
 
@@ -1253,7 +1265,9 @@ def _trim_old_observations(config: Config) -> None:
             # Keep non-date sections (like the header)
             kept.append(section)
 
-    config.observations_path.write_text("".join(kept).rstrip() + "\n")
+    from .sync.atomic import atomic_write_text
+
+    atomic_write_text(config.observations_path, "".join(kept).rstrip() + "\n")
 
 
 def _cluster_enabled(config: Config) -> bool:
@@ -1333,6 +1347,16 @@ def _run_cluster_reflector(config: Config, dry_run: bool = False) -> str | None:
 
     if dry_run:
         return result
+
+    # Gate 1 (cluster path): the cluster reflector persists through its own
+    # materialize_cluster_memory write, NOT finalize_reflection, so the
+    # pre-reflect snapshot must be taken here too. A bad cross-machine merge
+    # overwrites all four in-scope files; capture last-good state first so it is
+    # rollback-able. Fail-closed: a snapshot hiccup must not crash a cluster
+    # reflect or lose the merge.
+    from .backup import create_snapshot_failclosed
+
+    create_snapshot_failclosed(config, reason="pre-reflect")
 
     base_snapshot_ids = [selected_snapshot.record_id] if selected_snapshot else []
     frontier = frontier_join(observation_frontier, selected_frontier)

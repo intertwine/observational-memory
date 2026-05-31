@@ -140,6 +140,20 @@ def _safe_float(value: str | None, default: float) -> float:
         return default
 
 
+def _safe_int(value: str | None, default: int) -> int:
+    """Parse an int env value, falling back to *default* on bad/empty input.
+
+    A malformed OM_BACKUP_RETENTION_* value must not crash Config construction
+    (which would break every CLI entrypoint, not just backup).
+    """
+    if value is None:
+        return default
+    try:
+        return int(value.strip().replace("_", "").replace(",", ""))
+    except (AttributeError, ValueError):
+        return default
+
+
 # Valid OM_REFLECTOR_STRATEGY values (see Config.reflector_strategy).
 REFLECTOR_STRATEGIES = ("legacy", "sectioned", "auto")
 
@@ -265,6 +279,14 @@ ENV_FILE_TEMPLATE = """\
 
 # Codex observer polling cadence (minutes)
 # OM_CODEX_OBSERVER_INTERVAL_MINUTES=15
+
+# Memory backup (host-local versioned snapshots; never synced)
+# A snapshot of the durable Markdown is taken automatically before each reflect
+# write so a bad reflect can be rolled back with `om restore`.
+# OM_BACKUP_ENABLED=1
+# OM_BACKUP_RETENTION_COUNT=20    # keep newest N snapshots; 0 = unlimited
+# OM_BACKUP_RETENTION_DAYS=0      # also drop snapshots older than N days; 0 = no age limit
+# OM_BACKUP_DIR=                  # override default (<memory_dir>/backups)
 
 # Usage tracking, cost estimation, and budgets (host-local; never synced).
 # Records every LLM call to usage.sqlite next to your memory files. Inspect with
@@ -448,6 +470,13 @@ class Config:
         default_factory=lambda: os.environ.get("OM_SNAPSHOT_EXPIRY_ACTION", "stale-section")
     )
 
+    # Memory backup (Gate 1: host-local versioned snapshots; never synced).
+    backup_enabled: bool = field(default_factory=lambda: _env_flag("OM_BACKUP_ENABLED", True))
+    backup_retention_count: int = field(
+        default_factory=lambda: _safe_int(os.environ.get("OM_BACKUP_RETENTION_COUNT"), 20)
+    )
+    backup_retention_days: int = field(default_factory=lambda: _safe_int(os.environ.get("OM_BACKUP_RETENTION_DAYS"), 0))
+
     # Search settings
     search_backend: str = field(
         default_factory=lambda: os.environ.get("OM_SEARCH_BACKEND", "bm25")
@@ -528,6 +557,14 @@ class Config:
     def provider_jobs_dir(self) -> Path:
         """Host-local store for async provider jobs (e.g. OpenAI Batch). Never synced."""
         return self.memory_dir / ".provider-jobs"
+
+    @property
+    def backups_dir(self) -> Path:
+        """Host-local memory snapshots. Never synced (outside the materialized set)."""
+        override = os.environ.get("OM_BACKUP_DIR")
+        if override:
+            return Path(override).expanduser()
+        return self.memory_dir / "backups"
 
     @property
     def openai_batch_jobs_dir(self) -> Path:

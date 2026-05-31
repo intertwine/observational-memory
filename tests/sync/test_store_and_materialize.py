@@ -278,6 +278,32 @@ def test_materialize_observations_reflections_redactions_and_overrides(tmp_path)
     assert "Be direct." not in config.profile_path.read_text()
 
 
+def test_materialize_ignores_backups_dir(tmp_path):
+    """Local backups live under memory_dir but must never be touched by sync."""
+    config, store = _init_store(tmp_path)
+    store.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex", "host_alias": "node-a"},
+        payload={
+            "format": "markdown",
+            "body": "# Observations\n\n## 2026-05-08\n\n- hello",
+            "observed_at": "2026-05-08T12:00:00Z",
+        },
+    )
+    backups_dir = config.backups_dir
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = backups_dir / "manual-20260101T000000Z" / "reflections.md"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("backup sentinel\n")
+
+    materialize_cluster_memory(config, store)
+
+    # The backup is left exactly as-is — never read into or overwritten by sync.
+    assert sentinel.read_text() == "backup sentinel\n"
+    assert "hello" in config.observations_path.read_text()
+
+
 def test_manual_overrides_are_latest_wins_by_section(tmp_path):
     config, store = _init_store(tmp_path)
     store.append_record(

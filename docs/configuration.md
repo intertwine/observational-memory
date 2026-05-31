@@ -341,6 +341,35 @@ Important files:
 - `active.md`: current startup context
 - `.cursor.json`: transcript checkpoints
 - `.search-index/`: local search index
+- `backups/`: host-local memory snapshots (never synced)
+
+## Memory Backup
+
+OM keeps host-local, versioned snapshots of your memory so a bad reflect or an accidental delete can be rolled back. Before every reflect write, OM takes an automatic `pre-reflect` snapshot of the current (last-good) Markdown. The snapshot step is fail-closed: if it cannot run, reflect still writes and only logs a one-line note.
+
+Each snapshot is one self-contained directory under `backups/` with the four Markdown files plus a `manifest.json` that records a sha256 for each file. Snapshots never include `usage.sqlite`, auth or cluster keys, or the search index — only the authoritative Markdown.
+
+Take an on-demand snapshot, list snapshots, or restore one:
+
+```bash
+om backup                 # create a snapshot now
+om backup --list          # list snapshots, newest first
+om restore --latest       # restore the newest snapshot (asks to confirm)
+om restore <snapshot-id>  # restore a specific snapshot
+```
+
+Restore is byte-faithful and all-or-nothing: it verifies each file's sha256 against the manifest before overwriting, takes a `pre-restore` safety snapshot first, then stages all files and swaps them in together. If a write fails partway, OM rolls back to the safety snapshot so memory is never left half-restored. Restore brings memory back to the snapshot's exact point in time: files added after the snapshot are removed, and if the snapshot predates `profile.md`/`active.md`, they are regenerated from the restored `reflections.md`. Pass `--yes` to skip the prompt in scripts.
+
+Tune retention and location:
+
+```bash
+OM_BACKUP_ENABLED=1            # 1=on (default), 0=disable snapshots
+OM_BACKUP_RETENTION_COUNT=20   # keep newest N snapshots; 0 = unlimited
+OM_BACKUP_RETENTION_DAYS=0     # also drop snapshots older than N days; 0 = no age limit
+OM_BACKUP_DIR=                 # override default (<memory_dir>/backups)
+```
+
+`OM_BACKUP_RETENTION_COUNT` counts automatic `pre-reflect` and `pre-restore` snapshots too, so set it high enough to keep the rollback depth you want. Keep `OM_BACKUP_DIR` host-local: never point it at a synced folder (Dropbox, rsync) or a cluster transport dir, because snapshots include `reflections.md`, which can hold `scope=local` entries that must not leave the host.
 
 ## Startup Controls
 
