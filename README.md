@@ -119,6 +119,7 @@ Start here:
 - [Platform integrations](docs/integrations.md)
 - [Hermes plugin](docs/hermes-plugin.md)
 - [Search, recall, and startup context](docs/search-and-recall.md)
+- [Talk to your memories (`om talk`)](docs/talk-to-memories.md)
 - [Configuration](docs/configuration.md)
 - [OM Cluster sync](docs/om-cluster-sync.md)
 - [OM Cluster validation checklist](docs/om-cluster-validation.md)

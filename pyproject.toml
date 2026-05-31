@@ -52,6 +52,12 @@ enterprise = [
     "boto3>=1.34.0",
     "google-auth>=2.0.0",
 ]
+# Cloud-backed Moss semantic-search backend for `om talk` / `om recall`.
+# Opt-in: enabling it (OM_SEARCH_BACKEND=moss) uploads memory text to the Moss
+# cloud. See docs/talk-to-memories.md.
+voice = [
+    "moss>=1.2.0",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -8,6 +8,7 @@ This folder holds the longer guides for Observational Memory. The main README is
 - [Platform integrations](integrations.md): Claude Code, Codex, Grok, Cowork, Hermes, ChatGPT, and Claude Managed Agents.
 - [Hermes plugin](hermes-plugin.md): standalone Hermes memory-provider setup and OM Cluster validation.
 - [Search, recall, and startup context](search-and-recall.md): how `om context`, `om recall`, and `om search` fit together.
+- [Talk to your memories](talk-to-memories.md): `om talk` — a conversation grounded in background recall, with an optional Moss backend.
 - [Configuration](configuration.md): env file, provider auth, model choices, schedules, paths, and search backends.
 
 ## Sync And Memory Safety

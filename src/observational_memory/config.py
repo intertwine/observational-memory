@@ -242,13 +242,21 @@ ENV_FILE_TEMPLATE = """\
 # OM_BEDROCK_REGION=us-east-1
 # AWS_REGION=us-east-1
 
-# Search backend: bm25 (default), qmd, qmd-hybrid, none
+# Search backend: bm25 (default), qmd, qmd-hybrid, moss, none
 # OM_SEARCH_BACKEND=bm25
 # OM_QMD_INDEX_NAME=observational-memory
 # OM_QMD_NO_RERANK=0
 # OM_QMD_EMBED_MODEL=
 # OM_QMD_RERANK_MODEL=
 # OM_QMD_GENERATE_MODEL=
+#
+# Moss backend (https://www.moss.dev) — OPT-IN. Enabling it uploads memory text
+# to the Moss cloud (service.usemoss.dev); scope=local sections are withheld.
+# OM_MOSS_PROJECT_ID=
+# OM_MOSS_PROJECT_KEY=          # secret — never committed or logged
+# OM_MOSS_INDEX_NAME=observational-memory
+# OM_MOSS_MODEL_ID=             # blank = SDK default (moss-minilm)
+# OM_MOSS_ALPHA=                # blank = SDK default; hybrid keyword/vector blend
 #
 # In-session checkpointing (UserPromptSubmit/PreCompact hooks)
 # OM_SESSION_OBSERVER_INTERVAL_SECONDS=900  # 15 minutes
@@ -449,6 +457,18 @@ class Config:
     qmd_embed_model: str | None = field(default_factory=lambda: os.environ.get("OM_QMD_EMBED_MODEL"))
     qmd_rerank_model: str | None = field(default_factory=lambda: os.environ.get("OM_QMD_RERANK_MODEL"))
     qmd_generate_model: str | None = field(default_factory=lambda: os.environ.get("OM_QMD_GENERATE_MODEL"))
+
+    # Moss search backend (cloud-backed semantic search; opt-in). Indexing
+    # UPLOADS memory text to service.usemoss.dev — never enabled by default, and
+    # the backend drops scope=local entries before upload. The project key is a
+    # secret and is never logged or printed.
+    moss_project_id: str | None = field(default_factory=lambda: os.environ.get("OM_MOSS_PROJECT_ID") or None)
+    moss_project_key: str | None = field(default_factory=lambda: os.environ.get("OM_MOSS_PROJECT_KEY") or None)
+    moss_index_name: str = field(default_factory=lambda: os.environ.get("OM_MOSS_INDEX_NAME", "observational-memory"))
+    moss_model_id: str | None = field(default_factory=lambda: os.environ.get("OM_MOSS_MODEL_ID") or None)
+    moss_alpha: float | None = field(
+        default_factory=lambda: _safe_float(os.environ.get("OM_MOSS_ALPHA"), None)  # type: ignore[arg-type]
+    )
 
     # Usage tracking, cost estimation, and budgets (host-local; never synced).
     # The DB and pricing override paths are derived properties below so that a
@@ -836,6 +856,15 @@ class Config:
         if self.qmd_generate_model:
             env["QMD_GENERATE_MODEL"] = self.qmd_generate_model
         return env
+
+    def moss_credentials(self) -> tuple[str, str] | None:
+        """Return (project_id, project_key) if both are configured, else None.
+
+        Never log or print the result — the project key is a secret.
+        """
+        if self.moss_project_id and self.moss_project_key:
+            return (self.moss_project_id, self.moss_project_key)
+        return None
 
     # --- Cursor (bookmark) management ---
 

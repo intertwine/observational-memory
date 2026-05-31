@@ -753,6 +753,109 @@ def recall(
         click.echo()
 
 
+@cli.command()
+@click.option("--query", help="Optional opening utterance to start the conversation.")
+@click.option(
+    "--backend",
+    "backend_override",
+    help="Search backend used for recall: moss, bm25, qmd, qmd-hybrid, or none. Defaults to OM_SEARCH_BACKEND.",
+)
+@click.option("--limit", default=5, show_default=True, help="Max memory snippets recalled per turn.")
+@click.option("--max-turns", type=int, default=None, help="Stop after this many turns (default: until you exit).")
+@click.option("--reindex", is_flag=True, help="Rebuild the search index before talking.")
+@click.option("--for", "agent", help="Host agent name for profile/recall routing, e.g. claude, codex.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the full transcript as JSON when the conversation ends.")
+@click.pass_context
+def talk(
+    ctx: click.Context,
+    query: str | None,
+    backend_override: str | None,
+    limit: int,
+    max_turns: int | None,
+    reindex: bool,
+    agent: str | None,
+    as_json: bool,
+) -> None:
+    """Have a spoken-style conversation with your memories.
+
+    Each turn runs recall over your memories in the background and grounds the
+    reply in what it finds. Type 'exit' (or Ctrl-D) to end. Currently text-based;
+    real voice (mic + speech) is a planned transport on top of the same loop.
+    """
+    import json as json_mod
+
+    from .search import reindex as reindex_index
+    from .talk import Conversation, RecallEngine, TextTransport
+
+    config = ctx.obj["config"]
+    if backend_override:
+        config.search_backend = backend_override
+
+    if reindex:
+        try:
+            count = reindex_index(config)
+            click.echo(f"Indexed {count} memory section(s) into '{config.search_backend}'.", err=True)
+        except Exception as exc:  # never block the conversation on an index failure
+            click.echo(f"om: reindex failed ({exc}); continuing with the existing index.", err=True)
+
+    engine = RecallEngine(config)
+    conversation = Conversation(config, engine, agent=agent, recall_limit=limit)
+    # In --json mode stdout is reserved for the machine-readable transcript, so
+    # the live conversation is rendered to stderr instead.
+    transport = TextTransport(output_stream=sys.stderr if as_json else sys.stdout)
+
+    ready = conversation.prepare()
+    status = "ready" if ready else "unavailable (replies will be ungrounded — try `om reindex`)"
+    click.echo(f"om talk — recall backend '{config.search_backend}' is {status}.", err=True)
+    click.echo("Talking to your memories. Type 'exit' or press Ctrl-D to end.", err=True)
+
+    turns: list[dict[str, object]] = []
+    pending = (query or "").strip() or None
+    try:
+        while True:
+            if max_turns is not None and len(turns) >= max_turns:
+                break
+            utterance = pending if pending is not None else transport.listen()
+            pending = None
+            if utterance is None:
+                break
+            turn = conversation.reply(utterance)
+            transport.speak(turn.assistant)
+            if turn.recalled:
+                click.echo(f"  ⟢ grounded in {len(turn.recalled)} memory snippet(s)", err=True)
+            turns.append(
+                {
+                    "user": turn.user,
+                    "assistant": turn.assistant,
+                    "grounded": turn.grounded,
+                    "error": turn.error,
+                    "recalled": [
+                        {
+                            "doc_id": s.doc_id,
+                            "heading": s.heading,
+                            "source": s.source,
+                            "score": s.score,
+                        }
+                        for s in turn.recalled
+                    ],
+                }
+            )
+    except KeyboardInterrupt:
+        click.echo("", err=True)
+    finally:
+        conversation.close()
+        transport.close()
+
+    if as_json:
+        click.echo(
+            json_mod.dumps(
+                {"backend": config.search_backend, "backend_ready": ready, "turns": turns},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+
+
 @cli.group()
 def cluster() -> None:
     """Manage OM Cluster sync."""

@@ -429,6 +429,20 @@ OM_QMD_NO_RERANK=1
 
 See [search-and-recall.md](search-and-recall.md) for QMD setup.
 
+Optional Moss (cloud semantic search; **opt-in** — uploads memory text to
+`service.usemoss.dev`, withholding `scope=local` sections):
+
+```bash
+OM_SEARCH_BACKEND=moss
+OM_MOSS_PROJECT_ID=your-project-id
+OM_MOSS_PROJECT_KEY=your-project-key   # secret — never logged or committed
+OM_MOSS_INDEX_NAME=observational-memory
+# OM_MOSS_MODEL_ID=                     # blank = SDK default (moss-minilm)
+# OM_MOSS_ALPHA=                        # blank = SDK default; hybrid blend
+```
+
+See [talk-to-memories.md](talk-to-memories.md) for the full Moss + `om talk` guide.
+
 ## Cluster Flags
 
 Cluster mode is off until local cluster config and keys exist.

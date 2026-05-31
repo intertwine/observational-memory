@@ -60,12 +60,31 @@ def get_backend(backend_name: str, config):
             no_rerank=config.qmd_no_rerank,
             model_env=config.qmd_model_env(),
         )
+    elif backend_name == "moss":
+        from .moss import MossBackend
+        from .none import NoneBackend
+
+        creds = config.moss_credentials()
+        if creds is None:
+            # Opt-in backend with no usable creds: fail closed to a no-op so the
+            # CLI degrades to an ungrounded experience instead of crashing.
+            return NoneBackend()
+        project_id, project_key = creds
+        return MossBackend(
+            project_id=project_id,
+            project_key=project_key,
+            index_name=config.moss_index_name,
+            model_id=config.moss_model_id,
+            alpha=config.moss_alpha,
+        )
     elif backend_name == "none":
         from .none import NoneBackend
 
         return NoneBackend()
     else:
-        raise ValueError(f"Unknown search backend: {backend_name!r}. Use 'bm25', 'qmd', 'qmd-hybrid', or 'none'.")
+        raise ValueError(
+            f"Unknown search backend: {backend_name!r}. Use 'bm25', 'qmd', 'qmd-hybrid', 'moss', or 'none'."
+        )
 
 
 def reindex(config) -> int:
