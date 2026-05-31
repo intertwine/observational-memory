@@ -34,6 +34,11 @@ class _QueryOptions:
         self.filter = filter
 
 
+class _MutationOptions:
+    def __init__(self, upsert=None):
+        self.upsert = upsert
+
+
 class _Hit:
     def __init__(self, id, text, metadata, score):
         self.id = id
@@ -57,6 +62,7 @@ class _FakeMossClient:
         self.indexes: dict[str, list[_DocumentInfo]] = {}
         self.loaded: set[str] = set()
         self.created_model_id = None
+        self.calls: list[str] = []
         _FakeMossClient.instances.append(self)
 
     async def delete_index(self, name):
@@ -65,12 +71,20 @@ class _FakeMossClient:
         return True
 
     async def create_index(self, name, docs, model_id=None):
+        self.calls.append("create_index")
         self.indexes[name] = list(docs)
         self.created_model_id = model_id
         return object()
 
     async def add_docs(self, name, docs, options=None):
-        self.indexes.setdefault(name, []).extend(docs)
+        # Faithful to the real SDK: add_docs requires an existing index.
+        if name not in self.indexes:
+            raise RuntimeError(f"index '{name}' not found")
+        self.calls.append("add_docs")
+        by_id = {d.id: d for d in self.indexes[name]}
+        for d in docs:  # upsert by id
+            by_id[d.id] = d
+        self.indexes[name] = list(by_id.values())
         return object()
 
     async def load_index(self, name, auto_refresh=False, polling_interval_in_seconds=600):
@@ -94,6 +108,7 @@ def fake_moss(monkeypatch):
     module.MossClient = _FakeMossClient
     module.DocumentInfo = _DocumentInfo
     module.QueryOptions = _QueryOptions
+    module.MutationOptions = _MutationOptions
     monkeypatch.setitem(sys.modules, "moss", module)
     yield module
 
@@ -138,8 +153,56 @@ def test_index_and_search_roundtrip(fake_moss):
         assert hit.document.heading == "## Active Projects"
         assert "voice feature" in hit.document.content
         assert hit.rank == 1
+        # int metadata survives the flat-string Moss map as an int (matches bm25/qmd).
+        assert hit.document.metadata.get("source_start_line") == 12
     finally:
         backend.close()
+
+
+def test_index_creates_then_upserts(fake_moss):
+    backend = _backend()
+    try:
+        backend.index(_docs())  # first time: index missing -> create
+        backend.index(_docs())  # second time: exists -> upsert in place
+        client = _FakeMossClient.instances[-1]
+        assert client.calls == ["create_index", "add_docs"]
+        # Upsert by id keeps the corpus de-duplicated rather than doubling it.
+        assert len(client.indexes["om-test"]) == 2
+    finally:
+        backend.close()
+
+
+def test_mixed_scope_section_uploads_shared_lines_only(fake_moss):
+    backend = _backend()
+    try:
+        backend.index(
+            [
+                Document(
+                    doc_id="ref:mixed",
+                    source=DocumentSource.REFLECTIONS,
+                    heading="## Mixed",
+                    content=(
+                        "## Mixed\n- Shared fact everyone can see\n- Secret host-only note <!--om: scope=local-->\n"
+                    ),
+                )
+            ]
+        )
+        client = _FakeMossClient.instances[-1]
+        uploaded = {d.id: d.text for d in client.indexes["om-test"]}
+        assert "ref:mixed" in uploaded
+        assert "Shared fact" in uploaded["ref:mixed"]
+        assert "Secret host-only note" not in uploaded["ref:mixed"]
+    finally:
+        backend.close()
+
+
+def test_close_is_final_no_resurrection(fake_moss):
+    backend = _backend()
+    backend.index(_docs())
+    backend.close()
+    # After close the loop must not be resurrected; calls fail closed instead.
+    assert backend.is_ready() is False
+    assert backend.search("voice", limit=3) == []
 
 
 def test_search_reconstructs_observation_source_and_date(fake_moss):

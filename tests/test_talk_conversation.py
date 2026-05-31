@@ -112,6 +112,22 @@ def test_budget_error_degrades_gracefully():
         convo.close()
 
 
+def test_real_budget_exception_is_detected():
+    # Guards against the class being renamed: uses the real exception, not a
+    # name-faked stand-in, exercising the isinstance branch of _is_budget_error.
+    from observational_memory.usage.budgets import BudgetExceededError
+
+    def boom(system, user, config, **kw):
+        raise BudgetExceededError("hard cap")
+
+    convo = _conversation(compress=boom)
+    try:
+        turn = convo.reply("hello")
+        assert turn.error == "budget"
+    finally:
+        convo.close()
+
+
 def test_provider_error_degrades_gracefully():
     def boom(system, user, config, **kw):
         raise RuntimeError("provider down")

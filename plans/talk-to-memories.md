@@ -231,3 +231,34 @@ overlapping loops. `close()` stops the loop/thread.
 - Every `OM_MOSS_*` param defaults to the SDK default (wrong guess → SDK
   default, not a crash). The adapter catches `AttributeError`/`TypeError` from
   any API mismatch and fails closed.
+
+---
+
+## 10. Implementation-review resolutions (post-code)
+
+A second adversarial review (staff-engineer brief) ran against the committed
+diff. Findings addressed:
+
+- **[BLOCKER] `_AsyncLoop` resurrected a closed loop.** `close()` now sets a
+  final `_closed` flag; `_ensure()` raises instead of rebuilding the loop/thread.
+  A timed-out `run()` cancels the future and closes the coroutine. Tested
+  (`test_close_is_final_no_resurrection`).
+- **[BLOCKER] missing `om doctor` Moss row.** Added: SDK-installed + creds rows,
+  stating recall uploads to the cloud, never printing the key. Verified no key
+  leak.
+- **[SHOULD-FIX] delete-then-create could leave no index.** Replaced with
+  upsert-in-place + create-on-first-use (`add_docs(upsert=True)`, the verified
+  SDK primitive); corrected the docstring; documented the staleness trade-off.
+  Tested (`test_index_creates_then_upserts`).
+- **[SHOULD-FIX] scope filter was section-granular.** Now strips `scope=local`
+  *lines* (exactly matching `filter_reflection_entries_for_cluster`), so mixed
+  sections still upload their shared lines. Tested
+  (`test_mixed_scope_section_uploads_shared_lines_only`).
+- **[SHOULD-FIX] metadata int→str round-trip.** Known int fields
+  (`source_line`, `source_start_line`) are restored to int on read so Moss hits
+  match bm25/qmd shape. Tested.
+- **[SHOULD-FIX] `_is_budget_error` fragile name match.** Now `isinstance`
+  against the real `BudgetExceededError`, with the name-string only as fallback.
+  Tested against the real class (`test_real_budget_exception_is_detected`).
+- **[NIT] cold-load pause.** CLI prints "Preparing recall backend…" before the
+  (possibly slow) Moss `load_index` in `prepare()`.

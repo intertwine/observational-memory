@@ -44,9 +44,13 @@ class _AsyncLoop:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._closed = False
 
     def _ensure(self) -> asyncio.AbstractEventLoop:
         with self._lock:
+            if self._closed:
+                # close() is final: never resurrect a torn-down loop/thread.
+                raise RuntimeError("async loop is closed")
             if self._loop is not None:
                 return self._loop
             loop = asyncio.new_event_loop()
@@ -62,13 +66,27 @@ class _AsyncLoop:
         loop.run_forever()
 
     def run(self, coro, timeout: float):
-        """Run *coro* on the background loop and block for its result."""
-        loop = self._ensure()
+        """Run *coro* on the background loop and block for its result.
+
+        On timeout the underlying coroutine is asked to cancel (best-effort —
+        it may already be inside a blocking ``asyncio.to_thread`` call) so a slow
+        upload/query does not pin the single background loop indefinitely.
+        """
+        try:
+            loop = self._ensure()
+        except RuntimeError:
+            coro.close()  # avoid "coroutine was never awaited" when the loop is closed
+            raise
         future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             if self._loop is None:
                 return
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -78,14 +96,27 @@ class _AsyncLoop:
             self._thread = None
 
 
-def _scope_is_local(content: str) -> bool:
-    """True if a memory section is tagged ``scope=local`` and must not be uploaded."""
+def _strip_local_lines(content: str) -> str:
+    """Drop ``scope=local`` lines from a section before upload.
+
+    Line-based, matching ``filter_reflection_entries_for_cluster`` exactly, so a
+    section that mixes shared and host-local entries still contributes its shared
+    entries to the cloud index (rather than being dropped wholesale) while local
+    entries never leave the host.
+    """
     try:
         from ..reflection_metadata import parse_metadata
     except Exception:  # pragma: no cover - defensive
-        return False
+        return content
+    kept = [line for line in content.splitlines() if parse_metadata(line).get("scope") != "local"]
+    return "\n".join(kept)
+
+
+def _has_indexable_body(content: str) -> bool:
+    """True if a section has any non-heading, non-blank line worth uploading."""
     for line in content.splitlines():
-        if parse_metadata(line).get("scope") == "local":
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
             return True
     return False
 
@@ -138,25 +169,39 @@ class MossBackend:
     # -- SearchBackend protocol ------------------------------------
 
     def index(self, documents: list[Document]) -> None:
-        """Replace the Moss index with *documents*, dropping scope=local content.
+        """Upsert *documents* into the Moss index, withholding scope=local content.
 
-        Uploads memory text to the Moss cloud. Fails closed: any SDK/network
-        error is logged at debug level and swallowed (the prior index, if any,
-        is left untouched on a failed replace attempt).
+        Uploads memory text to the Moss cloud. ``scope=local`` lines are stripped
+        per line (sections that mix shared and local entries still upload their
+        shared entries). Fails closed: any SDK/network error is logged at debug
+        level and swallowed.
+
+        Note on staleness: this upserts the current corpus rather than deleting
+        and recreating, so it never leaves the index empty on a partial failure.
+        The trade-off is that sections removed from memory since the last index
+        linger in the cloud index until the next successful full reindex of a
+        renamed index; recall still surfaces current content first by relevance.
         """
         client = self._ensure_client()
         if client is None:
             return
 
-        uploadable = [doc for doc in documents if not _scope_is_local(doc.content)]
+        uploadable: list[Document] = []
+        dropped = 0
+        for doc in documents:
+            stripped = _strip_local_lines(doc.content)
+            if _has_indexable_body(stripped):
+                uploadable.append(_with_content(doc, stripped))
+            else:
+                dropped += 1
         if not uploadable:
             _LOGGER.debug("moss index: nothing to upload after scope=local filtering")
             return
 
-        self._announce_upload(len(uploadable), dropped=len(documents) - len(uploadable))
+        self._announce_upload(len(uploadable), dropped=dropped)
 
         try:
-            from moss import DocumentInfo  # type: ignore
+            from moss import DocumentInfo, MutationOptions  # type: ignore
         except Exception:  # pragma: no cover - covered by _ensure_client
             return
 
@@ -165,13 +210,12 @@ class MossBackend:
         ]
 
         async def _replace() -> None:
-            # Clean replace to match the protocol's "replacing any previous index"
-            # contract. delete_index is best-effort (the index may not exist yet).
+            # Upsert in place when the index exists; create it on first use. Never
+            # delete-then-create — that would leave no index if create failed.
             try:
-                await client.delete_index(self._index_name)
+                await client.add_docs(self._index_name, infos, MutationOptions(upsert=True))
             except Exception:
-                pass
-            await client.create_index(self._index_name, infos, self._model_id)
+                await client.create_index(self._index_name, infos, self._model_id)
 
         try:
             self._loop.run(_replace(), _INDEX_TIMEOUT)
@@ -222,6 +266,9 @@ class MossBackend:
         if client is None:
             return False
         try:
+            # auto_refresh stays off: one CLI invocation loads once. index() resets
+            # _loaded so a same-process reindex is picked up; a corpus changed by
+            # another process is intentionally not hot-reloaded mid-session.
             self._loop.run(client.load_index(self._index_name), _LOAD_TIMEOUT)
         except Exception as exc:
             _LOGGER.debug("moss load_index failed (is the index built? run `om reindex`): %s", exc)
@@ -256,7 +303,7 @@ class MossBackend:
         out: list[SearchResult] = []
         for rank, hit in enumerate(docs, start=1):
             doc_id = str(getattr(hit, "id", "") or "")
-            metadata = dict(getattr(hit, "metadata", None) or {})
+            metadata = _restore_metadata_types(dict(getattr(hit, "metadata", None) or {}))
             heading = str(metadata.get("heading") or "")
             date = metadata.get("date")
             out.append(
@@ -274,6 +321,32 @@ class MossBackend:
                 )
             )
         return out
+
+
+def _with_content(doc: Document, content: str) -> Document:
+    """A copy of *doc* with replaced content (used after stripping local lines)."""
+    return Document(
+        doc_id=doc.doc_id,
+        source=doc.source,
+        heading=doc.heading,
+        content=content,
+        date=doc.date,
+        metadata=doc.metadata,
+    )
+
+
+# Integer metadata fields that were stringified for Moss's flat string map; these
+# are restored to int on read so Moss hits match bm25/qmd shape (e.g. for
+# `_format_location` in the recall command).
+_INT_METADATA_KEYS = ("source_line", "source_start_line")
+
+
+def _restore_metadata_types(metadata: dict) -> dict:
+    for key in _INT_METADATA_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, str) and value.lstrip("-").isdigit():
+            metadata[key] = int(value)
+    return metadata
 
 
 def _source_from_metadata(metadata: dict, doc_id: str) -> DocumentSource:

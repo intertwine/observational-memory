@@ -804,6 +804,9 @@ def talk(
     # the live conversation is rendered to stderr instead.
     transport = TextTransport(output_stream=sys.stderr if as_json else sys.stdout)
 
+    # prepare() warms the recall backend (for Moss this downloads the index into
+    # memory, which can take a few seconds), so flag it before the pause.
+    click.echo(f"Preparing recall backend '{config.search_backend}'…", err=True)
     ready = conversation.prepare()
     status = "ready" if ready else "unavailable (replies will be ungrounded — try `om reindex`)"
     click.echo(f"om talk — recall backend '{config.search_backend}' is {status}.", err=True)
@@ -3256,6 +3259,34 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
             else:
                 _check("QMD 2.1 features", "WARN", "skipped (qmd not installed)")
                 _check("QMD collection", "WARN", "skipped (qmd not installed)")
+
+    # 9b. Moss search backend health (cloud-backed; opt-in). Never prints the key.
+    if config.search_backend == "moss":
+        try:
+            import moss as _moss  # noqa: F401
+
+            sdk_ok = True
+        except Exception:
+            sdk_ok = False
+        if not sdk_ok:
+            _check(
+                "Moss SDK", "FAIL", "moss package not installed", fix='Run: pip install "observational-memory[voice]"'
+            )
+        else:
+            _check("Moss SDK", "PASS", "installed")
+        if config.moss_credentials() is not None:
+            _check(
+                "Moss credentials",
+                "PASS",
+                f"project configured; recall uploads memory to service.usemoss.dev (index '{config.moss_index_name}')",
+            )
+        else:
+            _check(
+                "Moss credentials",
+                "FAIL",
+                "OM_MOSS_PROJECT_ID / OM_MOSS_PROJECT_KEY not set",
+                fix="Set both, or use OM_SEARCH_BACKEND=bm25 to stay fully local",
+            )
 
     # 10. Claude hooks
     if config.claude_settings_path.exists():

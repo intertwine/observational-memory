@@ -61,7 +61,18 @@ def _default_compress(system_prompt: str, user_content: str, config, **kwargs) -
 
 
 def _is_budget_error(exc: Exception) -> bool:
-    """Detect a budget-cap refusal without a hard dependency on the usage subsystem."""
+    """Detect a budget-cap refusal.
+
+    Prefers a real ``isinstance`` against the usage subsystem's exception; falls
+    back to a class-name match if that optional subsystem can't be imported.
+    """
+    try:
+        from ..usage.budgets import BudgetExceededError
+
+        if isinstance(exc, BudgetExceededError):
+            return True
+    except Exception:  # pragma: no cover - usage subsystem optional
+        pass
     return type(exc).__name__ == "BudgetExceededError"
 
 
