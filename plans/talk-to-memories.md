@@ -1,6 +1,8 @@
 # Plan: `om talk` — Voice Conversation With Your Memories (Moss-backed recall)
 
 Status: REVISED v2 (design reviewed adversarially + SDK verified)
+Positioning: experimental text-only in 0.7.x; pluggable voice in 0.8.0+; shared
+team/enterprise recall is a 1.0 direction — see `plans/team-memory-direction.md`.
 Owner: feature branch `claude/om-voice-memories-recall-TLhIa`
 Issue tie-in: "talk with your memories" using https://www.moss.dev
 

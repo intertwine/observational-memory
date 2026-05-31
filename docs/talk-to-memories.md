@@ -1,5 +1,11 @@
 # Talk to your memories
 
+> **Status: experimental (0.7.x).** `om talk` is a text-only preview. Pluggable
+> voice providers (microphone + speech) are planned for 0.8.0+ on the same loop,
+> and a shared team/enterprise recall layer is a 1.0 direction — see
+> [`plans/team-memory-direction.md`](../plans/team-memory-direction.md). Flags
+> and output may change.
+
 `om talk` lets you have a back-and-forth conversation with your own memory. Each
 time you say something, Om runs **recall over your memories in the background**,
 then answers grounded in what it found. Today the conversation is text-based;
@@ -86,10 +92,27 @@ Optional tuning:
 - `OM_MOSS_MODEL_ID` — embedding model; blank uses the SDK default (`moss-minilm`).
 - `OM_MOSS_ALPHA` — hybrid keyword/vector blend; blank uses the SDK default.
 
-## Voice (planned)
+## Roadmap
 
-The transport layer is pluggable: `om talk` talks through a `VoiceTransport`,
-and the default `TextTransport` reads and writes text. A microphone + speech
-transport (speech-to-text in, text-to-speech out) plugs into the same loop
-without changing the recall or conversation code. It is intentionally not in
-this release because it needs audio hardware that can't be tested in CI.
+`om talk` is the thin, visible tip of a backend-agnostic recall architecture.
+The plan:
+
+- **0.7.x — now:** experimental, text-only conversation; recall via the local
+  `bm25` (default) / `qmd` backends or the opt-in `moss` cloud accelerator.
+- **0.8.0+:** **pluggable voice providers** (microphone + speech-to-text in,
+  text-to-speech out) on the existing `VoiceTransport` seam — no change to the
+  recall or conversation code. Kept out of 0.7.x because it needs audio
+  hardware that can't be exercised in CI.
+- **1.0 (direction):** a shared **team/enterprise** recall layer — local
+  backends for personal recall, a shared semantic layer for cross-team — with a
+  proper scope/governance model. "Chat / search across team memories" then falls
+  out as a feature on top. See
+  [`plans/team-memory-direction.md`](../plans/team-memory-direction.md).
+
+### How voice plugs in (0.8.0+)
+
+The transport layer is already pluggable: `om talk` talks through a
+`VoiceTransport`, and the default `TextTransport` reads and writes text. A
+microphone + speech transport plugs into the same loop without touching recall
+or the conversation brain.
+
