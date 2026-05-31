@@ -87,6 +87,19 @@ class _FakeMossClient:
         self.indexes[name] = list(by_id.values())
         return object()
 
+    async def get_docs(self, name, options=None):
+        # Faithful to the real SDK: get_docs requires an existing index.
+        if name not in self.indexes:
+            raise RuntimeError(f"index '{name}' not found")
+        self.calls.append("get_docs")
+        return list(self.indexes[name])
+
+    async def delete_docs(self, name, doc_ids):
+        self.calls.append("delete_docs")
+        drop = set(doc_ids)
+        self.indexes[name] = [d for d in self.indexes.get(name, []) if d.id not in drop]
+        return object()
+
     async def load_index(self, name, auto_refresh=False, polling_interval_in_seconds=600):
         if name not in self.indexes:
             raise RuntimeError(f"index '{name}' not found")
@@ -165,9 +178,55 @@ def test_index_creates_then_upserts(fake_moss):
         backend.index(_docs())  # first time: index missing -> create
         backend.index(_docs())  # second time: exists -> upsert in place
         client = _FakeMossClient.instances[-1]
-        assert client.calls == ["create_index", "add_docs"]
+        assert client.calls == ["create_index", "get_docs", "add_docs"]
         # Upsert by id keeps the corpus de-duplicated rather than doubling it.
         assert len(client.indexes["om-test"]) == 2
+    finally:
+        backend.close()
+
+
+def test_reindex_deletes_docs_that_became_local_or_removed(fake_moss):
+    backend = _backend()
+    try:
+        backend.index(_docs())  # uploads ref:active-projects + obs:2026-05-30
+        client = _FakeMossClient.instances[-1]
+        assert {d.id for d in client.indexes["om-test"]} == {"ref:active-projects", "obs:2026-05-30"}
+
+        # obs:2026-05-30 is now wholly scope=local; reindex must remove it from the cloud.
+        docs = _docs()
+        docs[1] = Document(
+            doc_id="obs:2026-05-30",
+            source=DocumentSource.OBSERVATIONS,
+            heading="## 2026-05-30",
+            content="## 2026-05-30\nNow private. <!--om: scope=local-->",
+            date="2026-05-30",
+        )
+        backend.index(docs)
+        remaining = {d.id for d in client.indexes["om-test"]}
+        assert remaining == {"ref:active-projects"}
+        assert "delete_docs" in client.calls
+    finally:
+        backend.close()
+
+
+def test_reindex_to_all_local_empties_cloud_index(fake_moss):
+    backend = _backend()
+    try:
+        backend.index(_docs())
+        client = _FakeMossClient.instances[-1]
+        # Every section becomes wholly scope=local -> nothing uploadable -> all deleted.
+        local_docs = [
+            Document(
+                doc_id=d.doc_id,
+                source=d.source,
+                heading=d.heading,
+                content=f"{d.heading}\nprivate <!--om: scope=local-->",
+                date=d.date,
+            )
+            for d in _docs()
+        ]
+        backend.index(local_docs)
+        assert client.indexes["om-test"] == []
     finally:
         backend.close()
 

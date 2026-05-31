@@ -37,7 +37,7 @@ If the backend isn't ready (for example, you've never built an index), the
 conversation still works — it just runs ungrounded. Build the index first with:
 
 ```bash
-om reindex          # or: om talk --reindex
+om talk --reindex          # rebuild the index, then start talking
 ```
 
 ## Options
@@ -69,8 +69,7 @@ export OM_SEARCH_BACKEND=moss
 export OM_MOSS_PROJECT_ID=your-project-id
 export OM_MOSS_PROJECT_KEY=your-project-key   # secret — keep it out of git
 
-om reindex                                    # uploads memory, builds the index
-om talk
+om talk --reindex                             # uploads memory, builds the index, then talks
 ```
 
 Privacy notes:

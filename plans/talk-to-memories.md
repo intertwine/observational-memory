@@ -221,7 +221,7 @@ overlapping loops. `close()` stops the loop/thread.
 - `om talk` calls `Conversation.prepare()` once: for a Moss backend it
   `load_index`es; `om talk --reindex` (re)builds first. If the backend is not
   ready, recall returns empty and the conversation runs ungrounded — never
-  crashes. `om reindex` remains the documented way to (re)build any index.
+  crashes. `om talk --reindex` / `om search --reindex` (re)build the index.
 - The talk loop **catches** `BudgetExceededError` and provider `RuntimeError`
   from `llm.compress` and degrades to a short spoken apology, then continues.
   Tested explicitly.

@@ -808,7 +808,7 @@ def talk(
     # memory, which can take a few seconds), so flag it before the pause.
     click.echo(f"Preparing recall backend '{config.search_backend}'…", err=True)
     ready = conversation.prepare()
-    status = "ready" if ready else "unavailable (replies will be ungrounded — try `om reindex`)"
+    status = "ready" if ready else "unavailable (replies will be ungrounded — try `om talk --reindex`)"
     click.echo(f"om talk — recall backend '{config.search_backend}' is {status}.", err=True)
     click.echo("Talking to your memories. Type 'exit' or press Ctrl-D to end.", err=True)
 

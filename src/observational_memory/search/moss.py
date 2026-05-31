@@ -169,18 +169,19 @@ class MossBackend:
     # -- SearchBackend protocol ------------------------------------
 
     def index(self, documents: list[Document]) -> None:
-        """Upsert *documents* into the Moss index, withholding scope=local content.
+        """Reconcile the Moss index to *documents*, withholding scope=local content.
 
         Uploads memory text to the Moss cloud. ``scope=local`` lines are stripped
         per line (sections that mix shared and local entries still upload their
-        shared entries). Fails closed: any SDK/network error is logged at debug
-        level and swallowed.
+        shared entries; a section that is wholly local is excluded entirely).
 
-        Note on staleness: this upserts the current corpus rather than deleting
-        and recreating, so it never leaves the index empty on a partial failure.
-        The trade-off is that sections removed from memory since the last index
-        linger in the cloud index until the next successful full reindex of a
-        renamed index; recall still surfaces current content first by relevance.
+        Reconciles rather than blindly upserts: the current docs are upserted and
+        any cloud doc no longer present locally — because it was removed, or has
+        become wholly ``scope=local`` — is **deleted**, so stale or now-private
+        memory cannot linger in the cloud index and be returned by recall. This
+        order (upsert-then-delete, never delete-then-create) also means a partial
+        failure never leaves the index empty. Fails closed: any SDK/network error
+        is logged at debug level and swallowed.
         """
         client = self._ensure_client()
         if client is None:
@@ -194,11 +195,9 @@ class MossBackend:
                 uploadable.append(_with_content(doc, stripped))
             else:
                 dropped += 1
-        if not uploadable:
-            _LOGGER.debug("moss index: nothing to upload after scope=local filtering")
-            return
 
-        self._announce_upload(len(uploadable), dropped=dropped)
+        if uploadable:
+            self._announce_upload(len(uploadable), dropped=dropped)
 
         try:
             from moss import DocumentInfo, MutationOptions  # type: ignore
@@ -208,17 +207,31 @@ class MossBackend:
         infos = [
             DocumentInfo(id=doc.doc_id, text=doc.content, metadata=self._encode_metadata(doc)) for doc in uploadable
         ]
+        keep_ids = {doc.doc_id for doc in uploadable}
 
-        async def _replace() -> None:
-            # Upsert in place when the index exists; create it on first use. Never
-            # delete-then-create — that would leave no index if create failed.
+        async def _reconcile() -> None:
+            # get_docs both lists current cloud docs and tells us whether the index
+            # exists (it raises when it doesn't). Best-effort: if the SDK paginates
+            # get_docs, any stale doc missed this round is reconciled next reindex.
             try:
-                await client.add_docs(self._index_name, infos, MutationOptions(upsert=True))
+                existing = await client.get_docs(self._index_name)
             except Exception:
-                await client.create_index(self._index_name, infos, self._model_id)
+                existing = None
+            if existing is None:
+                # No index yet — create it from the current docs (nothing to delete).
+                if infos:
+                    await client.create_index(self._index_name, infos, self._model_id)
+                return
+            if infos:
+                await client.add_docs(self._index_name, infos, MutationOptions(upsert=True))
+            stale = [
+                doc_id for doc_id in (getattr(d, "id", None) for d in existing) if doc_id and doc_id not in keep_ids
+            ]
+            if stale:
+                await client.delete_docs(self._index_name, stale)
 
         try:
-            self._loop.run(_replace(), _INDEX_TIMEOUT)
+            self._loop.run(_reconcile(), _INDEX_TIMEOUT)
             self._loaded = False  # force a reload so queries see the new corpus
         except Exception as exc:
             _LOGGER.debug("moss index failed: %s", exc)
@@ -271,7 +284,7 @@ class MossBackend:
             # another process is intentionally not hot-reloaded mid-session.
             self._loop.run(client.load_index(self._index_name), _LOAD_TIMEOUT)
         except Exception as exc:
-            _LOGGER.debug("moss load_index failed (is the index built? run `om reindex`): %s", exc)
+            _LOGGER.debug("moss load_index failed (is the index built? run `om talk --reindex`): %s", exc)
             return False
         self._loaded = True
         return True
