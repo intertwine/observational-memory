@@ -162,8 +162,8 @@ class Conversation:
                 backend_ready=ready,
                 status=RecallStatus.EMPTY if ready else RecallStatus.UNAVAILABLE,
             )
-        # A prior recall that overran its budget keeps occupying the single worker
-        # (ThreadPoolExecutor can't cancel a running task). Don't queue behind it —
+        # A prior recall that overran its budget keeps running on its background
+        # thread (a running recall can't be cancelled). Don't spawn behind it —
         # that would falsely report TIMEOUT on a turn that never even ran. Classify
         # as UNAVAILABLE (recall couldn't run this turn), distinct from a real timeout.
         if self._recall.has_pending_recall():

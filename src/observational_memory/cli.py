@@ -933,8 +933,8 @@ def recall(
     if not payloads:
         if recall_status == RecallStatus.UNAVAILABLE.value:
             click.echo(
-                f"Recall backend '{config.search_backend}' is unavailable "
-                f"(try `om recall --query … ` after `om search --reindex`); no results."
+                f"Recall backend '{config.search_backend}' is unavailable; no results. "
+                f'Rebuild the index with `om search --reindex "<query>"`, then retry.'
             )
         else:
             click.echo("No recall results.")

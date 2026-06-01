@@ -1,17 +1,23 @@
 """Background recall over memories for the talk loop.
 
 `RecallEngine` runs a search-backend query off the conversation's critical path
-(on a single-worker executor) and shapes the hits into trimmed, deduped snippets
-the conversation brain can ground a reply in. It degrades cleanly: if the
-backend is not ready (e.g. never indexed) it returns an empty, ungrounded result
-rather than raising — the conversation keeps working.
+(on a single background daemon thread) and shapes the hits into trimmed, deduped
+snippets the conversation brain can ground a reply in. It degrades cleanly: if
+the backend is not ready (e.g. never indexed) it returns an empty, ungrounded
+result rather than raising — the conversation keeps working.
+
+The background work runs on a *daemon* thread on purpose: a slow or hung backend
+search (a cold qmd load, a wedged Moss request) is abandoned when the turn times
+out, and a daemon thread is killed at interpreter exit rather than joined — so a
+stuck search can never keep `om talk` from exiting.
 """
 
 from __future__ import annotations
 
 import enum
 import logging
-from concurrent.futures import Future, ThreadPoolExecutor
+import threading
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 
 _LOGGER = logging.getLogger(__name__)
@@ -73,7 +79,6 @@ class RecallEngine:
         self._config = config
         self._backend = backend
         self._snippet_max_chars = snippet_max_chars
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="om-recall")
         # The single in-flight future, tracked so a wedged recall does not silently
         # block (and mislabel) the next turn — see recall_async / has_pending_recall.
         self._inflight: Future | None = None
@@ -130,31 +135,42 @@ class RecallEngine:
         )
 
     def has_pending_recall(self) -> bool:
-        """True if a prior recall is still occupying the single worker.
+        """True if a prior recall is still running on the background thread.
 
-        The executor has one worker and ``ThreadPoolExecutor`` cannot cancel an
-        already-running task, so a recall that overran the caller's budget keeps
-        running. Callers check this before submitting so they can classify the
-        next turn as UNAVAILABLE rather than queueing behind the wedged task and
-        falsely reporting a TIMEOUT (head-of-line blocking).
+        A daemon thread running ``recall`` cannot be cancelled once started, so a
+        recall that overran the caller's budget keeps running. Callers check this
+        before submitting so they can classify the next turn as UNAVAILABLE rather
+        than spawning a second thread behind the wedged one and falsely reporting a
+        TIMEOUT (head-of-line blocking).
         """
         inflight = self._inflight
         return inflight is not None and not inflight.done()
 
     def recall_async(self, query: str, limit: int = _DEFAULT_LIMIT) -> Future:
-        """Submit recall to the background executor.
+        """Run recall on a background *daemon* thread, returning its ``Future``.
 
-        At most one recall is in flight at a time (single worker). A previously
-        submitted future that has already finished is cleared here; a still-running
-        one is left in place so the caller (via ``has_pending_recall``) can avoid
-        queueing behind it. Use ``has_pending_recall`` to detect a wedged prior
-        recall before calling this.
+        At most one recall is in flight at a time; call ``has_pending_recall``
+        first to avoid spawning behind a wedged prior recall. The thread is a
+        daemon so a hung backend search is abandoned (not joined) at interpreter
+        exit and can never keep ``om talk`` from exiting.
         """
-        self._inflight = self._executor.submit(self.recall, query, limit)
-        return self._inflight
+        future: Future = Future()
+
+        def _run() -> None:
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                future.set_result(self.recall(query, limit))
+            except BaseException as exc:  # recall() shouldn't raise, but never wedge the Future
+                future.set_exception(exc)
+
+        self._inflight = future
+        threading.Thread(target=_run, name="om-recall", daemon=True).start()
+        return future
 
     def close(self) -> None:
-        self._executor.shutdown(wait=False)
+        # Nothing to join: the recall thread is a daemon and is abandoned on a
+        # timed-out turn, so it cannot block process exit. Just drop the handle.
         self._inflight = None
 
     # -- internals --------------------------------------------------

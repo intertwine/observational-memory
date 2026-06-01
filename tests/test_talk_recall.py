@@ -1,8 +1,59 @@
 """Tests for the talk RecallEngine."""
 
+import threading
+from concurrent.futures import TimeoutError as FutureTimeoutError
+
+import pytest
+
 from observational_memory.config import Config
 from observational_memory.search import Document, DocumentSource, SearchResult
 from observational_memory.talk.recall import RecallEngine, RecallStatus
+
+
+class _BlockingBackend:
+    """Backend whose search() blocks until released — models a hung query."""
+
+    def __init__(self):
+        self._release = threading.Event()
+        self.started = threading.Event()
+
+    def is_ready(self):
+        return True
+
+    def search(self, query, limit=10):
+        self.started.set()
+        self._release.wait(timeout=10)
+        return []
+
+    def release(self):
+        self._release.set()
+
+    def index(self, documents):
+        pass
+
+
+def test_recall_async_runs_on_daemon_thread_so_a_hung_search_cannot_block_exit():
+    # Codex P1: a wedged backend.search() must never keep the process alive. The
+    # background recall thread must be a daemon (killed at interpreter exit, not
+    # joined), and the caller's timeout must fire while it is still running.
+    backend = _BlockingBackend()
+    engine = RecallEngine(Config(), backend)
+    try:
+        future = engine.recall_async("q")
+        assert backend.started.wait(timeout=2), "recall thread should have started"
+
+        # The caller's budget fires while the search is still wedged.
+        with pytest.raises(FutureTimeoutError):
+            future.result(timeout=0.05)
+        assert engine.has_pending_recall() is True
+
+        # The wedged work is on a daemon thread, so it cannot block process exit.
+        recall_threads = [t for t in threading.enumerate() if t.name == "om-recall"]
+        assert recall_threads, "expected a background om-recall thread"
+        assert all(t.daemon for t in recall_threads), "recall thread must be a daemon"
+    finally:
+        backend.release()
+        engine.close()
 
 
 class _FakeBackend:
