@@ -5,6 +5,8 @@ from click.testing import CliRunner
 from observational_memory.cli import cli
 from observational_memory.config import Config
 from observational_memory.reflection_metadata import (
+    SHAREABLE_SCOPES,
+    _scope_is_shareable,
     ensure_reflection_metadata,
     ensure_section_provenance,
     filter_reflection_entries_for_cluster,
@@ -275,3 +277,127 @@ def test_subsection_only_local_drops_subsection_title_and_stamp_for_cluster():
     assert "Secret Standalone" not in filtered
     assert "## Active Projects" in filtered
     assert filtered.count("<!--om-section:") == 1
+
+
+# --- Gate 4: pluggable share-out allowlist (default-deny, fail-closed) -------
+
+
+def test_scope_resolver_default_deny_unit():
+    """The pure resolver: absent rides along, only allowlist members share, every
+    explicit non-member (typo/hallucinated/future/empty) fails closed."""
+    assert _scope_is_shareable(None) is True
+    assert _scope_is_shareable("cluster") is True
+    assert _scope_is_shareable("local") is False
+    assert _scope_is_shareable("team") is False
+    assert _scope_is_shareable("org") is False
+    assert _scope_is_shareable("locol") is False
+    assert _scope_is_shareable("") is False
+
+
+def test_shareable_scopes_allowlist_ships_cluster_only():
+    """Mechanism-only tripwire: no inert team/org values may be added."""
+    assert SHAREABLE_SCOPES == frozenset({"cluster"})
+    assert "team" not in SHAREABLE_SCOPES
+    assert "org" not in SHAREABLE_SCOPES
+
+
+def test_explicit_unknown_scopes_withheld_from_cluster():
+    """Behavior delta: an explicit non-cluster scope no longer leaks; a sibling
+    scope=cluster bullet in the same section still shares."""
+    doc = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        "- Typo bullet <!--om: scope=locol-->\n"
+        "- Hallucinated bullet <!--om: scope=team-->\n"
+        "- Future bullet <!--om: scope=org-->\n"
+        "- Shared <!--om: scope=cluster-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "Typo bullet" not in filtered
+    assert "Hallucinated bullet" not in filtered
+    assert "Future bullet" not in filtered
+    assert "Shared" in filtered
+
+
+def test_absent_scope_structure_rides_along_for_cluster():
+    """Unstamped hand-typed bullets and all absent-scope structure (preamble,
+    *Last reflected:*, blanks, H2/H3 headings, <!--om-section:--> stamp) survive."""
+    doc = (
+        "# Reflections\n\n"
+        "*Last reflected: 2026-06-01*\n\n"
+        "## Active Projects\n"
+        "<!--om-section: last_reflected=2026-06-01 derived_from_obs_window=2026-05-30..2026-05-31-->\n"
+        "### Subsection\n"
+        "- Hand-typed unstamped bullet\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "Hand-typed unstamped bullet" in filtered
+    assert "# Reflections" in filtered
+    assert "*Last reflected: 2026-06-01*" in filtered
+    assert "## Active Projects" in filtered
+    assert "### Subsection" in filtered
+    assert "<!--om-section:" in filtered
+
+
+def test_explicit_unknown_only_section_is_pruned_for_cluster():
+    """Gate-3 composition holds for the new withhold: a section whose only bullet
+    is an explicit-unknown scope drops its heading and <!--om-section:--> stamp,
+    exactly as a wholly-local section does."""
+    doc = (
+        "# Reflections\n\n"
+        "## Team Secret\n"
+        "- Org roadmap <!--om: scope=team-->\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster-->\n"
+    )
+    stamped = ensure_section_provenance(doc, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    filtered = filter_reflection_entries_for_cluster(stamped)
+    assert "Team Secret" not in filtered
+    assert "Org roadmap" not in filtered
+    assert "## Shared" in filtered
+    assert filtered.count("<!--om-section:") == 1
+
+
+def test_realistic_corpus_byte_identical_to_pre_gate4():
+    """Default-preserving: for a real corpus of only {cluster, local, absent},
+    the generalized filter is byte-for-byte the OLD `!= local` behavior."""
+    raw = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        "- Ship voice feature\n"
+        "- Private spike <!--om: scope=local node=laptop-->\n"
+        "## Preferences & Opinions\n"
+        "- Prefers concise handoffs\n"
+    )
+    stamped = ensure_section_provenance(
+        ensure_reflection_metadata(raw, now=_NOW, node="laptop"),
+        obs_window=("2026-05-30", "2026-05-31"),
+        now=_NOW,
+    )
+    # Reconstruct the pre-Gate-4 behavior inline: keep iff scope != "local",
+    # then the unchanged Gate-3 pruning + reassembly.
+    from observational_memory.reflection_metadata import _drop_empty_heading_sections
+
+    old_kept = [line for line in stamped.splitlines() if parse_metadata(line).get("scope") != "local"]
+    old_expected = "\n".join(_drop_empty_heading_sections(old_kept)).rstrip() + "\n"
+    assert filter_reflection_entries_for_cluster(stamped) == old_expected
+
+
+def test_self_heal_asymmetry_explicit_unknown_stays_withheld_absent_heals():
+    """Guards the documented Gate-4 safety claim (reflection_metadata.py docstring +
+    docs/om-cluster-sync.md): `ensure_reflection_metadata` uses setdefault, so an
+    explicit-unknown scope (typo) is NOT rewritten and stays WITHHELD across reflects,
+    while an absent-scope bullet self-heals to scope=cluster and resumes SHARING. If a
+    future change flips setdefault->unconditional assignment, the typo would be silently
+    re-stamped scope=cluster and leak off-host — this test must fail loudly first."""
+    doc = "# Reflections\n\n## Active Projects\n- Typo bullet <!--om: scope=locol-->\n- Hand bullet\n"
+    out = ensure_reflection_metadata(doc, now=_NOW, node="laptop")
+    lines = out.splitlines()
+    typo_line = next(line for line in lines if line.lstrip().startswith("- Typo bullet"))
+    hand_line = next(line for line in lines if line.lstrip().startswith("- Hand bullet"))
+    # (a) setdefault did NOT overwrite the explicit typo; it stays withheld.
+    assert parse_metadata(typo_line).get("scope") == "locol"
+    assert "Typo bullet" not in filter_reflection_entries_for_cluster(out)
+    # (b) the unstamped bullet self-healed to scope=cluster and now shares.
+    assert parse_metadata(hand_line).get("scope") == "cluster"
+    assert "Hand bullet" in filter_reflection_entries_for_cluster(out)

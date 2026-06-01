@@ -377,6 +377,39 @@ def test_scope_local_stamped_section_is_not_uploaded(fake_moss):
         backend.close()
 
 
+def test_explicit_unknown_scope_not_uploaded_to_cloud(fake_moss):
+    """Gate 4: the Moss cloud-upload path routes through the SAME allowlist
+    resolver as the cluster filter. An explicit-unknown scope (e.g. scope=org /
+    scope=team) bullet is withheld while an absent-scope sibling in the same
+    section is still uploaded — proving the cloud path inherits the default-deny
+    allowlist, not just the cluster path."""
+    backend = _backend()
+    try:
+        backend.index(
+            [
+                Document(
+                    doc_id="ref:mixed",
+                    source=DocumentSource.REFLECTIONS,
+                    heading="## Mixed",
+                    content=(
+                        "## Mixed\n"
+                        "- Shared fact\n"
+                        "- Org-only note <!--om: scope=org-->\n"
+                        "- Team-only note <!--om: scope=team-->\n"
+                    ),
+                )
+            ]
+        )
+        client = _FakeMossClient.instances[-1]
+        uploaded = {d.id: d.text for d in client.indexes["om-test"]}
+        assert "ref:mixed" in uploaded
+        assert "Shared fact" in uploaded["ref:mixed"]
+        assert "Org-only note" not in uploaded["ref:mixed"]
+        assert "Team-only note" not in uploaded["ref:mixed"]
+    finally:
+        backend.close()
+
+
 def test_fail_closed_when_sdk_missing(monkeypatch):
     # No fake_moss fixture: ensure `import moss` fails.
     monkeypatch.setitem(sys.modules, "moss", None)

@@ -275,18 +275,66 @@ def infer_kind(body: str, section: str = "") -> str:
     return "evergreen"
 
 
-def filter_reflection_entries_for_cluster(text: str) -> str:
-    """Remove host-local reflection entries before writing shared cluster snapshots.
+# Gate-4 share-out allowlist SOCKET. This is the single, extensible policy that
+# decides which EXPLICIT scope values may leave the host into shared cluster
+# snapshots or the Moss cloud upload. HARD CONSTRAINT: it ships with EXACTLY one
+# member, ``"cluster"``. Do NOT add inert ``team``/``org``/any value here — a
+# future tier widens sharing by adding a member (or registering through the
+# resolver) WITHOUT editing any leak-critical filter body. Adding a value before
+# a tier enforces its visibility would silently share that scope off-host (the
+# Moss path uploads plaintext to a cloud), an irreversible leak.
+SHAREABLE_SCOPES: frozenset[str] = frozenset({"cluster"})
 
-    Drops ``scope=local`` bullet lines. LEAK-CRITICAL (Gate 3): when a section
-    reduces to a bare heading with no surviving shared content, its H2 heading AND
-    any attached ``<!--om-section:`` provenance stamp are also dropped, so a
-    wholly-local section never leaks its title or its reflect cadence / obs-window
-    into shared cluster memory. (This also closes the pre-existing orphan-heading
-    leak for wholly-local sections.) Sections that retain at least one shared line
-    keep their heading and stamp unchanged.
+
+def _scope_is_shareable(scope: str | None) -> bool:
+    """Allowlist resolver for the leak-critical share-out paths (fails closed).
+
+    - Absent scope (``None``) RIDES ALONG — structural lines (headings, prose,
+      blank lines, ``<!--om-section:`` stamps, the ``*Last reflected:*`` preamble)
+      and hand-typed unstamped bullets carry no scope key and are shared as today.
+    - An EXPLICIT scope that is a member of :data:`SHAREABLE_SCOPES` is shared.
+    - An EXPLICIT non-member scope is WITHHELD: ``scope=local``, a typo such as
+      ``locol``, an LLM-hallucinated value, a future value, or a hand-typed
+      ``team``/``org`` value a tier has not yet enabled all FAIL CLOSED.
+
+    The ``scope is None`` disjunction is deliberate: it keeps absent (rides along)
+    and explicit-empty (``scope=`` -> ``""``, withheld) distinct, so an empty
+    value also fails closed. A future tier widens sharing purely by adding to
+    :data:`SHAREABLE_SCOPES` — never by editing a filter body.
     """
-    kept = [line for line in text.splitlines() if parse_metadata(line).get("scope") != "local"]
+    return scope is None or scope in SHAREABLE_SCOPES
+
+
+def filter_reflection_entries_for_cluster(text: str) -> str:
+    """Remove non-shareable reflection entries before writing shared cluster snapshots.
+
+    Keeps a line iff its scope is shareable per :func:`_scope_is_shareable`
+    against the :data:`SHAREABLE_SCOPES` allowlist (default ``{"cluster"}``):
+
+    - Absent-scope lines (H2/H3 headings, prose, blank lines, ``<!--om-section:``
+      provenance stamps, the ``*Last reflected:*`` preamble) RIDE ALONG unchanged.
+    - ``scope=cluster`` bullets are shared.
+    - Any EXPLICIT non-shareable scope is WITHHELD and FAILS CLOSED:
+      ``scope=local`` (unchanged from before), plus — newly closed in Gate 4 — a
+      typo (``locol``), an LLM-hallucinated value, a future value, or a hand-typed
+      ``team``/``org`` value a tier has not yet enabled.
+
+    Self-heal nuance: an *absent*-scope under-share self-heals on the next
+    reflect, where ``ensure_reflection_metadata`` setdefaults ``scope=cluster``.
+    An *explicit-unknown* scope does NOT self-heal — ``setdefault`` never
+    overwrites an existing value — so it stays withheld until corrected or
+    removed. A future tier registers a shareable scope by adding to
+    :data:`SHAREABLE_SCOPES`.
+
+    LEAK-CRITICAL (Gate 3): when a section reduces to a bare heading with no
+    surviving shared content, its H2 heading AND any attached ``<!--om-section:``
+    provenance stamp are also dropped, so a wholly-local section never leaks its
+    title or its reflect cadence / obs-window into shared cluster memory. (This
+    also closes the pre-existing orphan-heading leak for wholly-local sections.)
+    Sections that retain at least one shared line keep their heading and stamp
+    unchanged.
+    """
+    kept = [line for line in text.splitlines() if _scope_is_shareable(parse_metadata(line).get("scope"))]
     output = _drop_empty_heading_sections(kept)
     return "\n".join(output).rstrip() + "\n"
 

@@ -97,24 +97,28 @@ class _AsyncLoop:
 
 
 def _strip_local_lines(content: str) -> str:
-    """Drop ``scope=local`` content from a section before upload.
+    """Drop non-shareable content from a section before upload.
 
-    Matches ``filter_reflection_entries_for_cluster`` exactly so the cloud-upload
-    leak rule has a SINGLE source of truth and the two paths cannot drift: a
-    section that mixes shared and host-local entries still contributes its shared
-    entries to the cloud index, while local entries never leave the host.
+    Routes its keep-decision through the SAME ``_scope_is_shareable`` allowlist
+    resolver as ``filter_reflection_entries_for_cluster`` (no longer the inline
+    ``!= "local"`` check), so the two leak-critical share-out paths have a SINGLE
+    source of truth and cannot drift: a section that mixes shared and host-local
+    entries still contributes its shared entries to the cloud index, while a line
+    carrying any EXPLICIT non-shareable scope — ``scope=local`` or, newly closed
+    in Gate 4, a typo / hallucinated / future / hand-typed ``team``/``org`` value
+    — never leaves the host. Absent-scope lines ride along, exactly as today.
 
-    LEAK-CRITICAL: after dropping local bullet lines this also prunes any now-empty
-    heading block at ANY level via ``_drop_empty_heading_sections`` — so a private
-    H3/H4 subsection whose every bullet was ``scope=local`` does NOT leak its title
-    into the uploaded text just because some *other* subsection of the same H2 is
-    shared (PR #85 re-review P1). A line-only strip left such titles behind.
+    LEAK-CRITICAL: after dropping non-shareable bullet lines this also prunes any
+    now-empty heading block at ANY level via ``_drop_empty_heading_sections`` — so
+    a private H3/H4 subsection whose every bullet was withheld does NOT leak its
+    title into the uploaded text just because some *other* subsection of the same
+    H2 is shared (PR #85 re-review P1). A line-only strip left such titles behind.
     """
     try:
-        from ..reflection_metadata import _drop_empty_heading_sections, parse_metadata
+        from ..reflection_metadata import _drop_empty_heading_sections, _scope_is_shareable, parse_metadata
     except Exception:  # pragma: no cover - defensive
         return content
-    kept = [line for line in content.splitlines() if parse_metadata(line).get("scope") != "local"]
+    kept = [line for line in content.splitlines() if _scope_is_shareable(parse_metadata(line).get("scope"))]
     kept = _drop_empty_heading_sections(kept)
     return "\n".join(kept)
 
