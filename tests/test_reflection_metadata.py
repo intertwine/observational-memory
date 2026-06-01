@@ -358,6 +358,40 @@ def test_explicit_unknown_only_section_is_pruned_for_cluster():
     assert filtered.count("<!--om-section:") == 1
 
 
+def test_withheld_bullet_continuation_line_does_not_leak_for_cluster():
+    """PR #86 re-review P1: a withheld bullet's indented continuation line carries
+    no <!--om: ...--> metadata, so a per-line filter let it ride along as
+    absent-scope content and leak. The share-out filter must drop the continuation
+    along with its bullet — and the now-empty section heading with it."""
+    doc = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        "- Team-only plan <!--om: scope=team node=laptop-->\n"
+        "  continuation naming Acme private cadence\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster node=laptop-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "continuation naming Acme private cadence" not in filtered
+    assert "Team-only plan" not in filtered
+    assert "Active Projects" not in filtered  # section emptied -> heading pruned
+    assert "Public fact" in filtered  # a shared bullet elsewhere is untouched
+
+
+def test_shared_bullet_continuation_line_is_preserved_for_cluster():
+    """Parity guard: a SHARED bullet's continuation must still ride along, so the
+    continuation-aware filter only withholds continuations of WITHHELD bullets."""
+    doc = (
+        "# Reflections\n\n"
+        "## Shared\n"
+        "- Public plan <!--om: scope=cluster node=laptop-->\n"
+        "  continuation with more public detail\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "Public plan" in filtered
+    assert "continuation with more public detail" in filtered
+
+
 def test_realistic_corpus_byte_identical_to_pre_gate4():
     """Default-preserving: for a real corpus of only {cluster, local, absent},
     the generalized filter is byte-for-byte the OLD `!= local` behavior."""

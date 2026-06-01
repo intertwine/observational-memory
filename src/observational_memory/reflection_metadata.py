@@ -305,6 +305,60 @@ def _scope_is_shareable(scope: str | None) -> bool:
     return scope is None or scope in SHAREABLE_SCOPES
 
 
+def _shareable_lines(lines: list[str]) -> list[str]:
+    """Keep only shareable entries, propagating a withheld entry's decision to its
+    indented CONTINUATION lines.
+
+    A scope decision is carried on an entry's inline ``<!--om: ...-->`` metadata
+    (on a bullet OR a plain metadata-bearing line), but a multi-line entry's
+    wrapped continuation lines carry none — so a naive per-line filter drops the
+    withheld entry yet lets its continuation ride along as absent-scope content (a
+    real leak: the continuation text reaches the cluster snapshot / Moss cloud and
+    keeps the heading alive). This walks entries instead of physical lines:
+
+    - A line with an EXPLICIT ``scope=`` is an entry head, decided by
+      :func:`_scope_is_shareable` regardless of indent (a nested scoped entry is
+      judged on its OWN scope, never inheriting its parent's).
+    - While inside a withheld entry, an absent-scope line indented deeper than that
+      entry head is its continuation and is withheld too.
+    - Blank lines are buffered, never dropped on their own: they are emitted when
+      the withheld entry ends (so output stays byte-identical to the pre-Gate-4
+      per-line filter for the common single-line-entry corpus) and discarded only
+      when they sit strictly inside a withheld multi-line entry.
+    """
+    out: list[str] = []
+    dropping = False
+    drop_indent = 0
+    held_blanks: list[str] = []
+    for line in lines:
+        fields = parse_metadata(line)
+        has_explicit_scope = "scope" in fields
+        if dropping:
+            if line.strip() == "":
+                held_blanks.append(line)
+                continue
+            indent = len(line) - len(line.lstrip())
+            if not has_explicit_scope and indent > drop_indent:
+                # Continuation of the withheld entry — drop it and any blanks that
+                # were sitting inside the entry.
+                held_blanks.clear()
+                continue
+            # The withheld entry ends here; its trailing blanks belong after it.
+            dropping = False
+            out.extend(held_blanks)
+            held_blanks = []
+        if has_explicit_scope:
+            if _scope_is_shareable(fields.get("scope")):
+                out.append(line)
+            else:
+                dropping = True
+                drop_indent = len(line) - len(line.lstrip())
+            continue
+        out.append(line)
+    # Any blanks still held at EOF sat inside the final withheld entry -> drop them.
+    return out
+
+
 def filter_reflection_entries_for_cluster(text: str) -> str:
     """Remove non-shareable reflection entries before writing shared cluster snapshots.
 
@@ -332,9 +386,10 @@ def filter_reflection_entries_for_cluster(text: str) -> str:
     title or its reflect cadence / obs-window into shared cluster memory. (This
     also closes the pre-existing orphan-heading leak for wholly-local sections.)
     Sections that retain at least one shared line keep their heading and stamp
-    unchanged.
+    unchanged. A withheld multi-line bullet drops its indented continuation lines
+    too (see :func:`_shareable_lines`), so wrapped continuation text never leaks.
     """
-    kept = [line for line in text.splitlines() if _scope_is_shareable(parse_metadata(line).get("scope"))]
+    kept = _shareable_lines(text.splitlines())
     output = _drop_empty_heading_sections(kept)
     return "\n".join(output).rstrip() + "\n"
 

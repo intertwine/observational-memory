@@ -410,6 +410,40 @@ def test_explicit_unknown_scope_not_uploaded_to_cloud(fake_moss):
         backend.close()
 
 
+def test_withheld_bullet_continuation_not_uploaded_to_cloud(fake_moss):
+    """PR #86 re-review P1: the cloud path must not upload a withheld bullet's
+    indented continuation line (which carries no metadata). It rides the same
+    continuation-aware filter as the cluster path, so wrapped continuation text
+    never reaches the cloud while a shared bullet's continuation still does."""
+    backend = _backend()
+    try:
+        backend.index(
+            [
+                Document(
+                    doc_id="ref:mixed",
+                    source=DocumentSource.REFLECTIONS,
+                    heading="## Mixed",
+                    content=(
+                        "## Mixed\n"
+                        "- Team-only plan <!--om: scope=team-->\n"
+                        "  continuation naming Acme private cadence\n"
+                        "- Public fact <!--om: scope=cluster-->\n"
+                        "  public continuation detail\n"
+                    ),
+                )
+            ]
+        )
+        client = _FakeMossClient.instances[-1]
+        uploaded = {d.id: d.text for d in client.indexes["om-test"]}
+        text = uploaded["ref:mixed"]
+        assert "continuation naming Acme private cadence" not in text
+        assert "Team-only plan" not in text
+        assert "Public fact" in text
+        assert "public continuation detail" in text
+    finally:
+        backend.close()
+
+
 def test_fail_closed_when_sdk_missing(monkeypatch):
     # No fake_moss fixture: ensure `import moss` fails.
     monkeypatch.setitem(sys.modules, "moss", None)
