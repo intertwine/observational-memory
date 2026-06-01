@@ -6,6 +6,8 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from observational_memory import backup
 from observational_memory.config import Config
 
@@ -272,3 +274,80 @@ def test_safe_int_bad_env_does_not_crash_config(monkeypatch, tmp_path):
     monkeypatch.setenv("OM_BACKUP_RETENTION_COUNT", "not-a-number")
     config = _config(monkeypatch, tmp_path)
     assert config.backup_retention_count == 20  # falls back to default
+
+
+def test_restore_safety_snapshot_taken_even_when_backups_disabled(monkeypatch, tmp_path):
+    # Codex P1: with OM_BACKUP_ENABLED=0, restore must STILL take a pre-restore
+    # safety snapshot (force=True), or a mid-restore failure has no rollback.
+    monkeypatch.setenv("OM_BACKUP_ENABLED", "0")
+    config = _config(monkeypatch, tmp_path)
+    _seed_memory(config.memory_dir, reflections="# Reflections\n## Identity\n- GOOD\n")
+    good = backup.create_snapshot(config, reason="manual", force=True)
+    assert good is not None
+
+    config.reflections_path.write_text("CORRUPT\n")
+    safety = backup.restore_snapshot(config, backup.resolve_snapshot(config, good.snapshot_id))
+
+    assert safety.reason == "pre-restore"
+    assert safety.path.exists()
+    pre_restore = [s for s in backup.list_snapshots(config) if s.reason == "pre-restore"]
+    assert pre_restore, "restore must create a pre-restore safety snapshot even when disabled"
+    assert config.reflections_path.read_text() == "# Reflections\n## Identity\n- GOOD\n"
+
+
+def test_restore_does_not_prune_its_source_snapshot(monkeypatch, tmp_path):
+    # Codex P2: with a tight retention count, the pre-restore snapshot's own
+    # retention pass must not delete the snapshot being restored FROM.
+    monkeypatch.setenv("OM_BACKUP_RETENTION_COUNT", "1")
+    config = _config(monkeypatch, tmp_path)
+    _seed_memory(config.memory_dir, reflections="# Reflections\n## Identity\n- GOOD\n")
+    good = backup.create_snapshot(config, reason="manual")
+    assert good is not None
+
+    config.reflections_path.write_text("CORRUPT\n")
+    backup.restore_snapshot(config, backup.resolve_snapshot(config, good.snapshot_id))
+
+    surviving = {s.snapshot_id for s in backup.list_snapshots(config)}
+    assert good.snapshot_id in surviving, "the snapshot being restored must survive its own pre-restore retention"
+    assert config.reflections_path.read_text() == "# Reflections\n## Identity\n- GOOD\n"
+
+
+def _tamper_manifest(snapshot_path, mutate):
+    manifest = json.loads((snapshot_path / "manifest.json").read_text())
+    mutate(manifest)
+    (snapshot_path / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda m: m["files"][0].update(sha256=""), id="empty-sha256"),
+        pytest.param(lambda m: m["files"][0].pop("sha256", None), id="missing-sha256"),
+        pytest.param(lambda m: m["files"][0].update(sha256="z" * 64), id="malformed-sha256"),
+        pytest.param(lambda m: m["files"][0].pop("bytes", None), id="missing-bytes"),
+        pytest.param(lambda m: m["files"][0].update(path="../evil.md"), id="path-traversal-name"),
+        pytest.param(lambda m: m.update(format_version=999), id="unknown-format-version"),
+        pytest.param(
+            lambda m: m["files"].append(dict(m["files"][0])),
+            id="duplicate-role",
+        ),
+    ],
+)
+def test_restore_fails_closed_on_untrustworthy_manifest(monkeypatch, tmp_path, mutate):
+    # Codex P2 (integrity): a manifest we cannot fully trust must abort BEFORE
+    # writing anything — live memory stays untouched and no safety snapshot is
+    # taken (validation precedes Phase 2).
+    config = _config(monkeypatch, tmp_path)
+    _seed_memory(config.memory_dir, reflections="# Reflections\n## Identity\n- GOOD\n")
+    good = backup.create_snapshot(config, reason="manual")
+    assert good is not None
+    _tamper_manifest(good.path, mutate)
+
+    # Diverge live memory so we can prove it is NOT overwritten.
+    config.reflections_path.write_text("LIVE-UNTOUCHED\n")
+
+    with pytest.raises((ValueError, FileNotFoundError)):
+        backup.restore_snapshot(config, backup.resolve_snapshot(config, good.snapshot_id))
+
+    assert config.reflections_path.read_text() == "LIVE-UNTOUCHED\n"
+    assert not [s for s in backup.list_snapshots(config) if s.reason == "pre-restore"]

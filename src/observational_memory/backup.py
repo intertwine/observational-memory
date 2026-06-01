@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import uuid
@@ -42,6 +43,7 @@ SNAPSHOT_FORMAT_VERSION = 1
 
 _TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 _LOCK_TIMEOUT_SECONDS = 5.0
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # In-scope durable Markdown files: (Config attribute, manifest role).
 _MEMORY_FILES: tuple[tuple[str, str], ...] = (
@@ -161,7 +163,13 @@ def _in_scope_files(config: Config) -> list[tuple[Path, str]]:
     return found
 
 
-def create_snapshot(config: Config, reason: str, *, force: bool = False) -> SnapshotInfo | None:
+def create_snapshot(
+    config: Config,
+    reason: str,
+    *,
+    force: bool = False,
+    extra_keep: set[str] | None = None,
+) -> SnapshotInfo | None:
     """Copy current in-scope memory files into a new timestamped snapshot dir.
 
     Returns ``None`` when backups are disabled or there is nothing to snapshot
@@ -173,6 +181,11 @@ def create_snapshot(config: Config, reason: str, *, force: bool = False) -> Snap
     ``force=True`` ignores the ``OM_BACKUP_ENABLED`` toggle. It exists for
     one-shot destructive migrations (e.g. cluster init) whose pre-import safety
     backup must not be defeatable by a global backup/retention switch.
+
+    ``extra_keep`` snapshot ids are pinned during this call's retention pass, so
+    a tight ``OM_BACKUP_RETENTION_COUNT`` cannot prune them as a side effect
+    (e.g. the snapshot a restore is reading from must survive its own
+    pre-restore snapshot's retention).
     """
     if not config.backup_enabled and not force:
         return None
@@ -242,7 +255,7 @@ def create_snapshot(config: Config, reason: str, *, force: bool = False) -> Snap
             files=tuple(entry["path"] for entry in file_entries),  # type: ignore[misc]
             bytes_total=bytes_total,
         )
-        _apply_retention_locked(config, keep_id=snapshot_id)
+        _apply_retention_locked(config, keep_id=snapshot_id, extra_keep=extra_keep)
         return info
 
 
@@ -354,6 +367,19 @@ def restore_snapshot(
     if not entries:
         raise ValueError(f"Snapshot {snapshot.snapshot_id} lists no files to restore.")
 
+    # Fail closed on a manifest we cannot fully trust BEFORE planning any write:
+    # an unknown format version, a duplicate/unknown role, a name that does not
+    # match the role's expected basename (tamper / path-traversal guard), or a
+    # missing/invalid sha256 or byte count must abort with live memory untouched.
+    # Restoring "unchecked bytes" over durable memory would defeat the whole
+    # integrity contract.
+    version = manifest.get("format_version")
+    if version != SNAPSHOT_FORMAT_VERSION:
+        raise ValueError(
+            f"Snapshot {snapshot.snapshot_id} has unsupported format_version {version!r} "
+            f"(expected {SNAPSHOT_FORMAT_VERSION}); refusing to restore."
+        )
+
     role_to_attr = {role: attr for attr, role in _MEMORY_FILES}
 
     # Phase 1: read + verify every file before writing anything.
@@ -363,21 +389,44 @@ def restore_snapshot(
         name = entry.get("path")
         role = entry.get("role")
         expected_sha = entry.get("sha256")
-        if not name or role not in role_to_attr:
-            raise ValueError(f"Snapshot {snapshot.snapshot_id} has an unrecognized file entry: {entry!r}.")
+        expected_bytes = entry.get("bytes")
+        if role not in role_to_attr:
+            raise ValueError(f"Snapshot {snapshot.snapshot_id} has an unrecognized role: {role!r}.")
+        if role in restored_roles:
+            raise ValueError(f"Snapshot {snapshot.snapshot_id} lists role {role!r} more than once.")
+        target = getattr(config, role_to_attr[role])
+        # The stored name must be exactly the role's basename — never another
+        # file or a traversal path like '../x'.
+        if name != target.name:
+            raise ValueError(
+                f"Snapshot {snapshot.snapshot_id} maps role {role!r} to unexpected file "
+                f"{name!r} (expected {target.name!r})."
+            )
+        if not isinstance(expected_sha, str) or not _SHA256_RE.match(expected_sha):
+            raise ValueError(f"Snapshot {snapshot.snapshot_id} file {name} has no valid sha256; refusing to restore.")
         source = snapshot.path / name
         if not source.exists():
             raise FileNotFoundError(f"Snapshot {snapshot.snapshot_id} is missing {name}.")
         data = source.read_bytes()
         actual_sha = _sha256_bytes(data)
-        if expected_sha and actual_sha != expected_sha:
+        if actual_sha != expected_sha:
             raise ValueError(
                 f"Snapshot {snapshot.snapshot_id} file {name} failed integrity check "
                 f"(expected {expected_sha}, got {actual_sha})."
             )
-        target = getattr(config, role_to_attr[role])
+        # bool is an int subclass — exclude it explicitly so a stray True/False
+        # byte count cannot pass as valid.
+        if not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool):
+            raise ValueError(
+                f"Snapshot {snapshot.snapshot_id} file {name} has no valid byte count; refusing to restore."
+            )
+        if expected_bytes != len(data):
+            raise ValueError(
+                f"Snapshot {snapshot.snapshot_id} file {name} byte-count mismatch "
+                f"(manifest {expected_bytes}, actual {len(data)})."
+            )
         planned.append((target, data))
-        restored_roles.add(role)  # type: ignore[arg-type]
+        restored_roles.add(role)
 
     # Subset snapshots (taken before some files existed) must still produce a
     # consistent point-in-time, not a merge: any in-scope live file whose role is
@@ -399,7 +448,17 @@ def restore_snapshot(
 
     safety = None
     if make_safety_snapshot:
-        safety = create_snapshot(config, reason="pre-restore")
+        # force=True: the pre-restore safety snapshot is part of restore's
+        # atomicity, not the background backup feature — it must be taken even
+        # when OM_BACKUP_ENABLED=0, or a mid-restore failure has nothing to roll
+        # back to. extra_keep pins the snapshot we are restoring FROM so this
+        # snapshot's own retention pass cannot prune it (tight retention counts).
+        safety = create_snapshot(
+            config,
+            reason="pre-restore",
+            force=True,
+            extra_keep={snapshot.snapshot_id},
+        )
 
     # Phase 2: transactional across the whole file SET.
     #
@@ -488,12 +547,15 @@ def apply_retention(config: Config) -> list[SnapshotInfo]:
         return _apply_retention_locked(config, keep_id=None)
 
 
-def _apply_retention_locked(config: Config, *, keep_id: str | None) -> list[SnapshotInfo]:
+def _apply_retention_locked(
+    config: Config, *, keep_id: str | None, extra_keep: set[str] | None = None
+) -> list[SnapshotInfo]:
     """Retention body; assumes the backups-dir lock is already held.
 
     Applies the count cap first, then the age cap. Never deletes the newest
-    snapshot or the one just created. Best-effort: deletion failures are
-    swallowed (a stuck delete must not crash reflect)."""
+    snapshot, the one just created, or any explicitly pinned ``extra_keep`` id.
+    Best-effort: deletion failures are swallowed (a stuck delete must not crash
+    reflect)."""
     snapshots = list_snapshots(config)
     if not snapshots:
         return []
@@ -502,6 +564,8 @@ def _apply_retention_locked(config: Config, *, keep_id: str | None) -> list[Snap
     keep.add(snapshots[0].snapshot_id)  # never drop the newest
     if keep_id is not None:
         keep.add(keep_id)
+    if extra_keep:
+        keep.update(extra_keep)
 
     to_prune: list[SnapshotInfo] = []
 
