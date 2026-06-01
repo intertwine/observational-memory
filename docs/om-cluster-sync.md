@@ -124,6 +124,8 @@ om cluster redact --record sha256_...
 
 Reflection conflicts use snapshots, frontiers, and inline entry metadata. Snapshot entries use `last_seen` to prefer newer state. Entries marked `scope=local` are removed from shared cluster reflection snapshots and hidden when they arrive from another node.
 
+Shared cluster snapshots use a default-deny allowlist of shareable scopes (currently just `cluster`). An entry with no explicit scope, or with `scope=cluster`, is shared. An entry with any other explicit scope — `scope=local`, a typo, or a value a future team or org tier has not yet enabled — is withheld and never leaves the host. An unstamped hand-typed bullet keeps sharing (an absent scope rides along), while a hand-typed explicit-unknown scope stays withheld until it is corrected or re-stamped on the next reflect. The same allowlist governs the Moss cloud upload path, so a non-shareable entry is never uploaded as plaintext to the cloud.
+
 Non-snapshot conflicts are surfaced as review artifacts instead of being silently smoothed away. If policy, preference, identity, decision, mode, or high-actionability entries disagree across reflection snapshots, materialization writes:
 
 ```text

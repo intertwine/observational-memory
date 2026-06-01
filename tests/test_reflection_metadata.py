@@ -1,18 +1,96 @@
 from datetime import datetime, timezone
 
+import pytest
 from click.testing import CliRunner
 
 from observational_memory.cli import cli
 from observational_memory.config import Config
 from observational_memory.reflection_metadata import (
+    SHAREABLE_SCOPES,
+    _scope_is_shareable,
     ensure_reflection_metadata,
     ensure_section_provenance,
+    filter_reflection_document_for_shareout,
     filter_reflection_entries_for_cluster,
     filter_reflection_entries_for_host,
     find_reflection_conflicts,
     parse_metadata,
     prune_stale_snapshots,
 )
+
+# Table-driven share-out matrix (Gate 4): the block-level privacy rule, exercised
+# across every Markdown continuation shape that previously leaked one-by-one. Each
+# case names a private token that MUST NOT survive share-out and/or a shared token
+# that MUST. `S` = must be withheld; `K` = must ride along.
+_S = "ACMESECRETTOKEN"
+_K = "KEEPSHARED"
+_SHAREOUT_MATRIX = [
+    ("tight indented continuation", f"## P\n- secret <!--om: scope=local-->\n  {_S}\n", [_S], []),
+    ("lazy same-indent continuation", f"## P\n- secret <!--om: scope=local-->\n{_S}\n", [_S], []),
+    ("nested unscoped child bullet", f"## P\n- secret <!--om: scope=team-->\n  - {_S}\n", [_S], []),
+    ("deep nested unscoped child", f"## P\n- secret <!--om: scope=local-->\n  - a\n    - {_S}\n", [_S], []),
+    (
+        "loose prose after blank stays inside item",
+        f"## P\n- secret <!--om: scope=local-->\n\n  {_S} loose paragraph\n\n## Q\n- ok <!--om: scope=cluster-->\n",
+        [_S],
+        ["ok"],
+    ),
+    (
+        "loose child bullet after blank stays inside item",
+        f"## P\n- secret <!--om: scope=local-->\n\n  - {_S} loose child\n\n## Q\n- ok <!--om: scope=cluster-->\n",
+        [_S],
+        ["ok"],
+    ),
+    ("prose line carrying its own scope", f"## P\nprose {_S} <!--om: scope=local-->\n", [_S], []),
+    ("withheld entry at EOF with lazy tail", f"## P\n- secret <!--om: scope=org-->\ntail {_S}\n", [_S], []),
+    (
+        "explicitly scoped shareable child survives a withheld parent",
+        f"## P\n- secret <!--om: scope=local-->\n  - {_K} <!--om: scope=cluster-->\n",
+        [],
+        [_K],
+    ),
+    (
+        "explicitly scoped withheld child dropped under a shareable parent",
+        f"## P\n- {_K} <!--om: scope=cluster-->\n  - {_S} <!--om: scope=local-->\n",
+        [_S],
+        [_K],
+    ),
+    (
+        "blank releases UNINDENTED prose as independent/shared",
+        f"## P\n- secret <!--om: scope=local-->\n\n{_K} independent prose\n",
+        [],
+        [_K],
+    ),
+    (
+        "sibling shareable bullet after withheld bullet is kept",
+        f"## P\n- secret <!--om: scope=local-->\n- {_K} <!--om: scope=cluster-->\n",
+        [],
+        [_K],
+    ),
+    (
+        "shared bullet keeps its own tight continuation",
+        f"## P\n- {_K} bullet <!--om: scope=cluster-->\n  more {_K} detail\n",
+        [],
+        [_K],
+    ),
+    (
+        "heading boundary ends the withheld entry",
+        f"## P\n- secret {_S} <!--om: scope=local-->\n## Q\n- {_K} <!--om: scope=cluster-->\n",
+        [_S],
+        [_K],
+    ),
+]
+
+
+@pytest.mark.parametrize("name, doc, absent, present", _SHAREOUT_MATRIX, ids=[c[0] for c in _SHAREOUT_MATRIX])
+def test_shareout_block_matrix(name, doc, absent, present):
+    """Gate 4 block-level share-out matrix: no withheld token leaks, no shared token
+    is over-withheld, across every Markdown continuation/child/boundary shape."""
+    out = filter_reflection_document_for_shareout(doc)
+    for token in absent:
+        assert token not in out, f"{name}: withheld token leaked"
+    for token in present:
+        assert token in out, f"{name}: shared token over-withheld"
 
 
 def test_ensure_reflection_metadata_adds_and_preserves_fields():
@@ -275,3 +353,235 @@ def test_subsection_only_local_drops_subsection_title_and_stamp_for_cluster():
     assert "Secret Standalone" not in filtered
     assert "## Active Projects" in filtered
     assert filtered.count("<!--om-section:") == 1
+
+
+# --- Gate 4: pluggable share-out allowlist (default-deny, fail-closed) -------
+
+
+def test_scope_resolver_default_deny_unit():
+    """The pure resolver: absent rides along, only allowlist members share, every
+    explicit non-member (typo/hallucinated/future/empty) fails closed."""
+    assert _scope_is_shareable(None) is True
+    assert _scope_is_shareable("cluster") is True
+    assert _scope_is_shareable("local") is False
+    assert _scope_is_shareable("team") is False
+    assert _scope_is_shareable("org") is False
+    assert _scope_is_shareable("locol") is False
+    assert _scope_is_shareable("") is False
+
+
+def test_shareable_scopes_allowlist_ships_cluster_only():
+    """Mechanism-only tripwire: no inert team/org values may be added."""
+    assert SHAREABLE_SCOPES == frozenset({"cluster"})
+    assert "team" not in SHAREABLE_SCOPES
+    assert "org" not in SHAREABLE_SCOPES
+
+
+def test_explicit_unknown_scopes_withheld_from_cluster():
+    """Behavior delta: an explicit non-cluster scope no longer leaks; a sibling
+    scope=cluster bullet in the same section still shares."""
+    doc = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        "- Typo bullet <!--om: scope=locol-->\n"
+        "- Hallucinated bullet <!--om: scope=team-->\n"
+        "- Future bullet <!--om: scope=org-->\n"
+        "- Shared <!--om: scope=cluster-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "Typo bullet" not in filtered
+    assert "Hallucinated bullet" not in filtered
+    assert "Future bullet" not in filtered
+    assert "Shared" in filtered
+
+
+def test_absent_scope_structure_rides_along_for_cluster():
+    """Unstamped hand-typed bullets and all absent-scope structure (preamble,
+    *Last reflected:*, blanks, H2/H3 headings, <!--om-section:--> stamp) survive."""
+    doc = (
+        "# Reflections\n\n"
+        "*Last reflected: 2026-06-01*\n\n"
+        "## Active Projects\n"
+        "<!--om-section: last_reflected=2026-06-01 derived_from_obs_window=2026-05-30..2026-05-31-->\n"
+        "### Subsection\n"
+        "- Hand-typed unstamped bullet\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "Hand-typed unstamped bullet" in filtered
+    assert "# Reflections" in filtered
+    assert "*Last reflected: 2026-06-01*" in filtered
+    assert "## Active Projects" in filtered
+    assert "### Subsection" in filtered
+    assert "<!--om-section:" in filtered
+
+
+def test_explicit_unknown_only_section_is_pruned_for_cluster():
+    """Gate-3 composition holds for the new withhold: a section whose only bullet
+    is an explicit-unknown scope drops its heading and <!--om-section:--> stamp,
+    exactly as a wholly-local section does."""
+    doc = (
+        "# Reflections\n\n"
+        "## Team Secret\n"
+        "- Org roadmap <!--om: scope=team-->\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster-->\n"
+    )
+    stamped = ensure_section_provenance(doc, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    filtered = filter_reflection_entries_for_cluster(stamped)
+    assert "Team Secret" not in filtered
+    assert "Org roadmap" not in filtered
+    assert "## Shared" in filtered
+    assert filtered.count("<!--om-section:") == 1
+
+
+def test_withheld_bullet_continuation_line_does_not_leak_for_cluster():
+    """PR #86 re-review P1: a withheld bullet's indented continuation line carries
+    no <!--om: ...--> metadata, so a per-line filter let it ride along as
+    absent-scope content and leak. The share-out filter must drop the continuation
+    along with its bullet — and the now-empty section heading with it."""
+    doc = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        "- Team-only plan <!--om: scope=team node=laptop-->\n"
+        "  continuation naming Acme private cadence\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster node=laptop-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "continuation naming Acme private cadence" not in filtered
+    assert "Team-only plan" not in filtered
+    assert "Active Projects" not in filtered  # section emptied -> heading pruned
+    assert "Public fact" in filtered  # a shared bullet elsewhere is untouched
+
+
+def test_withheld_bullet_lazy_continuation_does_not_leak_for_cluster():
+    """PR #86 re-review P1 (lazy continuation): a same-indent absent-scope line
+    directly after a withheld bullet, with no blank/heading/list boundary, is a
+    CommonMark lazy continuation of that list item — it must be withheld too, not
+    kept as independent prose."""
+    doc = (
+        "# Reflections\n\n"
+        "## Private\n"
+        "- Secret plan <!--om: scope=local node=laptop-->\n"
+        "lazy continuation naming Acme private cadence\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster node=laptop-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "lazy continuation naming Acme private cadence" not in filtered
+    assert "Secret plan" not in filtered
+    assert "Private" not in filtered  # section emptied -> heading pruned
+    assert "Public fact" in filtered
+
+
+def test_withheld_bullet_nested_unscoped_child_does_not_leak_for_cluster():
+    """PR #86 re-review P1 (nested child): a nested UNSCOPED child list item under
+    a withheld parent is part of the parent item in Markdown, so it must be
+    withheld too — not treated as a sibling boundary and emitted."""
+    doc = (
+        "# Reflections\n\n"
+        "## Private\n"
+        "- Secret plan <!--om: scope=local node=laptop-->\n"
+        "  - nested Acme private cadence\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster node=laptop-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "nested Acme private cadence" not in filtered
+    assert "Secret plan" not in filtered
+    assert "Private" not in filtered
+    assert "Public fact" in filtered
+
+
+def test_explicitly_scoped_nested_child_is_judged_on_its_own_scope():
+    """A nested child that carries its OWN scope is judged on that scope, never
+    inheriting the withheld parent's: a scope=cluster child under a scope=local
+    parent is shared; a scope=local child under a scope=cluster parent is withheld."""
+    doc = (
+        "# Reflections\n\n"
+        "## A\n"
+        "- Parent secret <!--om: scope=local-->\n"
+        "  - Child public KEEPME <!--om: scope=cluster-->\n"
+        "## B\n"
+        "- Parent public <!--om: scope=cluster-->\n"
+        "  - Child secret DROPME <!--om: scope=local-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "KEEPME" in filtered
+    assert "Parent secret" not in filtered
+    assert "DROPME" not in filtered
+    assert "Parent public" in filtered
+
+
+def test_blank_line_releases_independent_prose_for_cluster():
+    """PR #86 re-review P2: a blank line is a hard block boundary. Absent-scope
+    prose AFTER a blank is an independent block and rides along (shared) — the
+    withheld entry must not swallow it."""
+    doc = (
+        "# Reflections\n\n"
+        "## Notes\n"
+        "- Secret plan <!--om: scope=local-->\n\n"
+        "Independent shared prose that follows a blank line.\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "Secret plan" not in filtered
+    assert "Independent shared prose that follows a blank line." in filtered
+
+
+def test_shared_bullet_continuation_line_is_preserved_for_cluster():
+    """Parity guard: a SHARED bullet's continuation must still ride along, so the
+    continuation-aware filter only withholds continuations of WITHHELD bullets."""
+    doc = (
+        "# Reflections\n\n"
+        "## Shared\n"
+        "- Public plan <!--om: scope=cluster node=laptop-->\n"
+        "  continuation with more public detail\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "Public plan" in filtered
+    assert "continuation with more public detail" in filtered
+
+
+def test_realistic_corpus_byte_identical_to_pre_gate4():
+    """Default-preserving: for a real corpus of only {cluster, local, absent},
+    the generalized filter is byte-for-byte the OLD `!= local` behavior."""
+    raw = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        "- Ship voice feature\n"
+        "- Private spike <!--om: scope=local node=laptop-->\n"
+        "## Preferences & Opinions\n"
+        "- Prefers concise handoffs\n"
+    )
+    stamped = ensure_section_provenance(
+        ensure_reflection_metadata(raw, now=_NOW, node="laptop"),
+        obs_window=("2026-05-30", "2026-05-31"),
+        now=_NOW,
+    )
+    # Reconstruct the pre-Gate-4 behavior inline: keep iff scope != "local",
+    # then the unchanged Gate-3 pruning + reassembly.
+    from observational_memory.reflection_metadata import _drop_empty_heading_sections
+
+    old_kept = [line for line in stamped.splitlines() if parse_metadata(line).get("scope") != "local"]
+    old_expected = "\n".join(_drop_empty_heading_sections(old_kept)).rstrip() + "\n"
+    assert filter_reflection_entries_for_cluster(stamped) == old_expected
+
+
+def test_self_heal_asymmetry_explicit_unknown_stays_withheld_absent_heals():
+    """Guards the documented Gate-4 safety claim (reflection_metadata.py docstring +
+    docs/om-cluster-sync.md): `ensure_reflection_metadata` uses setdefault, so an
+    explicit-unknown scope (typo) is NOT rewritten and stays WITHHELD across reflects,
+    while an absent-scope bullet self-heals to scope=cluster and resumes SHARING. If a
+    future change flips setdefault->unconditional assignment, the typo would be silently
+    re-stamped scope=cluster and leak off-host — this test must fail loudly first."""
+    doc = "# Reflections\n\n## Active Projects\n- Typo bullet <!--om: scope=locol-->\n- Hand bullet\n"
+    out = ensure_reflection_metadata(doc, now=_NOW, node="laptop")
+    lines = out.splitlines()
+    typo_line = next(line for line in lines if line.lstrip().startswith("- Typo bullet"))
+    hand_line = next(line for line in lines if line.lstrip().startswith("- Hand bullet"))
+    # (a) setdefault did NOT overwrite the explicit typo; it stays withheld.
+    assert parse_metadata(typo_line).get("scope") == "locol"
+    assert "Typo bullet" not in filter_reflection_entries_for_cluster(out)
+    # (b) the unstamped bullet self-healed to scope=cluster and now shares.
+    assert parse_metadata(hand_line).get("scope") == "cluster"
+    assert "Hand bullet" in filter_reflection_entries_for_cluster(out)
