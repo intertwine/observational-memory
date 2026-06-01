@@ -97,18 +97,25 @@ class _AsyncLoop:
 
 
 def _strip_local_lines(content: str) -> str:
-    """Drop ``scope=local`` lines from a section before upload.
+    """Drop ``scope=local`` content from a section before upload.
 
-    Line-based, matching ``filter_reflection_entries_for_cluster`` exactly, so a
+    Matches ``filter_reflection_entries_for_cluster`` exactly so the cloud-upload
+    leak rule has a SINGLE source of truth and the two paths cannot drift: a
     section that mixes shared and host-local entries still contributes its shared
-    entries to the cloud index (rather than being dropped wholesale) while local
-    entries never leave the host.
+    entries to the cloud index, while local entries never leave the host.
+
+    LEAK-CRITICAL: after dropping local bullet lines this also prunes any now-empty
+    heading block at ANY level via ``_drop_empty_heading_sections`` — so a private
+    H3/H4 subsection whose every bullet was ``scope=local`` does NOT leak its title
+    into the uploaded text just because some *other* subsection of the same H2 is
+    shared (PR #85 re-review P1). A line-only strip left such titles behind.
     """
     try:
-        from ..reflection_metadata import parse_metadata
+        from ..reflection_metadata import _drop_empty_heading_sections, parse_metadata
     except Exception:  # pragma: no cover - defensive
         return content
     kept = [line for line in content.splitlines() if parse_metadata(line).get("scope") != "local"]
+    kept = _drop_empty_heading_sections(kept)
     return "\n".join(kept)
 
 

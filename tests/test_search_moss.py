@@ -255,6 +255,43 @@ def test_mixed_scope_section_uploads_shared_lines_only(fake_moss):
         backend.close()
 
 
+def test_mixed_section_local_subsection_title_not_uploaded(fake_moss):
+    """PR #85 re-review P1: in a mixed H2 with a shared subsection plus a
+    subsection whose every bullet is scope=local, the upload text must contain the
+    shared content but NOT the private subsection's title. A line-only strip left
+    the orphan `### Secret Alpha Cadence` heading in the cloud upload."""
+    backend = _backend()
+    try:
+        backend.index(
+            [
+                Document(
+                    doc_id="ref:active-projects",
+                    source=DocumentSource.REFLECTIONS,
+                    heading="## Active Projects",
+                    content=(
+                        "## Active Projects\n"
+                        "<!--om-section: last_reflected=2026-06-01 derived_from_obs_window=2026-05-30..2026-05-31-->\n"
+                        "### Public Initiative\n"
+                        "- Ship the docs <!--om: scope=cluster node=laptop-->\n"
+                        "### Secret Alpha Cadence\n"
+                        "- Weekly sync with Acme <!--om: scope=local node=laptop-->\n"
+                    ),
+                )
+            ]
+        )
+        client = _FakeMossClient.instances[-1]
+        uploaded = {d.id: d.text for d in client.indexes["om-test"]}
+        assert "ref:active-projects" in uploaded
+        text = uploaded["ref:active-projects"]
+        assert "Public Initiative" in text
+        assert "Ship the docs" in text
+        # The private subsection title and its bullet must not reach the cloud.
+        assert "Secret Alpha Cadence" not in text
+        assert "Weekly sync with Acme" not in text
+    finally:
+        backend.close()
+
+
 def test_close_is_final_no_resurrection(fake_moss):
     backend = _backend()
     backend.index(_docs())
