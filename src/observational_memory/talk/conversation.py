@@ -15,15 +15,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 
-from .recall import RecallEngine, RecallResult, RecallSnippet
+from .recall import RecallEngine, RecallResult, RecallSnippet, RecallStatus
 
 _LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_MAX_HISTORY_TURNS = 6
 _DEFAULT_RECALL_LIMIT = 5
-_DEFAULT_RECALL_TIMEOUT = 8.0
 _DEFAULT_PROFILE_BUDGET_CHARS = 4000
 _REPLY_MAX_TOKENS = 700
 
@@ -47,6 +47,7 @@ class ConversationTurn:
     assistant: str
     recalled: list[RecallSnippet] = field(default_factory=list)
     grounded: bool = False
+    recall_status: str = RecallStatus.OK.value
     error: str | None = None
 
 
@@ -87,7 +88,7 @@ class Conversation:
         agent: str | None = None,
         max_history_turns: int = _DEFAULT_MAX_HISTORY_TURNS,
         recall_limit: int = _DEFAULT_RECALL_LIMIT,
-        recall_timeout: float = _DEFAULT_RECALL_TIMEOUT,
+        recall_timeout: float | None = None,
         compress: CompressFn | None = None,
     ) -> None:
         self._config = config
@@ -95,7 +96,9 @@ class Conversation:
         self._agent = agent
         self._max_history_turns = max_history_turns
         self._recall_limit = recall_limit
-        self._recall_timeout = recall_timeout
+        # Single source of truth for the per-turn recall budget: the config default
+        # (OM_TALK_RECALL_TIMEOUT, fail-closed to 8.0) when not explicitly passed.
+        self._recall_timeout = recall_timeout if recall_timeout is not None else config.talk_recall_timeout
         self._compress = compress or _default_compress
         self._history: list[ConversationTurn] = []
         self._profile_context = ""
@@ -140,6 +143,7 @@ class Conversation:
             assistant=text,
             recalled=list(recall_result.snippets),
             grounded=recall_result.grounded,
+            recall_status=recall_result.status.value,
             error=error,
         )
         self._record(turn)
@@ -152,14 +156,41 @@ class Conversation:
 
     def _recall_for(self, utterance: str) -> RecallResult:
         if not utterance:
-            return RecallResult(query=utterance, backend_ready=self._recall.is_ready())
-        future = self._recall.recall_async(utterance, self._recall_limit)
+            ready = self._recall.is_ready()
+            return RecallResult(
+                query=utterance,
+                backend_ready=ready,
+                status=RecallStatus.EMPTY if ready else RecallStatus.UNAVAILABLE,
+            )
+        # A prior recall that overran its budget keeps running on its background
+        # thread (a running recall can't be cancelled). Don't spawn behind it —
+        # that would falsely report TIMEOUT on a turn that never even ran. Classify
+        # as UNAVAILABLE (recall couldn't run this turn), distinct from a real timeout.
+        if self._recall.has_pending_recall():
+            _LOGGER.debug("prior recall still running; skipping recall for this turn")
+            return RecallResult(query=utterance, backend_ready=True, status=RecallStatus.UNAVAILABLE)
+
+        try:
+            future = self._recall.recall_async(utterance, self._recall_limit)
+        except Exception as exc:  # e.g. executor already shut down — degrade, don't crash reply()
+            _LOGGER.debug("could not submit background recall: %s", exc)
+            return RecallResult(query=utterance, backend_ready=True, status=RecallStatus.UNAVAILABLE)
+
         try:
             return future.result(timeout=self._recall_timeout)
-        except Exception as exc:
-            _LOGGER.debug("background recall did not complete in time: %s", exc)
+        except FutureTimeoutError:
             future.cancel()
-            return RecallResult(query=utterance, backend_ready=True)
+            # The recall thread was running but did not finish in our budget. This is
+            # NOT "no memory found" — surface it as a timeout so the LLM and the
+            # transcript can tell the difference.
+            return RecallResult(query=utterance, backend_ready=True, status=RecallStatus.TIMEOUT)
+        except Exception as exc:
+            # recall() never raises today, so result() can only surface a timeout or
+            # a cancellation. If it ever resolves to an exception, that's an abnormal
+            # finish, not a timeout — report UNAVAILABLE rather than a false TIMEOUT.
+            _LOGGER.debug("background recall finished abnormally: %s", exc)
+            future.cancel()
+            return RecallResult(query=utterance, backend_ready=True, status=RecallStatus.UNAVAILABLE)
 
     def _system_prompt(self) -> str:
         if self._profile_context:
@@ -174,10 +205,21 @@ class Conversation:
             for i, snippet in enumerate(recall_result.snippets, start=1):
                 label = snippet.heading or snippet.doc_id or f"memory {i}"
                 parts.append(f"[{i}] {label} (source: {snippet.source})\n{snippet.content}")
-        elif recall_result.backend_ready:
-            parts.append("RECALLED MEMORY: (no relevant memory found for this turn)")
-        else:
+        # No snippets — say *why*, so the model does not claim the memory is empty
+        # when in fact recall never completed or the backend was down.
+        elif recall_result.status is RecallStatus.TIMEOUT:
+            parts.append(
+                "RECALLED MEMORY: (memory search did not finish in time for this turn; "
+                "do not assume memory is empty — say you couldn't check just now)"
+            )
+        elif recall_result.status is RecallStatus.UNAVAILABLE:
+            # Intentional asymmetry with TIMEOUT above: a transient timeout asks Om to
+            # say it couldn't check (the user can retry / raise the budget); a hard-down
+            # or unindexed backend just answers conversationally, since the user can't
+            # fix it mid-conversation. Documented in docs/talk-to-memories.md.
             parts.append("RECALLED MEMORY: (memory search is unavailable; answer conversationally)")
+        else:  # RecallStatus.EMPTY
+            parts.append("RECALLED MEMORY: (no relevant memory found for this turn)")
 
         history = self._recent_history()
         if history:

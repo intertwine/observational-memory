@@ -79,6 +79,7 @@ def test_talk_json_transcript(monkeypatch, tmp_path):
     assert len(payload["turns"]) == 1
     assert payload["turns"][0]["user"] == "hello"
     assert payload["turns"][0]["grounded"] is True
+    assert payload["turns"][0]["recall_status"] == "ok"
     assert payload["turns"][0]["recalled"][0]["doc_id"] == "ref:active-projects"
 
 
@@ -106,6 +107,34 @@ def test_talk_ungrounded_when_backend_unavailable(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert "unavailable" in result.output
     payload = json.loads(result.stdout)
+    assert payload["turns"][0]["grounded"] is False
+    assert payload["turns"][0]["recall_status"] == "unavailable"
+
+
+def test_talk_timeout_status_surfaced(monkeypatch, tmp_path):
+    # A recall that never finishes within OM_TALK_RECALL_TIMEOUT must surface as
+    # recall_status="timeout" in --json and print the timeout hint on stderr —
+    # distinct from "empty". Forces a deterministic timeout via an unresolved Future.
+    from concurrent.futures import Future
+
+    _set_base_env(monkeypatch, tmp_path)
+    _install_fakes(monkeypatch, ready=True)
+    monkeypatch.setenv("OM_TALK_RECALL_TIMEOUT", "0.05")
+
+    monkeypatch.setattr(
+        "observational_memory.talk.recall.RecallEngine.recall_async",
+        lambda self, query, limit=5: Future(),  # never set_result → result(timeout) raises
+    )
+    monkeypatch.setattr(
+        "observational_memory.talk.recall.RecallEngine.has_pending_recall",
+        lambda self: False,
+    )
+
+    result = CliRunner().invoke(cli, ["talk", "--json", "--query", "hello"], input="")
+    assert result.exit_code == 0, result.output
+    assert "memory search timed out this turn" in result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["turns"][0]["recall_status"] == "timeout"
     assert payload["turns"][0]["grounded"] is False
 
 

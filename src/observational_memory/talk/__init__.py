@@ -9,7 +9,7 @@ a pluggable transport; the default `TextTransport` works everywhere and headless
 from __future__ import annotations
 
 from .conversation import Conversation, ConversationTurn
-from .recall import RecallEngine, RecallResult, RecallSnippet
+from .recall import RecallEngine, RecallResult, RecallSnippet, RecallStatus
 from .transport import TextTransport, VoiceTransport
 
 __all__ = [
@@ -18,6 +18,7 @@ __all__ = [
     "RecallEngine",
     "RecallResult",
     "RecallSnippet",
+    "RecallStatus",
     "TextTransport",
     "VoiceTransport",
 ]
