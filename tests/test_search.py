@@ -140,6 +140,85 @@ class TestParseReflections:
     def test_missing_file(self, tmp_path):
         assert parse_reflections(tmp_path / "missing.md") == []
 
+    def test_typed_fields_default_none_without_inline_metadata(self, tmp_path):
+        ref_file = tmp_path / "reflections.md"
+        ref_file.write_text(SAMPLE_REFLECTIONS)
+        docs = parse_reflections(ref_file)
+        # A corpus with no inline om-metadata is default-preserving.
+        for doc in docs:
+            assert doc.owner is None
+            assert doc.scope is None
+            assert doc.source_type is None
+
+    def test_observation_documents_have_none_typed_fields(self, tmp_path):
+        obs_file = tmp_path / "observations.md"
+        obs_file.write_text(SAMPLE_OBSERVATIONS)
+        for doc in parse_observations(obs_file):
+            assert doc.owner is None
+            assert doc.scope is None
+            assert doc.source_type is None
+
+    def test_reduces_section_scope_most_restrictive(self, tmp_path):
+        ref_file = tmp_path / "reflections.md"
+        ref_file.write_text(
+            "# Reflections\n\n"
+            "## Mixed\n"
+            "- Shared <!--om: node=laptop source_type=stated scope=cluster-->\n"
+            "- Secret <!--om: node=phone source_type=inferred scope=local-->\n\n"
+            "## MixedRev\n"
+            "- Secret <!--om: node=phone source_type=inferred scope=local-->\n"
+            "- Shared <!--om: node=laptop source_type=stated scope=cluster-->\n\n"
+            "## AllCluster\n"
+            "- One <!--om: node=laptop source_type=stated scope=cluster-->\n"
+            "- Two <!--om: node=laptop source_type=stated scope=cluster-->\n"
+        )
+        by_id = {doc.doc_id: doc for doc in parse_reflections(ref_file)}
+        # Mixed: any local -> local; owners/source_types disagree -> None.
+        mixed = by_id["ref:mixed"]
+        assert mixed.scope == "local"
+        assert mixed.owner is None
+        assert mixed.source_type is None
+        # MixedRev: local bullet FIRST, cluster last — most-restrictive still wins
+        # regardless of order (pins the invariant against a 'last-scope-wins' bug).
+        mixed_rev = by_id["ref:mixedrev"]
+        assert mixed_rev.scope == "local"
+        # AllCluster: homogeneous -> set.
+        homog = by_id["ref:allcluster"]
+        assert homog.scope == "cluster"
+        assert homog.owner == "laptop"
+        assert homog.source_type == "stated"
+
+    def test_derive_section_provenance_fails_closed_on_garbage(self):
+        from observational_memory.search.parser import derive_section_provenance
+
+        # Garbage metadata and a section with no metadata both yield all-None and
+        # never raise (the documented fail-closed contract).
+        assert derive_section_provenance("## H\n- broken <!--om: =broken= -->\n") == (
+            None,
+            None,
+            None,
+        )
+        assert derive_section_provenance("## H\n- plain bullet, no metadata\n") == (
+            None,
+            None,
+            None,
+        )
+
+    def test_derive_section_provenance_fail_closed_when_parse_raises(self, monkeypatch):
+        import observational_memory.reflection_metadata as rm
+        from observational_memory.search.parser import derive_section_provenance
+
+        def boom(_line):
+            raise ValueError("parse exploded")
+
+        monkeypatch.setattr(rm, "parse_metadata", boom)
+        # The except arm returns all-None rather than propagating.
+        assert derive_section_provenance("## H\n- x <!--om: scope=local-->\n") == (
+            None,
+            None,
+            None,
+        )
+
 
 # --- BM25 Backend Tests ---
 

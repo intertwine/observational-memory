@@ -10,8 +10,11 @@ never silently drop, reorder, or mangle an unrelated section.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
+from observational_memory.reflection_metadata import ensure_section_provenance
 from observational_memory.reflection_sections import (
     parse_reflection_document,
     reassemble_document,
@@ -529,3 +532,36 @@ def test_end_addition_after_single_newline_section_is_separated() -> None:
     result = reassemble_document(parsed, additions=[("", "## Appended\n\n- end\n")])
     assert "- Alex\n\n## Appended" in result
     assert "- Alex\n## Appended" not in result
+
+
+# ---------------------------------------------------------------------------
+# Gate 3: a section-level provenance stamp must not break byte-faithful
+# reassembly or perturb section/subsection handles.
+# ---------------------------------------------------------------------------
+
+_GATE3_NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+def test_round_trip_byte_identical_with_section_stamp() -> None:
+    """A stamped document still parses and reassembles byte-for-byte; the
+    `<!--om-section:` line never creates an H2 boundary and rides reassembly."""
+    stamped = ensure_section_provenance(_FULL, obs_window=("2026-04-28", "2026-05-01"), now=_GATE3_NOW)
+    parsed = parse_reflection_document(stamped)
+    assert parsed.render() == stamped
+    assert reassemble_document(parsed) == stamped
+    # The stamp did not invent extra sections.
+    assert len(parsed.sections) == len(parse_reflection_document(_FULL).sections)
+
+
+def test_section_handles_unchanged_by_stamp() -> None:
+    """Slugs/handles for a stamped doc equal those for the unstamped doc."""
+    unstamped = parse_reflection_document(_FULL)
+    stamped = parse_reflection_document(
+        ensure_section_provenance(_FULL, obs_window=("2026-04-28", "2026-05-01"), now=_GATE3_NOW)
+    )
+    assert stamped.handles() == unstamped.handles()
+    # Subsection handles are also unaffected (stamp is H2-only).
+    active_before = unstamped.section_by_handle("ref:active-projects")
+    active_after = stamped.section_by_handle("ref:active-projects")
+    assert active_before is not None and active_after is not None
+    assert [s.handle for s in active_after.subsections] == [s.handle for s in active_before.subsections]

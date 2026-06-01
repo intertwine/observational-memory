@@ -90,6 +90,35 @@ def test_cluster_reflector_writes_snapshot(mock_observe_compress, mock_reflect_c
 
 @patch("observational_memory.reflect.compress")
 @patch("observational_memory.observe.compress")
+def test_cluster_reflector_stamps_section_provenance_and_does_not_leak(
+    mock_observe_compress, mock_reflect_compress, tmp_path
+):
+    # Gate 3: the cluster reflect path persists through its own append_record,
+    # not finalize_reflection, so the section stamp must reach the cluster
+    # snapshot too. The stamp carries NO scope key, so
+    # filter_reflection_entries_for_cluster (applied at append time) keeps every
+    # `## ` heading and every `<!--om-section:` marker (no heading dropped).
+    mock_observe_compress.return_value = "# Observations\n\n## 2026-05-08\n\n- reflect me"
+    mock_reflect_compress.return_value = (
+        "# Reflections\n\n## Core Identity\n- Reflected\n\n## Active Projects\n- A project\n"
+    )
+    config = _init_cluster(tmp_path)
+    run_observer(_messages(), config, dry_run=False)
+
+    run_reflector(config, dry_run=False)
+
+    store = ClusterStore.from_config(config)
+    snapshots = store.list_records(kind="reflection_snapshot")
+    assert len(snapshots) == 1
+    body = str(store.read_payload(snapshots[0]).get("body") or "")
+    # Every H2 heading survives AND carries a section stamp in the snapshot.
+    assert body.count("<!--om-section:") == 2
+    assert "## Core Identity" in body
+    assert "## Active Projects" in body
+
+
+@patch("observational_memory.reflect.compress")
+@patch("observational_memory.observe.compress")
 def test_cluster_reflector_stays_legacy_even_under_sectioned_strategy(
     mock_observe_compress, mock_reflect_compress, tmp_path, monkeypatch
 ):

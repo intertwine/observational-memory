@@ -97,26 +97,42 @@ class _AsyncLoop:
 
 
 def _strip_local_lines(content: str) -> str:
-    """Drop ``scope=local`` lines from a section before upload.
+    """Drop ``scope=local`` content from a section before upload.
 
-    Line-based, matching ``filter_reflection_entries_for_cluster`` exactly, so a
+    Matches ``filter_reflection_entries_for_cluster`` exactly so the cloud-upload
+    leak rule has a SINGLE source of truth and the two paths cannot drift: a
     section that mixes shared and host-local entries still contributes its shared
-    entries to the cloud index (rather than being dropped wholesale) while local
-    entries never leave the host.
+    entries to the cloud index, while local entries never leave the host.
+
+    LEAK-CRITICAL: after dropping local bullet lines this also prunes any now-empty
+    heading block at ANY level via ``_drop_empty_heading_sections`` — so a private
+    H3/H4 subsection whose every bullet was ``scope=local`` does NOT leak its title
+    into the uploaded text just because some *other* subsection of the same H2 is
+    shared (PR #85 re-review P1). A line-only strip left such titles behind.
     """
     try:
-        from ..reflection_metadata import parse_metadata
+        from ..reflection_metadata import _drop_empty_heading_sections, parse_metadata
     except Exception:  # pragma: no cover - defensive
         return content
     kept = [line for line in content.splitlines() if parse_metadata(line).get("scope") != "local"]
+    kept = _drop_empty_heading_sections(kept)
     return "\n".join(kept)
 
 
 def _has_indexable_body(content: str) -> bool:
-    """True if a section has any non-heading, non-blank line worth uploading."""
+    """True if a section has any non-heading, non-blank line worth uploading.
+
+    LEAK-CRITICAL: an HTML-comment line (e.g. the Gate 3
+    ``<!--om-section: ...-->`` provenance stamp) is NOT real body. A section
+    whose every bullet was ``scope=local`` strips down to just its heading plus
+    the stamp; without skipping comment lines the stamp would make the section
+    look indexable and leak the heading + cadence to the cloud. Treat any
+    ``<!--`` line as empty so such a section is still withheld, exactly as it was
+    pre-stamp.
+    """
     for line in content.splitlines():
         stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
+        if stripped and not stripped.startswith("#") and not stripped.startswith("<!--"):
             return True
     return False
 
@@ -309,6 +325,16 @@ class MossBackend:
             value = doc.metadata.get(key)
             if value is not None:
                 meta[key] = str(value)
+        # Gate 3 typed provenance: encode owner/source_type ONLY, never `scope`.
+        # LEAK-CRITICAL: `_encode_metadata` writes a cloud flat-string map that
+        # bypasses the per-line `_strip_local_lines` gate, so a `scope` value here
+        # could re-reveal that a section carried local material. owner/source_type
+        # are safe because the uploadable Document is `_with_content(doc, stripped)`
+        # and these fields are RE-DERIVED there from the local-stripped content.
+        if doc.source_type:
+            meta["source_type"] = doc.source_type
+        if doc.owner:
+            meta["owner"] = doc.owner
         return meta
 
     def _map_results(self, result: object) -> list[SearchResult]:
@@ -319,6 +345,11 @@ class MossBackend:
             metadata = _restore_metadata_types(dict(getattr(hit, "metadata", None) or {}))
             heading = str(metadata.get("heading") or "")
             date = metadata.get("date")
+            # Gate 3 typed provenance: pop owner/source_type OUT of the metadata
+            # dict so the typed fields are their single home and the metadata dict
+            # matches the parser/bm25/qmd shape (which never carries these keys).
+            source_type = metadata.pop("source_type", None)
+            owner = metadata.pop("owner", None)
             out.append(
                 SearchResult(
                     document=Document(
@@ -328,6 +359,10 @@ class MossBackend:
                         content=str(getattr(hit, "text", "") or ""),
                         date=date if isinstance(date, str) else None,
                         metadata=metadata,
+                        # scope is never encoded to the cloud, so it comes back
+                        # None on read (correct and default-preserving).
+                        owner=owner if isinstance(owner, str) else None,
+                        source_type=source_type if isinstance(source_type, str) else None,
                     ),
                     score=float(getattr(hit, "score", 0.0) or 0.0),
                     rank=rank,
@@ -337,7 +372,17 @@ class MossBackend:
 
 
 def _with_content(doc: Document, content: str) -> Document:
-    """A copy of *doc* with replaced content (used after stripping local lines)."""
+    """A copy of *doc* with replaced content (used after stripping local lines).
+
+    The typed provenance fields are RE-DERIVED from the local-stripped *content*,
+    not copied from the pre-strip Document. This is adversarially leak-safe: an
+    owner/source_type tied to a stripped-out local fact never reaches the cloud
+    map encoded by ``_encode_metadata``. Without this re-derivation the new
+    dataclass fields would reset to their defaults on the uploadable copy.
+    """
+    from .parser import derive_section_provenance
+
+    owner, scope, source_type = derive_section_provenance(content)
     return Document(
         doc_id=doc.doc_id,
         source=doc.source,
@@ -345,6 +390,9 @@ def _with_content(doc: Document, content: str) -> Document:
         content=content,
         date=doc.date,
         metadata=doc.metadata,
+        owner=owner,
+        scope=scope,
+        source_type=source_type,
     )
 
 

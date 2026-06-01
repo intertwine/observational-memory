@@ -21,7 +21,10 @@ _ROUTE_MATCH_BOOST = 6
 # Operational facts (tool versions, install status) older than this many days are
 # annotated as potentially stale in startup context (OM_STARTUP_FRESHNESS_DAYS).
 DEFAULT_STARTUP_FRESHNESS_DAYS = 14
-_OM_METADATA_COMMENT_RE = re.compile(r"\s*<!--om:.*?-->")
+# Matches both the per-bullet `<!--om: ...-->` metadata and the Gate 3
+# section-level `<!--om-section: ...-->` provenance stamp so neither leaks into
+# om context / recall content.
+_OM_METADATA_COMMENT_RE = re.compile(r"\s*<!--om(?:-section)?:.*?-->")
 # Capture an ISO timestamp value, ending on a digit so the trailing "-->" of the
 # metadata comment is never swallowed.
 _LAST_SEEN_RE = re.compile(r"last_seen=(\d{4}-\d{2}-\d{2}(?:[T ][\d:.+\-]*\d)?)")

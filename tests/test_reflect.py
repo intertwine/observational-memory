@@ -10,7 +10,9 @@ from observational_memory.config import Config
 from observational_memory.reflect import (
     _cap_reflector_output,
     _chunk_observations,
+    _compute_obs_window,
     _extract_latest_observation_date,
+    _extract_observation_date_range,
     _filter_new_observations,
     _parse_last_reflected,
     _parse_last_updated,
@@ -20,6 +22,7 @@ from observational_memory.reflect import (
     reflector_catchup_needed,
     run_reflector,
 )
+from observational_memory.reflection_metadata import parse_metadata
 
 
 class TestRunReflector:
@@ -734,3 +737,67 @@ class TestSectionedOutputExemptFromCap:
         # The output cap never fired on the reassembled document.
         assert "OM_REFLECTOR_OUTPUT_MAX_CHARS" not in result
         assert not any("OM_REFLECTOR_OUTPUT_MAX_CHARS" in r.message for r in caplog.records)
+
+
+class TestExtractObservationDateRange:
+    def test_min_max_over_date_headers(self):
+        obs = "# Observations\n\n## 2026-05-28\n- a\n\n## 2026-05-31\n- b\n\n## 2026-05-30\n- c\n"
+        assert _extract_observation_date_range(obs) == ("2026-05-28", "2026-05-31")
+
+    def test_none_when_no_dates(self):
+        assert _extract_observation_date_range("# Observations\n\nno dates here\n") is None
+
+    def test_single_day_range(self):
+        assert _extract_observation_date_range("## 2026-05-31\n- a\n") == ("2026-05-31", "2026-05-31")
+
+
+class TestComputeObsWindow:
+    def test_window_is_new_obs_subset_not_whole_file(self):
+        prior = "# Reflections\n\n*Last reflected: 2026-05-29*\n\n## X\n- y\n"
+        raw = "# Observations\n\n## 2026-05-27\n- old\n\n## 2026-05-29\n- same day\n\n## 2026-05-31\n- new\n"
+        # Only observations >= 2026-05-29 were folded this run.
+        assert _compute_obs_window(prior, raw) == ("2026-05-29", "2026-05-31")
+
+    def test_no_prior_reflected_uses_all_dated_obs(self):
+        prior = "# Reflections\n\n## X\n- y\n"  # no Last reflected line
+        raw = "# Observations\n\n## 2026-05-28\n- a\n\n## 2026-05-31\n- b\n"
+        assert _compute_obs_window(prior, raw) == ("2026-05-28", "2026-05-31")
+
+    def test_no_dated_obs_returns_none(self):
+        assert _compute_obs_window("", "# Observations\n\nno dates\n") is None
+
+    def test_none_when_new_slice_empty(self):
+        # Prior reflected is past every observation -> no observation was folded
+        # this run (e.g. an auto-memory-only reflect). Returning a window over the
+        # latest historical date would be a FALSE provenance claim, so the honest,
+        # rot-proof result is None and the caller omits derived_from_obs_window.
+        prior = "# Reflections\n\n*Last reflected: 2026-06-10*\n\n## X\n- y\n"
+        raw = "# Observations\n\n## 2026-05-31\n- a\n"
+        assert _compute_obs_window(prior, raw) is None
+
+
+class TestFinalizeStampsSectionProvenance:
+    @patch("observational_memory.reflect.compress")
+    def test_finalize_stamps_section_provenance_after_real_reflect(self, mock_compress, tmp_path):
+        mock_compress.return_value = (
+            "# Reflections\n\n*Last updated: 2026-05-31 00:00 UTC*\n\n## Core Identity\n- Name: Test"
+        )
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.reflections_path.write_text(
+            "# Reflections\n\n*Last reflected: 2026-05-29*\n\n## Core Identity\n- Name: Test\n"
+        )
+        config.observations_path.write_text(
+            "# Observations\n\n## 2026-05-27\n- 🔴 old\n\n## 2026-05-30\n- 🔴 mid\n\n## 2026-05-31\n- 🔴 new\n"
+        )
+        result = run_reflector(config, dry_run=True)
+        # Doc-level last reflected matches the latest observation.
+        assert "*Last reflected: 2026-05-31*" in result
+        marker = next(line for line in result.splitlines() if line.lstrip().startswith("<!--om-section:"))
+        # Per-section last_reflected == today's UTC date (now), window == NEW slice.
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert f"last_reflected={today}" in marker
+        # The consumed window is the new-obs subset (>= prior 2026-05-29), not 2026-05-27.
+        assert "derived_from_obs_window=2026-05-30..2026-05-31" in marker
+        # The section marker is invisible to the per-bullet pass.
+        assert parse_metadata(marker) == {}

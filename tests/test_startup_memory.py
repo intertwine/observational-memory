@@ -194,3 +194,20 @@ def test_profile_identity_can_be_disabled_with_env(tmp_path, monkeypatch):
     profile = config.profile_path.read_text()
     assert "## Core Identity" not in profile
     assert "## Preferences & Opinions" in profile
+
+
+def test_strip_om_metadata_removes_section_provenance_stamp():
+    """Gate 3: the section-level `<!--om-section:` provenance stamp must be
+    stripped from startup context (om context) / recall content, exactly like the
+    per-bullet `<!--om:` metadata — it must never surface as a raw HTML comment."""
+    from observational_memory.startup_memory import _strip_om_metadata
+
+    text = (
+        "## Core Identity\n"
+        "<!--om-section: last_reflected=2026-06-01 derived_from_obs_window=2026-05-28..2026-05-31-->\n"
+        "- **Name:** Alex <!--om: id=ome_aaa scope=cluster-->\n"
+    )
+    stripped = _strip_om_metadata(text)
+    assert "<!--om-section:" not in stripped
+    assert "<!--om:" not in stripped
+    assert "**Name:** Alex" in stripped
