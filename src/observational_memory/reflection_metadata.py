@@ -287,51 +287,76 @@ def filter_reflection_entries_for_cluster(text: str) -> str:
     keep their heading and stamp unchanged.
     """
     kept = [line for line in text.splitlines() if parse_metadata(line).get("scope") != "local"]
-    output = _drop_empty_h2_sections(kept)
+    output = _drop_empty_heading_sections(kept)
     return "\n".join(output).rstrip() + "\n"
 
 
-def _drop_empty_h2_sections(lines: list[str]) -> list[str]:
-    """Drop any H2 section that has no real content after local-line filtering.
+def _line_is_real_content(line: str) -> bool:
+    """True if ``line`` is durable shared content — not a heading, blank, or marker.
 
-    A section is "empty" when, between its ``## `` heading and the next H2 (or
-    end), every line is blank or a ``<!--om-section:`` provenance stamp. Such a
-    section's heading + stamp are removed entirely. Lines before the first H2
-    (preamble) and any non-empty section are preserved verbatim.
+    Headings (any level) are *structure*, a provenance stamp is *metadata*, and a
+    blank line is *whitespace*; none of them keeps a section alive on their own.
+    Only a real bullet/prose line counts, so an H2/H3/H4 heading whose body was
+    entirely ``scope=local`` is correctly treated as empty.
     """
-    # Group into (heading_line_or_None, body_lines).
-    groups: list[tuple[str | None, list[str]]] = []
-    preamble: list[str] = []
-    current: tuple[str, list[str]] | None = None
-    for line in lines:
-        heading = _HEADING_RE.match(line)
-        if heading is not None and len(heading.group(1)) == 2:
-            if current is not None:
-                groups.append(current)
-            elif preamble:
-                groups.append((None, preamble))
-                preamble = []
-            current = (line, [])
-        elif current is not None:
-            current[1].append(line)
-        else:
-            preamble.append(line)
-    if current is not None:
-        groups.append(current)
-    elif preamble:
-        groups.append((None, preamble))
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if _SECTION_META_RE.match(line):
+        return False
+    if _HEADING_RE.match(line):
+        return False
+    return True
+
+
+def _drop_empty_heading_sections(lines: list[str]) -> list[str]:
+    """Recursively drop any heading block with no real content after filtering.
+
+    Operates at every heading level (H2 through H6), not just H2: a section is
+    "empty" when, after local-line filtering, its block (down to the next heading
+    of the same-or-shallower level) contains no real content line — where a
+    nested sub-heading only counts if *it* survives pruning. Such a block's
+    heading and any ``<!--om-section:`` stamp are removed entirely.
+
+    This closes the subsection leak: an H3/H4 whose every bullet was
+    ``scope=local`` is dropped along with its title, and an H2 that is left with
+    only an empty private subsection is dropped too. Lines before the first
+    heading (preamble) and any block with surviving content are kept verbatim.
+    """
+    if not lines:
+        return []
+    levels = [len(m.group(1)) for line in lines if (m := _HEADING_RE.match(line))]
+    if not levels:
+        # No headings here — these are leaf content/blank/marker lines; keep as-is.
+        return list(lines)
+    top = min(levels)
 
     output: list[str] = []
-    for heading_line, body_lines in groups:
-        if heading_line is None:
-            output.extend(body_lines)
-            continue
-        has_content = any(line.strip() and not _SECTION_META_RE.match(line) for line in body_lines)
-        if not has_content:
-            # Wholly-local (or otherwise empty) section: drop heading + stamp.
-            continue
-        output.append(heading_line)
-        output.extend(body_lines)
+    index = 0
+    total = len(lines)
+    # Preamble: everything before the first top-level heading is kept verbatim.
+    while index < total:
+        heading = _HEADING_RE.match(lines[index])
+        if heading is not None and len(heading.group(1)) == top:
+            break
+        output.append(lines[index])
+        index += 1
+    # Each top-level heading + its block (down to the next same-level heading).
+    while index < total:
+        heading_line = lines[index]
+        index += 1
+        block: list[str] = []
+        while index < total:
+            heading = _HEADING_RE.match(lines[index])
+            if heading is not None and len(heading.group(1)) == top:
+                break
+            block.append(lines[index])
+            index += 1
+        pruned = _drop_empty_heading_sections(block)
+        if any(_line_is_real_content(line) for line in pruned):
+            output.append(heading_line)
+            output.extend(pruned)
+        # else: wholly-local / empty block — drop heading + stamp + body entirely.
     return output
 
 

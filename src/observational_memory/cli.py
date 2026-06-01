@@ -720,8 +720,11 @@ def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: b
                 click.echo(f"  Source: {source_location}")
             if qmd_location:
                 click.echo(f"  QMD hit: {qmd_location}")
-            # Show first 5 lines of content
-            lines = r.document.content.strip().splitlines()
+            # Show first 5 lines of content. Use the payload's stripped content
+            # (not r.document.content) so the human terminal output never leads
+            # with a raw `<!--om: ...-->` / `<!--om-section: ...-->` comment —
+            # the same content the --json path emits.
+            lines = str(payload["content"]).strip().splitlines()
             for line in lines[:5]:
                 click.echo(f"  {line}")
             if len(lines) > 5:

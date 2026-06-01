@@ -77,6 +77,50 @@ def test_search_json_includes_source_and_qmd_metadata(monkeypatch, tmp_path):
     assert "source_start_line" not in payload[0]["metadata"]
 
 
+class _StampedBackend:
+    """Backend returning a stamped reflection section (raw provenance comments)."""
+
+    def is_ready(self) -> bool:
+        return True
+
+    def search(self, query: str, limit: int = 10) -> list[SearchResult]:
+        return [
+            SearchResult(
+                document=Document(
+                    doc_id="ref:core-identity",
+                    source=DocumentSource.REFLECTIONS,
+                    heading="## Core Identity",
+                    content=(
+                        "## Core Identity\n"
+                        "<!--om-section: last_reflected=2026-06-01 derived_from_obs_window=2026-05-28..2026-05-31-->\n"
+                        "- Name: Alex <!--om: id=ome_x kind=identity scope=cluster-->"
+                    ),
+                    metadata={"file_path": "/tmp/reflections.md", "source_line": 3},
+                ),
+                score=0.88,
+                rank=1,
+            )
+        ]
+
+
+def test_search_text_output_strips_provenance_comments(monkeypatch, tmp_path):
+    """PR #85 P3: the human terminal snippet must use the stripped payload
+    content, never r.document.content, so it never prints a raw `<!--om-section:`
+    stamp or per-bullet `<!--om:` metadata (the --json path already strips it)."""
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    monkeypatch.setattr("observational_memory.search.get_backend", lambda backend_name, config: _StampedBackend())
+
+    result = runner.invoke(cli, ["search", "Alex"])
+
+    assert result.exit_code == 0, result.output
+    assert "<!--om-section:" not in result.output
+    assert "<!--om:" not in result.output
+    # The real fact still shows through.
+    assert "Name: Alex" in result.output
+
+
 def test_search_text_output_shows_source_and_qmd_hit(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     runner = CliRunner()

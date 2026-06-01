@@ -1212,8 +1212,12 @@ def _compute_obs_window(prior_reflections: str, raw_observations: str) -> tuple[
     then take that slice's ``(min, max)``. Fail-closed throughout:
 
     - No dated observations at all -> None (caller omits the field).
-    - A prior reflected date but the new slice has no dated sections -> fall back
-      to a degenerate single-day range over the latest dated observation.
+    - A prior reflected date already past every observation, so the new-obs slice
+      has no dated sections (e.g. an auto-memory-only reflect that folded no
+      observations) -> None. We do NOT fall back to the latest historical date:
+      stamping a window over an observation that was not folded this run would be
+      a false provenance claim. Omitting the field is the honest, rot-proof
+      result.
 
     A date range is rot-proof by construction: it never dangles when individual
     observations age out / are trimmed (the reason per-fact ``source_obs``
@@ -1221,17 +1225,13 @@ def _compute_obs_window(prior_reflections: str, raw_observations: str) -> tuple[
     """
     if not raw_observations.strip():
         return None
-    latest = _extract_latest_observation_date(raw_observations)
-    if latest is None:
+    if _extract_latest_observation_date(raw_observations) is None:
         return None
     prior = _parse_last_reflected(prior_reflections)
     new_obs = _filter_new_observations(raw_observations, prior)
-    window = _extract_observation_date_range(new_obs)
-    if window is None:
-        # No dated sections in the consumed slice (e.g. no prior reflected date
-        # advanced past every observation). Stamp an honest single-day range.
-        return latest, latest
-    return window
+    # Returns None when no dated observations were actually consumed this run; the
+    # caller then omits derived_from_obs_window rather than claiming a stale one.
+    return _extract_observation_date_range(new_obs)
 
 
 def _stamp_timestamps(reflections: str, updated: str, reflected: str) -> str:

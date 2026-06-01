@@ -766,12 +766,14 @@ class TestComputeObsWindow:
     def test_no_dated_obs_returns_none(self):
         assert _compute_obs_window("", "# Observations\n\nno dates\n") is None
 
-    def test_degenerate_when_new_slice_empty(self):
-        # Prior reflected is past every observation -> the new slice is empty;
-        # fall back to a single-day range over the latest dated observation.
+    def test_none_when_new_slice_empty(self):
+        # Prior reflected is past every observation -> no observation was folded
+        # this run (e.g. an auto-memory-only reflect). Returning a window over the
+        # latest historical date would be a FALSE provenance claim, so the honest,
+        # rot-proof result is None and the caller omits derived_from_obs_window.
         prior = "# Reflections\n\n*Last reflected: 2026-06-10*\n\n## X\n- y\n"
         raw = "# Observations\n\n## 2026-05-31\n- a\n"
-        assert _compute_obs_window(prior, raw) == ("2026-05-31", "2026-05-31")
+        assert _compute_obs_window(prior, raw) is None
 
 
 class TestFinalizeStampsSectionProvenance:

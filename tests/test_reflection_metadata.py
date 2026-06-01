@@ -246,3 +246,32 @@ def test_wholly_local_section_drops_heading_and_cadence_stamp_for_cluster():
     assert "## Shared" in filtered
     # Exactly one stamp survives — the shared section's; the local one is gone.
     assert filtered.count("<!--om-section:") == 1
+
+
+def test_subsection_only_local_drops_subsection_title_and_stamp_for_cluster():
+    """Gate 3 leak guard (PR #85 P1): a private H3/H4 subsection whose every
+    bullet is scope=local must not leak its title — even when its parent H2 has
+    other shared content. A heading is structure, never shared body, so an empty
+    sub-block is pruned; a wholly-local H2 is dropped along with its stamp."""
+    doc = (
+        "# Reflections\n\n"
+        "## Active Projects\n"
+        "### Public Initiative\n"
+        "- Ship the docs <!--om: scope=cluster node=laptop-->\n"
+        "### Secret Alpha Cadence\n"
+        "- Weekly sync with Acme <!--om: scope=local node=laptop-->\n\n"
+        "## Secret Standalone\n"
+        "### Hidden Detail\n"
+        "- Private note <!--om: scope=local node=laptop-->\n"
+    )
+    stamped = ensure_section_provenance(doc, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    filtered = filter_reflection_entries_for_cluster(stamped)
+    # The shared subsection survives; both private subsection titles do not.
+    assert "Public Initiative" in filtered
+    assert "Secret Alpha Cadence" not in filtered
+    assert "Hidden Detail" not in filtered
+    # The wholly-local H2 (only an empty private subsection) is dropped entirely,
+    # taking its cadence stamp with it; the shared H2 keeps exactly its one stamp.
+    assert "Secret Standalone" not in filtered
+    assert "## Active Projects" in filtered
+    assert filtered.count("<!--om-section:") == 1
