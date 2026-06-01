@@ -477,6 +477,47 @@ def test_withheld_bullet_lazy_continuation_not_uploaded_to_cloud(fake_moss):
         backend.close()
 
 
+_MOSS_SHAREOUT_MATRIX = [
+    ("tight indented continuation", "## M\n- secret <!--om: scope=local-->\n  ACMESECRET\n", "ACMESECRET", None),
+    ("lazy same-indent continuation", "## M\n- secret <!--om: scope=local-->\nACMESECRET\n", "ACMESECRET", None),
+    ("nested unscoped child", "## M\n- secret <!--om: scope=team-->\n  - ACMESECRET\n", "ACMESECRET", None),
+    (
+        "loose paragraph after blank",
+        "## M\n- secret <!--om: scope=local-->\n\n  ACMESECRET loose\n\n- ok KEEPME <!--om: scope=cluster-->\n",
+        "ACMESECRET",
+        "KEEPME",
+    ),
+    (
+        "scoped shareable child under withheld parent",
+        "## M\n- secret <!--om: scope=local-->\n  - KEEPME <!--om: scope=cluster-->\n",
+        "secret",
+        "KEEPME",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name, content, absent, present", _MOSS_SHAREOUT_MATRIX, ids=[c[0] for c in _MOSS_SHAREOUT_MATRIX]
+)
+def test_moss_upload_block_matrix(fake_moss, name, content, absent, present):
+    """The Moss cloud-upload path delegates to filter_reflection_document_for_shareout,
+    so the same block-level rule holds end-to-end through backend.index()."""
+    backend = _backend()
+    try:
+        backend.index([Document(doc_id="ref:m", source=DocumentSource.REFLECTIONS, heading="## M", content=content)])
+        # A wholly-withheld section is not uploadable, so the index may never be
+        # created — which is itself proof the secret did not leave the host.
+        indexes = _FakeMossClient.instances[-1].indexes
+        uploaded = {d.id: d.text for d in indexes.get("om-test", [])}
+        text = uploaded.get("ref:m", "")
+        if absent is not None:
+            assert absent not in text, f"{name}: leaked to cloud"
+        if present is not None:
+            assert present in text, f"{name}: shared content dropped"
+    finally:
+        backend.close()
+
+
 def test_fail_closed_when_sdk_missing(monkeypatch):
     # No fake_moss fixture: ensure `import moss` fails.
     monkeypatch.setitem(sys.modules, "moss", None)

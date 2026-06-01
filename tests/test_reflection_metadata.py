@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import pytest
 from click.testing import CliRunner
 
 from observational_memory.cli import cli
@@ -9,12 +10,87 @@ from observational_memory.reflection_metadata import (
     _scope_is_shareable,
     ensure_reflection_metadata,
     ensure_section_provenance,
+    filter_reflection_document_for_shareout,
     filter_reflection_entries_for_cluster,
     filter_reflection_entries_for_host,
     find_reflection_conflicts,
     parse_metadata,
     prune_stale_snapshots,
 )
+
+# Table-driven share-out matrix (Gate 4): the block-level privacy rule, exercised
+# across every Markdown continuation shape that previously leaked one-by-one. Each
+# case names a private token that MUST NOT survive share-out and/or a shared token
+# that MUST. `S` = must be withheld; `K` = must ride along.
+_S = "ACMESECRETTOKEN"
+_K = "KEEPSHARED"
+_SHAREOUT_MATRIX = [
+    ("tight indented continuation", f"## P\n- secret <!--om: scope=local-->\n  {_S}\n", [_S], []),
+    ("lazy same-indent continuation", f"## P\n- secret <!--om: scope=local-->\n{_S}\n", [_S], []),
+    ("nested unscoped child bullet", f"## P\n- secret <!--om: scope=team-->\n  - {_S}\n", [_S], []),
+    ("deep nested unscoped child", f"## P\n- secret <!--om: scope=local-->\n  - a\n    - {_S}\n", [_S], []),
+    (
+        "loose prose after blank stays inside item",
+        f"## P\n- secret <!--om: scope=local-->\n\n  {_S} loose paragraph\n\n## Q\n- ok <!--om: scope=cluster-->\n",
+        [_S],
+        ["ok"],
+    ),
+    (
+        "loose child bullet after blank stays inside item",
+        f"## P\n- secret <!--om: scope=local-->\n\n  - {_S} loose child\n\n## Q\n- ok <!--om: scope=cluster-->\n",
+        [_S],
+        ["ok"],
+    ),
+    ("prose line carrying its own scope", f"## P\nprose {_S} <!--om: scope=local-->\n", [_S], []),
+    ("withheld entry at EOF with lazy tail", f"## P\n- secret <!--om: scope=org-->\ntail {_S}\n", [_S], []),
+    (
+        "explicitly scoped shareable child survives a withheld parent",
+        f"## P\n- secret <!--om: scope=local-->\n  - {_K} <!--om: scope=cluster-->\n",
+        [],
+        [_K],
+    ),
+    (
+        "explicitly scoped withheld child dropped under a shareable parent",
+        f"## P\n- {_K} <!--om: scope=cluster-->\n  - {_S} <!--om: scope=local-->\n",
+        [_S],
+        [_K],
+    ),
+    (
+        "blank releases UNINDENTED prose as independent/shared",
+        f"## P\n- secret <!--om: scope=local-->\n\n{_K} independent prose\n",
+        [],
+        [_K],
+    ),
+    (
+        "sibling shareable bullet after withheld bullet is kept",
+        f"## P\n- secret <!--om: scope=local-->\n- {_K} <!--om: scope=cluster-->\n",
+        [],
+        [_K],
+    ),
+    (
+        "shared bullet keeps its own tight continuation",
+        f"## P\n- {_K} bullet <!--om: scope=cluster-->\n  more {_K} detail\n",
+        [],
+        [_K],
+    ),
+    (
+        "heading boundary ends the withheld entry",
+        f"## P\n- secret {_S} <!--om: scope=local-->\n## Q\n- {_K} <!--om: scope=cluster-->\n",
+        [_S],
+        [_K],
+    ),
+]
+
+
+@pytest.mark.parametrize("name, doc, absent, present", _SHAREOUT_MATRIX, ids=[c[0] for c in _SHAREOUT_MATRIX])
+def test_shareout_block_matrix(name, doc, absent, present):
+    """Gate 4 block-level share-out matrix: no withheld token leaks, no shared token
+    is over-withheld, across every Markdown continuation/child/boundary shape."""
+    out = filter_reflection_document_for_shareout(doc)
+    for token in absent:
+        assert token not in out, f"{name}: withheld token leaked"
+    for token in present:
+        assert token in out, f"{name}: shared token over-withheld"
 
 
 def test_ensure_reflection_metadata_adds_and_preserves_fields():

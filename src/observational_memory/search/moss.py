@@ -99,30 +99,19 @@ class _AsyncLoop:
 def _strip_local_lines(content: str) -> str:
     """Drop non-shareable content from a section before upload.
 
-    Routes its keep-decision through the SAME ``_scope_is_shareable`` allowlist
-    resolver as ``filter_reflection_entries_for_cluster`` (no longer the inline
-    ``!= "local"`` check), so the two leak-critical share-out paths have a SINGLE
-    source of truth and cannot drift: a section that mixes shared and host-local
-    entries still contributes its shared entries to the cloud index, while a line
-    carrying any EXPLICIT non-shareable scope — ``scope=local`` or, newly closed
-    in Gate 4, a typo / hallucinated / future / hand-typed ``team``/``org`` value
-    — never leaves the host. Absent-scope lines ride along, exactly as today.
-
-    LEAK-CRITICAL: after dropping non-shareable entries this also prunes any
-    now-empty heading block at ANY level via ``_drop_empty_heading_sections`` — so
-    a private H3/H4 subsection whose every bullet was withheld does NOT leak its
-    title into the uploaded text just because some *other* subsection of the same
-    H2 is shared (PR #85 re-review P1). A withheld multi-line bullet also drops its
-    indented continuation lines via ``_shareable_lines`` so wrapped continuation
-    text never leaks (PR #86 re-review P1). A line-only strip left both behind.
+    Delegates ENTIRELY to ``filter_reflection_document_for_shareout`` — the one
+    public share-out filter — so the cloud-upload path and the cluster-snapshot
+    path share a single block-level implementation and cannot drift (the class of
+    bug that produced PR #85 / #86 leak findings). It composes no filtering or
+    pruning of its own: a withheld entry leaves with its continuations and nested
+    children, a section emptied by withholding is pruned, and only genuinely
+    shareable entries are uploaded to the Moss cloud.
     """
     try:
-        from ..reflection_metadata import _drop_empty_heading_sections, _shareable_lines
+        from ..reflection_metadata import filter_reflection_document_for_shareout
     except Exception:  # pragma: no cover - defensive
         return content
-    kept = _shareable_lines(content.splitlines())
-    kept = _drop_empty_heading_sections(kept)
-    return "\n".join(kept)
+    return filter_reflection_document_for_shareout(content)
 
 
 def _has_indexable_body(content: str) -> bool:

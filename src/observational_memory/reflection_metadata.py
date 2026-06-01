@@ -310,114 +310,168 @@ def _entry_indent(line: str) -> int:
     return len(line) - len(line.lstrip())
 
 
-def _continues_withheld_entry(line: str, head_indent: int) -> bool:
-    """True if ``line`` is a TIGHT continuation of a withheld entry at ``head_indent``.
+@dataclass
+class _Structural:
+    """A line that carries no scope of its own — heading, blank, marker, or prose
+    OUTSIDE any scoped item. Always shareable on its own; pruned only if its
+    enclosing section/entry is dropped."""
 
-    A withheld entry covers only its tight (no intervening blank line)
-    continuations, CommonMark-aligned:
-
-    - an absent-scope, non-bullet prose line at ANY indent (an indented or a
-      same-indent "lazy" continuation), and
-    - a nested *unscoped* child list item — a bullet indented DEEPER than the
-      entry head (Markdown reads it as part of the parent item).
-
-    It is NOT a continuation — i.e. it ENDS the withheld entry — at any genuine
-    block boundary:
-
-    - a blank line (a hard block boundary; following prose is independent),
-    - a line carrying an EXPLICIT ``scope=`` (a new entry head, judged on its own
-      scope even when nested),
-    - a heading or a section provenance marker, or
-    - a sibling / shallower list item (a bullet at ``<= head_indent``).
-    """
-    if line.strip() == "":
-        return False
-    if "scope" in parse_metadata(line):
-        return False
-    if _HEADING_RE.match(line) is not None or _SECTION_META_RE.match(line) is not None:
-        return False
-    if _BULLET_RE.match(line) is not None:
-        # Deeper bullet = nested child (part of the parent); same/shallower = sibling.
-        return _entry_indent(line) > head_indent
-    # Absent-scope, non-bullet prose with no preceding blank: a (lazy or indented)
-    # continuation of the withheld entry at any indent.
-    return True
+    line: str
 
 
-def _shareable_lines(lines: list[str]) -> list[str]:
-    """Keep only shareable entries, propagating a withheld entry's decision over its
-    tight continuation lines.
+@dataclass
+class _Entry:
+    """A reflection entry: a head line (a bullet OR a metadata-bearing prose line)
+    plus the body it owns. ``scope`` is the head's explicit scope (``None`` when
+    the head carries none). ``body`` is the recursively-parsed list of nodes the
+    entry contains — its Markdown continuations, blank lines, and nested child
+    blocks. Explicitly scoped children are their OWN ``_Entry`` nodes inside
+    ``body`` and are judged on their own scope; unscoped body content inherits this
+    entry's share decision."""
 
-    A scope decision is carried on an entry's inline ``<!--om: ...-->`` metadata
-    (on a bullet OR a plain metadata-bearing line), but a multi-line entry's
-    wrapped continuation lines and nested unscoped child bullets carry none — so a
-    naive per-line filter drops the withheld entry yet lets that content ride along
-    as absent-scope text (a real leak: it reaches the cluster snapshot / Moss cloud
-    and keeps the heading alive). This walks ENTRIES, not physical lines, deciding
-    continuation membership with :func:`_continues_withheld_entry`.
+    head: str
+    scope: str | None
+    body: list
 
-    A withheld entry ends at a genuine block boundary — a blank line, a heading, a
-    section marker, an explicitly scoped line, or a sibling/shallower list item.
-    Crucially a blank line RELEASES the following text: absent-scope prose after a
-    blank is an independent block and rides along (shared), matching the documented
-    contract. An explicitly scoped line is always judged on its OWN scope, even when
-    nested under a withheld parent. Output is byte-identical to the pre-Gate-4
-    per-line filter for the common single-line-entry corpus (no tight continuations
-    to reclassify).
-    """
-    out: list[str] = []
-    dropping = False
-    drop_indent = 0
-    for line in lines:
-        if dropping:
-            if _continues_withheld_entry(line, drop_indent):
-                continue  # tight continuation of the withheld entry — drop it
-            dropping = False  # boundary reached; re-process `line` fresh below
-        fields = parse_metadata(line)
-        if "scope" in fields:
-            if _scope_is_shareable(fields.get("scope")):
-                out.append(line)
-            else:
-                dropping = True
-                drop_indent = _entry_indent(line)
+
+# --- Block IR ---------------------------------------------------------------
+#
+# Gate 4 enforces a BLOCK-level privacy rule (scope is attached to a memory
+# ENTRY), so share-out parses the document into entries/blocks ONCE and applies
+# the allowlist to entries, rather than scanning physical lines (which repeatedly
+# leaked the next Markdown shape: indented, lazy, loose, and nested continuations).
+# Membership is defined in exactly one place — :func:`_parse_reflection_blocks` —
+# following the OM-supported CommonMark subset:
+#
+#   An entry owns every following line MORE indented than its head (indented
+#   continuations and nested UNSCOPED child list items), same-indent "lazy"
+#   continuation prose with no intervening blank, and — for a LOOSE list — content
+#   that stays indented under the head across a blank line. It ENDS at a heading, a
+#   section marker, a sibling/shallower list item, an explicitly scoped line (a new
+#   entry, judged on its own scope), or a blank line that is followed by
+#   dedented/boundary content (which RELEASES that following block as independent).
+
+
+def _is_entry_head(line: str) -> bool:
+    return ("scope" in parse_metadata(line)) or (_BULLET_RE.match(line) is not None)
+
+
+def _parse_reflection_blocks(lines: list[str]) -> list:
+    """Parse ``lines`` into a flat, in-order list of :class:`_Structural` /
+    :class:`_Entry` nodes (entries recurse into their body). See the Block IR note."""
+    nodes: list = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        line = lines[index]
+        if line.strip() == "" or not _is_entry_head(line):
+            nodes.append(_Structural(line))
+            index += 1
             continue
-        out.append(line)
+        head_indent = _entry_indent(line)
+        scope = parse_metadata(line).get("scope")
+        # Gather the body's line range [index+1, cursor).
+        cursor = index + 1
+        while cursor < total:
+            current = lines[cursor]
+            if current.strip() == "":
+                # A blank belongs to the item only for a LOOSE list — i.e. when a
+                # later line stays indented under the head. Otherwise the blank is a
+                # hard boundary and the following block is released.
+                look = cursor
+                while look < total and lines[look].strip() == "":
+                    look += 1
+                if look < total and _entry_indent(lines[look]) > head_indent:
+                    cursor = look  # blanks + deeper content stay in the body
+                    continue
+                break
+            if _entry_indent(current) > head_indent:
+                cursor += 1  # deeper content: indented continuation / nested child
+                continue
+            # Same-or-shallower, non-blank, no intervening blank: a sibling/boundary
+            # ends the entry; otherwise it is a lazy continuation of the head's text.
+            if (
+                _BULLET_RE.match(current) is not None
+                or "scope" in parse_metadata(current)
+                or _HEADING_RE.match(current) is not None
+                or _SECTION_META_RE.match(current) is not None
+            ):
+                break
+            cursor += 1
+        nodes.append(_Entry(head=line, scope=scope, body=_parse_reflection_blocks(lines[index + 1 : cursor])))
+        index = cursor
+    return nodes
+
+
+def _render_shareable(nodes: list) -> list[str]:
+    """Render nodes whose governing entry is shareable. Structural lines ride along;
+    each entry is judged on its OWN scope (children recurse on their own scope)."""
+    out: list[str] = []
+    for node in nodes:
+        if isinstance(node, _Structural):
+            out.append(node.line)
+        elif _scope_is_shareable(node.scope):
+            out.append(node.head)
+            out.extend(_render_shareable(node.body))
+        else:
+            out.extend(_render_withheld_descendants(node.body))
     return out
 
 
-def filter_reflection_entries_for_cluster(text: str) -> str:
-    """Remove non-shareable reflection entries before writing shared cluster snapshots.
+def _render_withheld_descendants(nodes: list) -> list[str]:
+    """Render survivors inside a WITHHELD entry: unscoped content (structural lines
+    and unscoped child entries) is dropped with its parent; an explicitly scoped
+    descendant is judged on its own scope, so a shareable scoped child survives."""
+    out: list[str] = []
+    for node in nodes:
+        if isinstance(node, _Structural):
+            continue
+        if node.scope is None:
+            out.extend(_render_withheld_descendants(node.body))
+        elif _scope_is_shareable(node.scope):
+            out.append(node.head)
+            out.extend(_render_shareable(node.body))
+        else:
+            out.extend(_render_withheld_descendants(node.body))
+    return out
 
-    Keeps a line iff its scope is shareable per :func:`_scope_is_shareable`
-    against the :data:`SHAREABLE_SCOPES` allowlist (default ``{"cluster"}``):
 
-    - Absent-scope lines (H2/H3 headings, prose, blank lines, ``<!--om-section:``
-      provenance stamps, the ``*Last reflected:*`` preamble) RIDE ALONG unchanged.
-    - ``scope=cluster`` bullets are shared.
-    - Any EXPLICIT non-shareable scope is WITHHELD and FAILS CLOSED:
-      ``scope=local`` (unchanged from before), plus — newly closed in Gate 4 — a
-      typo (``locol``), an LLM-hallucinated value, a future value, or a hand-typed
-      ``team``/``org`` value a tier has not yet enabled.
+def filter_reflection_document_for_shareout(text: str) -> str:
+    """THE single share-out filter: drop every entry whose scope is not shareable
+    (with its unscoped continuations and nested children) before reflection memory
+    leaves the host into shared cluster snapshots or the Moss cloud upload.
 
-    Self-heal nuance: an *absent*-scope under-share self-heals on the next
-    reflect, where ``ensure_reflection_metadata`` setdefaults ``scope=cluster``.
-    An *explicit-unknown* scope does NOT self-heal — ``setdefault`` never
-    overwrites an existing value — so it stays withheld until corrected or
-    removed. A future tier registers a shareable scope by adding to
-    :data:`SHAREABLE_SCOPES`.
+    Scope is attached to an ENTRY, not a physical line, so this parses the document
+    into a block IR (:func:`_parse_reflection_blocks`), applies the
+    :data:`SHAREABLE_SCOPES` allowlist via :func:`_scope_is_shareable` to each
+    entry, then prunes any heading section left empty (:func:`_drop_empty_heading_sections`).
 
-    LEAK-CRITICAL (Gate 3): when a section reduces to a bare heading with no
-    surviving shared content, its H2 heading AND any attached ``<!--om-section:``
-    provenance stamp are also dropped, so a wholly-local section never leaks its
-    title or its reflect cadence / obs-window into shared cluster memory. (This
-    also closes the pre-existing orphan-heading leak for wholly-local sections.)
-    Sections that retain at least one shared line keep their heading and stamp
-    unchanged. A withheld multi-line bullet drops its indented continuation lines
-    too (see :func:`_shareable_lines`), so wrapped continuation text never leaks.
+    Allowlist semantics (default ``{"cluster"}``, fail-closed):
+
+    - ``scope=cluster`` entries are shared; ``scope=local`` and any EXPLICIT
+      unknown scope (a typo, an LLM-hallucinated value, a hand-typed ``team`` /
+      ``org`` a tier has not yet enabled) are WITHHELD.
+    - Absent-scope structure — headings, blank lines, ``<!--om-section:`` stamps,
+      the ``*Last reflected:*`` preamble, and prose OUTSIDE any scoped item — rides
+      along. An absent-scope under-share self-heals on the next reflect (which
+      setdefaults ``scope=cluster``); an explicit-unknown scope does not self-heal.
+    - A withheld entry takes its indented/lazy/loose continuations and nested
+      UNSCOPED child blocks with it (so wrapped or nested private text never leaks),
+      while an explicitly scoped child is judged on its own scope.
+
+    A future visibility tier widens sharing solely by adding a member to
+    :data:`SHAREABLE_SCOPES` — never by editing this filter or a caller.
     """
-    kept = _shareable_lines(text.splitlines())
-    output = _drop_empty_heading_sections(kept)
-    return "\n".join(output).rstrip() + "\n"
+    nodes = _parse_reflection_blocks(text.splitlines())
+    kept = _render_shareable(nodes)
+    kept = _drop_empty_heading_sections(kept)
+    return "\n".join(kept).rstrip() + "\n"
+
+
+def filter_reflection_entries_for_cluster(text: str) -> str:
+    """Back-compat name for :func:`filter_reflection_document_for_shareout` (the
+    cluster snapshot share-out path)."""
+    return filter_reflection_document_for_shareout(text)
 
 
 def _line_is_real_content(line: str) -> bool:
