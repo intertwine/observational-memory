@@ -93,8 +93,11 @@ def refresh_startup_memory(config: Config | None = None) -> None:
     reflections = config.reflections_path.read_text() if config.reflections_path.exists() else ""
     observations = config.observations_path.read_text() if config.observations_path.exists() else ""
 
-    config.profile_path.write_text(_build_profile(reflections).rstrip() + "\n")
-    config.active_path.write_text(_build_active(reflections, observations).rstrip() + "\n")
+    # Atomic so a concurrent snapshot/reader never captures a torn profile/active.
+    from .sync.atomic import atomic_write_text
+
+    atomic_write_text(config.profile_path, _build_profile(reflections).rstrip() + "\n")
+    atomic_write_text(config.active_path, _build_active(reflections, observations).rstrip() + "\n")
 
 
 def build_startup_payload(

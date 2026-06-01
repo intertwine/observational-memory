@@ -202,6 +202,171 @@ def reflect(ctx: click.Context, dry_run: bool, async_mode: bool) -> None:
         click.echo("No observations to reflect on.")
 
 
+def _valid_backup_reason(reason: str) -> bool:
+    import re
+
+    return bool(re.match(r"^[a-z0-9-]+$", reason))
+
+
+def _snapshot_to_dict(snapshot) -> dict:
+    return {
+        "snapshot_id": snapshot.snapshot_id,
+        "reason": snapshot.reason,
+        "created_at": snapshot.created_at,
+        "files": list(snapshot.files),
+        "bytes_total": snapshot.bytes_total,
+        "path": str(snapshot.path),
+    }
+
+
+def _echo_snapshot_list(snapshots) -> None:
+    if not snapshots:
+        click.echo("No snapshots yet.")
+        return
+    for snapshot in snapshots:
+        click.echo(f"{snapshot.snapshot_id}\t{snapshot.reason}\t{snapshot.created_at}\t{snapshot.bytes_total} bytes")
+
+
+@cli.command()
+@click.option("--reason", default="manual", help="Snapshot label (lowercase letters, digits, hyphens)")
+@click.option("--list", "list_only", is_flag=True, help="List existing snapshots instead of creating one")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@click.pass_context
+def backup(ctx: click.Context, reason: str, list_only: bool, as_json: bool) -> None:
+    """Create an on-demand snapshot of memory, or list existing snapshots."""
+    from .backup import create_snapshot, list_snapshots
+
+    config = ctx.obj["config"]
+
+    if list_only:
+        snapshots = list_snapshots(config)
+        if as_json:
+            click.echo(json.dumps([_snapshot_to_dict(s) for s in snapshots], indent=2))
+        else:
+            _echo_snapshot_list(snapshots)
+        return
+
+    if not _valid_backup_reason(reason):
+        raise click.ClickException("--reason must contain only lowercase letters, digits, and hyphens.")
+
+    try:
+        info = create_snapshot(config, reason=reason)
+    except Exception as exc:  # noqa: BLE001 — surface as a clean CLI error
+        raise click.ClickException(f"Backup failed: {exc}") from exc
+
+    if info is None:
+        click.echo("Nothing to back up (no memory files yet or backups disabled).")
+        return
+
+    if as_json:
+        click.echo(json.dumps(_snapshot_to_dict(info), indent=2))
+    else:
+        click.echo(f"Snapshot created: {info.snapshot_id} ({len(info.files)} files, {info.bytes_total} bytes)")
+        click.echo(str(info.path))
+
+
+@cli.command()
+@click.argument("snapshot_id", required=False)
+@click.option("--latest", is_flag=True, help="Restore the newest snapshot")
+@click.option("--list", "list_only", is_flag=True, help="List snapshots and exit")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt")
+@click.option(
+    "--no-safety-snapshot",
+    is_flag=True,
+    help="Do not snapshot current state before restoring (discouraged)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@click.pass_context
+def restore(
+    ctx: click.Context,
+    snapshot_id: str | None,
+    latest: bool,
+    list_only: bool,
+    yes: bool,
+    no_safety_snapshot: bool,
+    as_json: bool,
+) -> None:
+    """Restore memory files from a snapshot (byte-faithful)."""
+    from .backup import (
+        RestoreFailedError,
+        RestorePartialError,
+        list_snapshots,
+        resolve_snapshot,
+        restore_snapshot,
+    )
+    from .reflect import _reindex_if_enabled
+
+    config = ctx.obj["config"]
+
+    if list_only:
+        snapshots = list_snapshots(config)
+        if as_json:
+            click.echo(json.dumps([_snapshot_to_dict(s) for s in snapshots], indent=2))
+        else:
+            _echo_snapshot_list(snapshots)
+        return
+
+    # Restore overwrites live memory — never restore implicitly. Require an
+    # explicit snapshot id or --latest; otherwise show the list and stop.
+    if snapshot_id is None and not latest:
+        click.echo("Choose a snapshot to restore (pass a SNAPSHOT_ID or --latest):")
+        _echo_snapshot_list(list_snapshots(config))
+        return
+
+    if latest and snapshot_id is not None:
+        raise click.ClickException("Pass either a SNAPSHOT_ID or --latest, not both.")
+
+    selector = "latest" if latest else snapshot_id
+    try:
+        snapshot = resolve_snapshot(config, selector)
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if not yes and not click.confirm(f"Overwrite live memory from {snapshot.snapshot_id}?"):
+        click.echo("Aborted; memory unchanged.")
+        return
+
+    try:
+        safety = restore_snapshot(
+            config,
+            snapshot,
+            make_safety_snapshot=not no_safety_snapshot,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    except RestoreFailedError as exc:
+        # Mid-restore failure that was automatically rolled back: live memory is
+        # back to its pre-restore state. Report as a clean one-line CLI error.
+        raise click.ClickException(str(exc)) from exc
+    except RestorePartialError as exc:
+        # Mid-restore failure that could NOT be rolled back: live memory may be
+        # half-restored. The message already names the recovery command.
+        raise click.ClickException(str(exc)) from exc
+    except OSError as exc:
+        # Any other I/O failure escaping restore_snapshot: never leak a traceback.
+        raise click.ClickException(f"Restore of {snapshot.snapshot_id} failed ({type(exc).__name__}: {exc}).") from exc
+
+    # Keep the search index consistent with the restored Markdown (and any
+    # regenerated profile.md/active.md for subset snapshots).
+    _reindex_if_enabled(config)
+
+    safety_id = safety.snapshot_id if (not no_safety_snapshot and safety is not snapshot) else None
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "restored": snapshot.snapshot_id,
+                    "files": list(snapshot.files),
+                    "safety_snapshot": safety_id,
+                },
+                indent=2,
+            )
+        )
+    else:
+        suffix = f"; safety snapshot: {safety_id}" if safety_id else ""
+        click.echo(f"Restored {len(snapshot.files)} files from {snapshot.snapshot_id}{suffix}")
+
+
 def _run_reflector_sync(config: Config) -> None:
     from .reflect import run_reflector
     from .usage.budgets import BudgetExceededError
@@ -920,7 +1085,8 @@ def cluster_init(
         backup = _backup_existing_memory(config)
         _import_existing_memory(store)
         materialize_cluster_memory(config, store)
-        click.echo(f"Backed up existing Markdown to {backup}")
+        if backup is not None:
+            click.echo(f"Backed up existing Markdown to {backup}")
     click.echo(f"Initialized OM Cluster {cluster_config.name} ({cluster_config.id})")
     click.echo(f"Node: {cluster_config.node_alias} ({cluster_config.node_id})")
 
@@ -1939,14 +2105,22 @@ def _expand_transport_path(value: str) -> str:
     return os.path.expandvars(os.path.expanduser(value))
 
 
-def _backup_existing_memory(config: Config) -> Path:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_dir = config.memory_dir / "backups" / f"cluster-init-{timestamp}"
-    backup_dir.mkdir(parents=True, exist_ok=False)
-    for path in (config.observations_path, config.reflections_path, config.profile_path, config.active_path):
-        if path.exists():
-            shutil.copy2(path, backup_dir / path.name)
-    return backup_dir
+def _backup_existing_memory(config: Config) -> Path | None:
+    """Snapshot existing Markdown before a cluster init.
+
+    Thin shim over the generalized backup module so cluster-init backups share
+    the same on-disk format and rotation. Returns the snapshot dir (or ``None``
+    when there is nothing to back up).
+
+    Forces the snapshot regardless of ``OM_BACKUP_ENABLED``: cluster init is a
+    one-shot destructive migration (it overwrites reflections/profile/active via
+    materialize), so this safety net must not be defeatable by the global backup
+    toggle.
+    """
+    from .backup import create_snapshot
+
+    info = create_snapshot(config, reason="cluster-init", force=True)
+    return info.path if info is not None else None
 
 
 def _import_existing_memory(store) -> None:
