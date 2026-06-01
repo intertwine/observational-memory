@@ -312,6 +312,46 @@ def test_restore_does_not_prune_its_source_snapshot(monkeypatch, tmp_path):
     assert config.reflections_path.read_text() == "# Reflections\n## Identity\n- GOOD\n"
 
 
+def test_restore_all_or_nothing_after_total_deletion(monkeypatch, tmp_path):
+    # Codex re-review P2: when ALL memory files were deleted, create_snapshot
+    # returns None (nothing in scope), so safety is None even with
+    # make_safety_snapshot=True. A mid-replace failure must STILL roll back to
+    # the (empty) pre-restore state — not strand a partial restore.
+    import os
+
+    config = _config(monkeypatch, tmp_path)
+    _seed_memory(config.memory_dir, reflections="# Reflections\n## Identity\n- GOOD\n")
+    good = backup.create_snapshot(config, reason="manual")
+    assert good is not None
+
+    # Simulate accidental deletion of the entire memory set.
+    for name in ("reflections.md", "observations.md", "profile.md", "active.md"):
+        (config.memory_dir / name).unlink()
+
+    # Fail the 2nd Phase-2 replace (identified by the .restore-*.tmp source).
+    real_replace = backup.os.replace
+    state = {"n": 0}
+
+    def flaky_replace(src, dst, *args, **kwargs):
+        if ".restore-" in os.fspath(src):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise OSError("disk full during replace")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(backup.os, "replace", flaky_replace)
+
+    with pytest.raises(backup.RestoreFailedError):
+        backup.restore_snapshot(config, backup.resolve_snapshot(config, good.snapshot_id))
+
+    # All-or-nothing: rolled back to the pre-restore (deleted) state — NOT a
+    # partial restore with only the first file written.
+    for name in ("reflections.md", "observations.md", "profile.md", "active.md"):
+        assert not (config.memory_dir / name).exists(), f"{name} should not exist after rollback"
+    # No stray restore temp files left behind.
+    assert not list(config.memory_dir.glob(".*.restore-*.tmp"))
+
+
 def _tamper_manifest(snapshot_path, mutate):
     manifest = json.loads((snapshot_path / "manifest.json").read_text())
     mutate(manifest)

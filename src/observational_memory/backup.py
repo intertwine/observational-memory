@@ -354,10 +354,12 @@ def restore_snapshot(
     Phase 2 is transactional across the file SET, not just per file: every new
     body is first staged into a same-directory temp file, and only once ALL
     stages succeed are they atomically replaced into place. If a stage or replace
-    still fails partway, the just-taken safety snapshot is restored so live
-    memory is never left in a mixed state that existed at no point in time.
-    Raises :class:`RestorePartialError` (naming the safety snapshot) only if the
-    rollback itself also fails.
+    still fails partway, live memory is rolled back to its captured pre-restore
+    bytes (deleting any files that did not exist before) so it is never left in a
+    mixed state that existed at no point in time. This rollback does not depend
+    on a safety snapshot, so it holds even on the accidental-deletion path where
+    there was nothing to snapshot. Raises :class:`RestorePartialError` (naming
+    the safety snapshot, if any) only if the rollback itself also fails.
     """
     manifest = _read_manifest(snapshot.path)
     if manifest is None:
@@ -460,14 +462,28 @@ def restore_snapshot(
             extra_keep={snapshot.snapshot_id},
         )
 
+    # Capture the pre-restore bytes of every file we might touch BEFORE writing,
+    # so rollback is deterministic and does NOT depend on a safety snapshot
+    # existing. This is the all-or-nothing guarantee on the accidental-deletion
+    # path: when all memory was deleted, create_snapshot() above returns None
+    # (nothing in scope) and `safety is None`, so a mid-replace failure would
+    # otherwise strand a partial restore with no way back. `None` means the file
+    # did not exist (rollback deletes whatever we created); bytes mean restore
+    # the prior content. The safety snapshot remains a durable user-facing
+    # recovery artifact, but is no longer the rollback engine.
+    config.ensure_memory_dir()
+    rollback_targets = [target for target, _ in planned] + list(unlisted_targets)
+    pre_state: list[tuple[Path, bytes | None]] = [
+        (path, path.read_bytes() if path.exists() else None) for path in rollback_targets
+    ]
+
     # Phase 2: transactional across the whole file SET.
     #
     # Stage every new body into a same-directory temp file first; only after ALL
     # stages succeed do we os.replace them into place (fast, far less likely to
-    # fail mid-sequence). If anything fails, roll the SET back from the safety
-    # snapshot so we never leave a mixed state. We deliberately do NOT use a
-    # plain per-file loop here — that is exactly the non-atomic-across-files bug.
-    config.ensure_memory_dir()
+    # fail mid-sequence). If anything fails, roll the SET back to pre_state so we
+    # never leave a mixed state. We deliberately do NOT use a plain per-file loop
+    # here — that is exactly the non-atomic-across-files bug.
     staged: list[tuple[Path, Path]] = []  # (temp, target)
     try:
         for target, data in planned:
@@ -487,36 +503,35 @@ def restore_snapshot(
         for temp, _target in staged:
             try:
                 temp.unlink()
-            except FileNotFoundError:
-                pass
             except OSError:
                 pass
-        # Roll the set back to the pre-restore state so live memory is never
-        # left in a mixed/Frankenstein state. The safety snapshot is the only
-        # consistent point-in-time we have; restore it WITHOUT taking another
-        # safety snapshot (we are already mid-recovery).
-        if safety is not None:
+        # Deterministic rollback to the captured pre-restore state: rewrite prior
+        # bytes, or delete files that did not exist before. Independent of the
+        # safety snapshot, so the all-deleted case rolls back cleanly to empty.
+        rollback_ok = True
+        rollback_exc: BaseException | None = None
+        for path, original in pre_state:
             try:
-                restore_snapshot(config, safety, make_safety_snapshot=False)
-            except Exception as rollback_exc:  # noqa: BLE001
-                raise RestorePartialError(
-                    snapshot_id=snapshot.snapshot_id,
-                    safety_snapshot_id=safety.snapshot_id,
-                    original=exc,
-                    rollback_error=rollback_exc,
-                ) from exc
-            # Rollback succeeded: live memory is back to its pre-restore state.
+                if original is None:
+                    if path.exists():
+                        path.unlink()
+                else:
+                    atomic_write_bytes(path, original)
+            except OSError as re_exc:
+                rollback_ok = False
+                rollback_exc = re_exc
+        if rollback_ok:
             raise RestoreFailedError(
                 f"Restore of {snapshot.snapshot_id} failed ({type(exc).__name__}: {exc}); "
                 f"live memory was rolled back to its pre-restore state."
             ) from exc
-        # No safety net was taken (caller passed --no-safety-snapshot). Some
-        # files may already be replaced; we cannot roll back. Surface loudly.
+        # Rollback itself failed — surface loudly, naming the safety snapshot (if
+        # one was taken) so the user has a manual recovery path.
         raise RestorePartialError(
             snapshot_id=snapshot.snapshot_id,
-            safety_snapshot_id=None,
+            safety_snapshot_id=safety.snapshot_id if safety is not None else None,
             original=exc,
-            rollback_error=None,
+            rollback_error=rollback_exc,
         ) from exc
 
     # Regenerate derived startup files from the restored reflections when the
