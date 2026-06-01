@@ -371,6 +371,35 @@ def test_tombstoned_reflection_snapshot_is_not_selected(tmp_path):
     assert selected.record_id == older.record_id
 
 
+def test_legacy_import_filters_local_and_unknown_scopes_from_cluster(tmp_path):
+    # PR #86 P1: `om cluster init` -> _import_existing_memory writes a shared
+    # reflection_snapshot record, so it is a share-OUT path and must route the
+    # legacy reflections.md through the same default-deny allowlist. A raw import
+    # would sync scope=local AND any explicit-unknown scope off-host as plaintext.
+    from observational_memory.cli import _import_existing_memory
+
+    config, store = _init_store(tmp_path)
+    config.reflections_path.parent.mkdir(parents=True, exist_ok=True)
+    config.reflections_path.write_text(
+        "# Reflections\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster node=node-a-->\n"
+        "- Host secret <!--om: scope=local node=node-a-->\n"
+        "- Typo scope leaks today <!--om: scope=clustr node=node-a-->\n"
+        "- Future tier value <!--om: scope=team node=node-a-->\n"
+    )
+
+    _import_existing_memory(store)
+
+    snapshots = store.list_records(kind="reflection_snapshot")
+    assert len(snapshots) == 1
+    body = store.read_payload(snapshots[0])["body"]
+    assert "Public fact" in body  # scope=cluster shared
+    assert "Host secret" not in body  # scope=local withheld (pre-existing rule)
+    assert "Typo scope leaks today" not in body  # explicit-unknown fails closed
+    assert "Future tier value" not in body  # scope=team not yet enabled -> withheld
+
+
 def test_materialize_writes_conflict_artifact_for_non_snapshot_disagreements(tmp_path):
     config, store = _init_store(tmp_path)
     store.append_record(

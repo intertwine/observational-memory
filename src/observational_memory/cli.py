@@ -2193,13 +2193,20 @@ def _import_existing_memory(store) -> None:
             },
         )
     if config.reflections_path.exists() and config.reflections_path.read_text().strip():
+        # LEAK-CRITICAL: this is a share-OUT path (it writes a shared cluster
+        # record), so the legacy reflections import must route through the same
+        # default-deny allowlist as every other share-out path (the cluster
+        # reflector and the Moss upload). Importing the raw file would sync
+        # scope=local and any explicit-unknown scope off-host as plaintext.
+        from .reflection_metadata import filter_reflection_entries_for_cluster
+
         store.append_record(
             kind="reflection_snapshot",
             namespace=store.cluster_config.default_namespace,
             source={"agent": "legacy-local-import", "host_alias": store.cluster_config.node_alias},
             payload={
                 "format": "markdown",
-                "body": config.reflections_path.read_text(),
+                "body": filter_reflection_entries_for_cluster(config.reflections_path.read_text()),
                 "frontier": store.records_frontier(),
                 "input_record_ids": [record.record_id for record in store.list_records(kind="observation")],
                 "base_snapshot_ids": [],
