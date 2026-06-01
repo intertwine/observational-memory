@@ -9,6 +9,7 @@ rather than raising — the conversation keeps working.
 
 from __future__ import annotations
 
+import enum
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -17,6 +18,21 @@ _LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_SNIPPET_MAX_CHARS = 600
 _DEFAULT_LIMIT = 5
+
+
+class RecallStatus(str, enum.Enum):
+    """The category of a recall outcome, distinct from whether it was grounded.
+
+    - OK:          backend ran and returned at least one snippet.
+    - EMPTY:       backend ran successfully but matched nothing for this query.
+    - TIMEOUT:     recall did not finish within the caller's time budget.
+    - UNAVAILABLE: the search backend is not ready (never indexed, failed to load).
+    """
+
+    OK = "ok"
+    EMPTY = "empty"
+    TIMEOUT = "timeout"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -37,6 +53,7 @@ class RecallResult:
     query: str
     snippets: list[RecallSnippet] = field(default_factory=list)
     backend_ready: bool = False
+    status: RecallStatus = RecallStatus.UNAVAILABLE
 
     @property
     def grounded(self) -> bool:
@@ -57,6 +74,9 @@ class RecallEngine:
         self._backend = backend
         self._snippet_max_chars = snippet_max_chars
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="om-recall")
+        # The single in-flight future, tracked so a wedged recall does not silently
+        # block (and mislabel) the next turn — see recall_async / has_pending_recall.
+        self._inflight: Future | None = None
 
     def backend(self):
         """Resolve (and cache) the configured search backend."""
@@ -77,7 +97,12 @@ class RecallEngine:
         """Run one recall synchronously. Never raises."""
         query = (query or "").strip()
         if not query:
-            return RecallResult(query=query, backend_ready=self.is_ready())
+            ready = self.is_ready()
+            return RecallResult(
+                query=query,
+                backend_ready=ready,
+                status=RecallStatus.EMPTY if ready else RecallStatus.UNAVAILABLE,
+            )
 
         backend = self.backend()
         try:
@@ -86,22 +111,51 @@ class RecallEngine:
             _LOGGER.debug("recall is_ready failed: %s", exc)
             ready = False
         if not ready:
-            return RecallResult(query=query, backend_ready=False)
+            return RecallResult(query=query, backend_ready=False, status=RecallStatus.UNAVAILABLE)
 
         try:
             results = backend.search(query, limit=limit)
         except Exception as exc:
             _LOGGER.debug("recall search failed: %s", exc)
-            return RecallResult(query=query, backend_ready=True)
+            # Backend was ready but the query failed: treat as unavailable, not empty —
+            # a failed search is not evidence that memory has nothing relevant.
+            return RecallResult(query=query, backend_ready=True, status=RecallStatus.UNAVAILABLE)
 
-        return RecallResult(query=query, snippets=self._shape(results), backend_ready=True)
+        snippets = self._shape(results)
+        return RecallResult(
+            query=query,
+            snippets=snippets,
+            backend_ready=True,
+            status=RecallStatus.OK if snippets else RecallStatus.EMPTY,
+        )
+
+    def has_pending_recall(self) -> bool:
+        """True if a prior recall is still occupying the single worker.
+
+        The executor has one worker and ``ThreadPoolExecutor`` cannot cancel an
+        already-running task, so a recall that overran the caller's budget keeps
+        running. Callers check this before submitting so they can classify the
+        next turn as UNAVAILABLE rather than queueing behind the wedged task and
+        falsely reporting a TIMEOUT (head-of-line blocking).
+        """
+        inflight = self._inflight
+        return inflight is not None and not inflight.done()
 
     def recall_async(self, query: str, limit: int = _DEFAULT_LIMIT) -> Future:
-        """Submit recall to the background executor. Single in-flight per call."""
-        return self._executor.submit(self.recall, query, limit)
+        """Submit recall to the background executor.
+
+        At most one recall is in flight at a time (single worker). A previously
+        submitted future that has already finished is cleared here; a still-running
+        one is left in place so the caller (via ``has_pending_recall``) can avoid
+        queueing behind it. Use ``has_pending_recall`` to detect a wedged prior
+        recall before calling this.
+        """
+        self._inflight = self._executor.submit(self.recall, query, limit)
+        return self._inflight
 
     def close(self) -> None:
         self._executor.shutdown(wait=False)
+        self._inflight = None
 
     # -- internals --------------------------------------------------
 

@@ -866,9 +866,13 @@ def recall(
 ) -> None:
     """Recall deeper memory by search query or startup expansion handle."""
     import json as json_mod
+    import logging
 
     from .search import get_backend
     from .startup_memory import recall_handle
+    from .talk import RecallStatus
+
+    _LOGGER = logging.getLogger(__name__)
 
     if not query and not handle:
         raise click.UsageError("Provide --query or --handle.")
@@ -889,16 +893,35 @@ def recall(
             raise click.ClickException(f"Unknown recall handle: {handle}") from e
         output["text"] = text
         if not query:
+            # Keep the --json shape uniform: every recall payload carries
+            # recall_status. A handle expansion is a direct file read, not a
+            # backend search, so report it as a clean "ok".
+            output["recall_status"] = RecallStatus.OK.value
             if as_json:
                 click.echo(json_mod.dumps(output, indent=2, sort_keys=True))
             else:
                 click.echo(text.rstrip())
             return
 
+    # Run the same fail-closed search path the talk loop uses, so a ready backend
+    # whose search() raises (degenerate corpus, QMD subprocess error) degrades to
+    # recall_status="unavailable" instead of crashing this command with a traceback.
     backend = get_backend(config.search_backend, config)
-    results = backend.search(query or "", limit=limit) if backend.is_ready() else []
+    backend_ready = backend.is_ready()
+    if backend_ready:
+        try:
+            results = backend.search(query or "", limit=limit)
+            recall_status = RecallStatus.OK.value if results else RecallStatus.EMPTY.value
+        except Exception as exc:
+            _LOGGER.debug("recall search failed: %s", exc)
+            results = []
+            recall_status = RecallStatus.UNAVAILABLE.value
+    else:
+        results = []
+        recall_status = RecallStatus.UNAVAILABLE.value
     payloads = [_search_result_payload(result) for result in results]
     output["results"] = payloads
+    output["recall_status"] = recall_status
     if as_json:
         click.echo(json_mod.dumps(output, indent=2, sort_keys=True))
         return
@@ -908,7 +931,13 @@ def recall(
         click.echo("---")
         click.echo()
     if not payloads:
-        click.echo("No recall results.")
+        if recall_status == RecallStatus.UNAVAILABLE.value:
+            click.echo(
+                f"Recall backend '{config.search_backend}' is unavailable "
+                f"(try `om recall --query … ` after `om search --reindex`); no results."
+            )
+        else:
+            click.echo("No recall results.")
         return
     for item in payloads:
         location = _format_location(item.get("source_path"), item.get("source_line"))  # type: ignore[arg-type]
@@ -965,7 +994,13 @@ def talk(
             click.echo(f"om: reindex failed ({exc}); continuing with the existing index.", err=True)
 
     engine = RecallEngine(config)
-    conversation = Conversation(config, engine, agent=agent, recall_limit=limit)
+    conversation = Conversation(
+        config,
+        engine,
+        agent=agent,
+        recall_limit=limit,
+        recall_timeout=config.talk_recall_timeout,
+    )
     # In --json mode stdout is reserved for the machine-readable transcript, so
     # the live conversation is rendered to stderr instead.
     transport = TextTransport(output_stream=sys.stderr if as_json else sys.stdout)
@@ -992,11 +1027,20 @@ def talk(
             transport.speak(turn.assistant)
             if turn.recalled:
                 click.echo(f"  ⟢ grounded in {len(turn.recalled)} memory snippet(s)", err=True)
+            elif turn.recall_status == "timeout":
+                click.echo(
+                    "  ⟢ memory search timed out this turn (set OM_TALK_RECALL_TIMEOUT higher "
+                    "if your backend is slow to warm up)",
+                    err=True,
+                )
+            elif turn.recall_status == "unavailable":
+                click.echo("  ⟢ memory search unavailable — reply is ungrounded", err=True)
             turns.append(
                 {
                     "user": turn.user,
                     "assistant": turn.assistant,
                     "grounded": turn.grounded,
+                    "recall_status": turn.recall_status,
                     "error": turn.error,
                     "recalled": [
                         {

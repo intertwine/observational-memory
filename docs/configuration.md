@@ -472,6 +472,20 @@ OM_MOSS_INDEX_NAME=observational-memory
 
 See [talk-to-memories.md](talk-to-memories.md) for the full Moss + `om talk` guide.
 
+### Talk recall timeout
+
+```bash
+OM_TALK_RECALL_TIMEOUT=8.0   # seconds; per-turn wait for background recall
+```
+
+`OM_TALK_RECALL_TIMEOUT` (default `8.0`) is how long each `om talk` turn waits
+on the background recall before it gives up and grounds the reply without it. A
+turn that exceeds this is reported as a timeout (`recall_status="timeout"` in
+`--json`), which is kept distinct from a genuinely empty result so the model is
+told it could not check memory rather than that memory was empty. The parse is
+fail-closed: unset, empty, garbage, or non-positive/non-finite values fall back
+to `8.0` and never raise.
+
 ## Cluster Flags
 
 Cluster mode is off until local cluster config and keys exist.

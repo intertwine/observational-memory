@@ -58,6 +58,34 @@ om talk --reindex          # rebuild the index, then start talking
 | `--for AGENT` | Host agent name for profile/recall routing (e.g. `claude`). |
 | `--json` | Print the full transcript as JSON when the conversation ends. |
 
+## Recall status per turn
+
+Each turn carries a `recall_status` that says what happened to the memory
+search, so a slow or down backend is never mistaken for "nothing relevant."
+In `--json` every turn includes a `recall_status` field with one of:
+
+| `recall_status` | Meaning |
+| --- | --- |
+| `ok` | Recall ran and grounded the reply in at least one memory snippet. |
+| `empty` | Recall ran fine but matched nothing for that turn. |
+| `timeout` | Recall did not finish within `OM_TALK_RECALL_TIMEOUT` (default 8s); the reply is ungrounded but Om is told it could not check, not that memory was empty. |
+| `unavailable` | The search backend was not ready (never indexed or failed to load), the backend search raised, or a prior turn's recall was still running and could not start a fresh one. |
+
+On a **timeout** Om is told to say it could not check just now (the condition is
+transient — a higher `OM_TALK_RECALL_TIMEOUT` may fix it). On **unavailable** Om
+just answers conversationally without flagging it, since the user can't fix a
+down or unindexed backend mid-conversation. That asymmetry is intentional.
+
+A timeout prints `memory search timed out this turn` to stderr; raise
+`OM_TALK_RECALL_TIMEOUT` if your backend is slow to warm up. See
+[configuration.md](configuration.md) for the knob.
+
+> Note: `om talk` puts a wall-clock budget on recall, so a slow backend reads as
+> `timeout`. The synchronous `om recall` and `om search` commands do **not** have
+> that budget — if a backend (e.g. Moss) hits its own internal query timeout it
+> returns no hits, which those commands report as `empty`. A future search-backend
+> change will let them distinguish a backend timeout from a true empty.
+
 ## Using Moss for fast recall (optional, cloud)
 
 [Moss](https://www.moss.dev) is a real-time semantic-search runtime. With Moss

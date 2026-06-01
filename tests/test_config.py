@@ -129,6 +129,30 @@ class TestEnvFile:
         assert config.reflector_max_input_tokens == 30000
         assert config.reflector_observation_chunk_ratio == 0.5
 
+    def test_talk_recall_timeout_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OM_TALK_RECALL_TIMEOUT", raising=False)
+        config = Config(env_file=tmp_path / "env")
+        assert config.talk_recall_timeout == 8.0
+
+    def test_talk_recall_timeout_honored(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OM_TALK_RECALL_TIMEOUT", "2.5")
+        config = Config(env_file=tmp_path / "env")
+        assert config.talk_recall_timeout == 2.5
+
+    @pytest.mark.parametrize("raw", ["", "  ", "abc", "0", "-3", "nan", "inf"])
+    def test_talk_recall_timeout_fails_closed(self, tmp_path, monkeypatch, raw):
+        monkeypatch.setenv("OM_TALK_RECALL_TIMEOUT", raw)
+        config = Config(env_file=tmp_path / "env")
+        assert config.talk_recall_timeout == 8.0
+
+    def test_talk_recall_timeout_formatting(self, tmp_path, monkeypatch):
+        # Mirror _safe_float's underscore/comma stripping; just assert it parses
+        # without raising and yields the documented stripped value.
+        monkeypatch.setenv("OM_TALK_RECALL_TIMEOUT", "1_0")
+        assert Config(env_file=tmp_path / "env").talk_recall_timeout == 10.0
+        monkeypatch.setenv("OM_TALK_RECALL_TIMEOUT", "1,5")
+        assert Config(env_file=tmp_path / "env").talk_recall_timeout == 15.0
+
     def test_qmd_config_reads_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OM_SEARCH_BACKEND", "qmd-hybrid")
         monkeypatch.setenv("OM_QMD_INDEX_NAME", "om-review")

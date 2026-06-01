@@ -140,6 +140,20 @@ def _safe_float(value: str | None, default: float) -> float:
         return default
 
 
+def _safe_positive_float(value: str | None, default: float) -> float:
+    """Like _safe_float, but rejects non-positive and non-finite values.
+
+    Used for time budgets where 0, negative, inf, or nan would change behavior
+    (a 0s timeout fires instantly). Fail-closed to *default* on any bad input.
+    """
+    import math
+
+    parsed = _safe_float(value, default)
+    if not math.isfinite(parsed) or parsed <= 0:
+        return default
+    return parsed
+
+
 def _safe_int(value: str | None, default: int) -> int:
     """Parse an int env value, falling back to *default* on bad/empty input.
 
@@ -431,6 +445,14 @@ class Config:
     # so a higher ratio minimizes the repeated re-send cost. Range (0, 1).
     reflector_observation_chunk_ratio: float = field(
         default_factory=lambda: _safe_float(os.environ.get("OM_REFLECTOR_OBSERVATION_CHUNK_RATIO"), 0.6)
+    )
+    # Per-turn wall-clock budget (seconds) for `om talk` to wait on a background
+    # recall before giving up and grounding the reply without it. A recall that
+    # exceeds this is reported as a timeout (status="timeout"), distinct from a
+    # genuinely empty result. Fail-closed: unset/empty/garbage and non-positive
+    # values fall back to the documented default.
+    talk_recall_timeout: float = field(
+        default_factory=lambda: _safe_positive_float(os.environ.get("OM_TALK_RECALL_TIMEOUT"), 8.0)
     )
     # Operator-side cap on the reflector's *output* size, applied post-call so it
     # works on every backend — including the openai-chatgpt (Codex) Responses path,
