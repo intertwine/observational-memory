@@ -305,72 +305,83 @@ def _scope_is_shareable(scope: str | None) -> bool:
     return scope is None or scope in SHAREABLE_SCOPES
 
 
+def _entry_indent(line: str) -> int:
+    """Leading-whitespace width of a line (its list-item / block indent)."""
+    return len(line) - len(line.lstrip())
+
+
+def _continues_withheld_entry(line: str, head_indent: int) -> bool:
+    """True if ``line`` is a TIGHT continuation of a withheld entry at ``head_indent``.
+
+    A withheld entry covers only its tight (no intervening blank line)
+    continuations, CommonMark-aligned:
+
+    - an absent-scope, non-bullet prose line at ANY indent (an indented or a
+      same-indent "lazy" continuation), and
+    - a nested *unscoped* child list item — a bullet indented DEEPER than the
+      entry head (Markdown reads it as part of the parent item).
+
+    It is NOT a continuation — i.e. it ENDS the withheld entry — at any genuine
+    block boundary:
+
+    - a blank line (a hard block boundary; following prose is independent),
+    - a line carrying an EXPLICIT ``scope=`` (a new entry head, judged on its own
+      scope even when nested),
+    - a heading or a section provenance marker, or
+    - a sibling / shallower list item (a bullet at ``<= head_indent``).
+    """
+    if line.strip() == "":
+        return False
+    if "scope" in parse_metadata(line):
+        return False
+    if _HEADING_RE.match(line) is not None or _SECTION_META_RE.match(line) is not None:
+        return False
+    if _BULLET_RE.match(line) is not None:
+        # Deeper bullet = nested child (part of the parent); same/shallower = sibling.
+        return _entry_indent(line) > head_indent
+    # Absent-scope, non-bullet prose with no preceding blank: a (lazy or indented)
+    # continuation of the withheld entry at any indent.
+    return True
+
+
 def _shareable_lines(lines: list[str]) -> list[str]:
-    """Keep only shareable entries, propagating a withheld entry's decision over
-    ALL of its continuation lines until a genuine block boundary.
+    """Keep only shareable entries, propagating a withheld entry's decision over its
+    tight continuation lines.
 
     A scope decision is carried on an entry's inline ``<!--om: ...-->`` metadata
     (on a bullet OR a plain metadata-bearing line), but a multi-line entry's
-    wrapped continuation lines carry none — so a naive per-line filter drops the
-    withheld entry yet lets its continuation ride along as absent-scope content (a
-    real leak: the continuation text reaches the cluster snapshot / Moss cloud and
-    keeps the heading alive). This walks ENTRIES, not physical lines.
+    wrapped continuation lines and nested unscoped child bullets carry none — so a
+    naive per-line filter drops the withheld entry yet lets that content ride along
+    as absent-scope text (a real leak: it reaches the cluster snapshot / Moss cloud
+    and keeps the heading alive). This walks ENTRIES, not physical lines, deciding
+    continuation membership with :func:`_continues_withheld_entry`.
 
-    Boundaries (CommonMark-aligned): once an entry is withheld, every following
-    line is part of that entry — INDENTED *or* same-indent "lazy" continuation —
-    until a line that genuinely starts a new block ends it:
-
-    - a blank line,
-    - a heading (``_HEADING_RE``),
-    - a new list item (``_BULLET_RE``),
-    - a line carrying an EXPLICIT ``scope=`` (a new entry head), or
-    - a section provenance marker (``_SECTION_META_RE``).
-
-    Any other line — absent-scope prose at any indent, with no blank/boundary
-    before it — is a (possibly lazy) continuation of the withheld entry and is
-    withheld too. This is the leak-safe reading: erring toward withholding only
-    under-shares (which self-heals on the next reflect), never over-shares.
-
-    An entry head with an explicit scope is always judged on its OWN scope
-    (a nested scoped entry never inherits its parent's). Blank lines are buffered,
-    never dropped on their own: they are emitted when the withheld entry ends (so
-    output is byte-identical to the pre-Gate-4 per-line filter for the common
-    single-line-entry corpus) and discarded only when they sit strictly inside a
-    withheld multi-line entry.
+    A withheld entry ends at a genuine block boundary — a blank line, a heading, a
+    section marker, an explicitly scoped line, or a sibling/shallower list item.
+    Crucially a blank line RELEASES the following text: absent-scope prose after a
+    blank is an independent block and rides along (shared), matching the documented
+    contract. An explicitly scoped line is always judged on its OWN scope, even when
+    nested under a withheld parent. Output is byte-identical to the pre-Gate-4
+    per-line filter for the common single-line-entry corpus (no tight continuations
+    to reclassify).
     """
     out: list[str] = []
     dropping = False
-    held_blanks: list[str] = []
+    drop_indent = 0
     for line in lines:
-        fields = parse_metadata(line)
-        has_explicit_scope = "scope" in fields
         if dropping:
-            if line.strip() == "":
-                held_blanks.append(line)
-                continue
-            is_boundary = (
-                has_explicit_scope
-                or _BULLET_RE.match(line) is not None
-                or _HEADING_RE.match(line) is not None
-                or _SECTION_META_RE.match(line) is not None
-            )
-            if not is_boundary:
-                # Lazy or indented continuation of the withheld entry — drop it and
-                # any blanks that were sitting inside the entry.
-                held_blanks.clear()
-                continue
-            # The withheld entry ends here; its trailing blanks belong after it.
-            dropping = False
-            out.extend(held_blanks)
-            held_blanks = []
-        if has_explicit_scope:
+            if _continues_withheld_entry(line, drop_indent):
+                continue  # tight continuation of the withheld entry — drop it
+            dropping = False  # boundary reached; re-process `line` fresh below
+        fields = parse_metadata(line)
+        if "scope" in fields:
             if _scope_is_shareable(fields.get("scope")):
                 out.append(line)
             else:
                 dropping = True
+                drop_indent = _entry_indent(line)
             continue
         out.append(line)
-    # Any blanks still held at EOF sat inside the final withheld entry -> drop them.
     return out
 
 

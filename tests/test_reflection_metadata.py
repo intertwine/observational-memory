@@ -398,6 +398,60 @@ def test_withheld_bullet_lazy_continuation_does_not_leak_for_cluster():
     assert "Public fact" in filtered
 
 
+def test_withheld_bullet_nested_unscoped_child_does_not_leak_for_cluster():
+    """PR #86 re-review P1 (nested child): a nested UNSCOPED child list item under
+    a withheld parent is part of the parent item in Markdown, so it must be
+    withheld too — not treated as a sibling boundary and emitted."""
+    doc = (
+        "# Reflections\n\n"
+        "## Private\n"
+        "- Secret plan <!--om: scope=local node=laptop-->\n"
+        "  - nested Acme private cadence\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster node=laptop-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "nested Acme private cadence" not in filtered
+    assert "Secret plan" not in filtered
+    assert "Private" not in filtered
+    assert "Public fact" in filtered
+
+
+def test_explicitly_scoped_nested_child_is_judged_on_its_own_scope():
+    """A nested child that carries its OWN scope is judged on that scope, never
+    inheriting the withheld parent's: a scope=cluster child under a scope=local
+    parent is shared; a scope=local child under a scope=cluster parent is withheld."""
+    doc = (
+        "# Reflections\n\n"
+        "## A\n"
+        "- Parent secret <!--om: scope=local-->\n"
+        "  - Child public KEEPME <!--om: scope=cluster-->\n"
+        "## B\n"
+        "- Parent public <!--om: scope=cluster-->\n"
+        "  - Child secret DROPME <!--om: scope=local-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "KEEPME" in filtered
+    assert "Parent secret" not in filtered
+    assert "DROPME" not in filtered
+    assert "Parent public" in filtered
+
+
+def test_blank_line_releases_independent_prose_for_cluster():
+    """PR #86 re-review P2: a blank line is a hard block boundary. Absent-scope
+    prose AFTER a blank is an independent block and rides along (shared) — the
+    withheld entry must not swallow it."""
+    doc = (
+        "# Reflections\n\n"
+        "## Notes\n"
+        "- Secret plan <!--om: scope=local-->\n\n"
+        "Independent shared prose that follows a blank line.\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "Secret plan" not in filtered
+    assert "Independent shared prose that follows a blank line." in filtered
+
+
 def test_shared_bullet_continuation_line_is_preserved_for_cluster():
     """Parity guard: a SHARED bullet's continuation must still ride along, so the
     continuation-aware filter only withholds continuations of WITHHELD bullets."""
