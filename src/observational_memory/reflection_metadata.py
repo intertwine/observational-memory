@@ -306,29 +306,40 @@ def _scope_is_shareable(scope: str | None) -> bool:
 
 
 def _shareable_lines(lines: list[str]) -> list[str]:
-    """Keep only shareable entries, propagating a withheld entry's decision to its
-    indented CONTINUATION lines.
+    """Keep only shareable entries, propagating a withheld entry's decision over
+    ALL of its continuation lines until a genuine block boundary.
 
     A scope decision is carried on an entry's inline ``<!--om: ...-->`` metadata
     (on a bullet OR a plain metadata-bearing line), but a multi-line entry's
     wrapped continuation lines carry none — so a naive per-line filter drops the
     withheld entry yet lets its continuation ride along as absent-scope content (a
     real leak: the continuation text reaches the cluster snapshot / Moss cloud and
-    keeps the heading alive). This walks entries instead of physical lines:
+    keeps the heading alive). This walks ENTRIES, not physical lines.
 
-    - A line with an EXPLICIT ``scope=`` is an entry head, decided by
-      :func:`_scope_is_shareable` regardless of indent (a nested scoped entry is
-      judged on its OWN scope, never inheriting its parent's).
-    - While inside a withheld entry, an absent-scope line indented deeper than that
-      entry head is its continuation and is withheld too.
-    - Blank lines are buffered, never dropped on their own: they are emitted when
-      the withheld entry ends (so output stays byte-identical to the pre-Gate-4
-      per-line filter for the common single-line-entry corpus) and discarded only
-      when they sit strictly inside a withheld multi-line entry.
+    Boundaries (CommonMark-aligned): once an entry is withheld, every following
+    line is part of that entry — INDENTED *or* same-indent "lazy" continuation —
+    until a line that genuinely starts a new block ends it:
+
+    - a blank line,
+    - a heading (``_HEADING_RE``),
+    - a new list item (``_BULLET_RE``),
+    - a line carrying an EXPLICIT ``scope=`` (a new entry head), or
+    - a section provenance marker (``_SECTION_META_RE``).
+
+    Any other line — absent-scope prose at any indent, with no blank/boundary
+    before it — is a (possibly lazy) continuation of the withheld entry and is
+    withheld too. This is the leak-safe reading: erring toward withholding only
+    under-shares (which self-heals on the next reflect), never over-shares.
+
+    An entry head with an explicit scope is always judged on its OWN scope
+    (a nested scoped entry never inherits its parent's). Blank lines are buffered,
+    never dropped on their own: they are emitted when the withheld entry ends (so
+    output is byte-identical to the pre-Gate-4 per-line filter for the common
+    single-line-entry corpus) and discarded only when they sit strictly inside a
+    withheld multi-line entry.
     """
     out: list[str] = []
     dropping = False
-    drop_indent = 0
     held_blanks: list[str] = []
     for line in lines:
         fields = parse_metadata(line)
@@ -337,10 +348,15 @@ def _shareable_lines(lines: list[str]) -> list[str]:
             if line.strip() == "":
                 held_blanks.append(line)
                 continue
-            indent = len(line) - len(line.lstrip())
-            if not has_explicit_scope and indent > drop_indent:
-                # Continuation of the withheld entry — drop it and any blanks that
-                # were sitting inside the entry.
+            is_boundary = (
+                has_explicit_scope
+                or _BULLET_RE.match(line) is not None
+                or _HEADING_RE.match(line) is not None
+                or _SECTION_META_RE.match(line) is not None
+            )
+            if not is_boundary:
+                # Lazy or indented continuation of the withheld entry — drop it and
+                # any blanks that were sitting inside the entry.
                 held_blanks.clear()
                 continue
             # The withheld entry ends here; its trailing blanks belong after it.
@@ -352,7 +368,6 @@ def _shareable_lines(lines: list[str]) -> list[str]:
                 out.append(line)
             else:
                 dropping = True
-                drop_indent = len(line) - len(line.lstrip())
             continue
         out.append(line)
     # Any blanks still held at EOF sat inside the final withheld entry -> drop them.

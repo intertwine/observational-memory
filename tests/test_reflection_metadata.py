@@ -378,6 +378,26 @@ def test_withheld_bullet_continuation_line_does_not_leak_for_cluster():
     assert "Public fact" in filtered  # a shared bullet elsewhere is untouched
 
 
+def test_withheld_bullet_lazy_continuation_does_not_leak_for_cluster():
+    """PR #86 re-review P1 (lazy continuation): a same-indent absent-scope line
+    directly after a withheld bullet, with no blank/heading/list boundary, is a
+    CommonMark lazy continuation of that list item — it must be withheld too, not
+    kept as independent prose."""
+    doc = (
+        "# Reflections\n\n"
+        "## Private\n"
+        "- Secret plan <!--om: scope=local node=laptop-->\n"
+        "lazy continuation naming Acme private cadence\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster node=laptop-->\n"
+    )
+    filtered = filter_reflection_entries_for_cluster(doc)
+    assert "lazy continuation naming Acme private cadence" not in filtered
+    assert "Secret plan" not in filtered
+    assert "Private" not in filtered  # section emptied -> heading pruned
+    assert "Public fact" in filtered
+
+
 def test_shared_bullet_continuation_line_is_preserved_for_cluster():
     """Parity guard: a SHARED bullet's continuation must still ride along, so the
     continuation-aware filter only withholds continuations of WITHHELD bullets."""
