@@ -732,16 +732,22 @@ def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: b
 
 def _search_result_payload(result) -> dict[str, object]:
     """Normalize a search result for JSON and terminal rendering."""
+    from .startup_memory import _strip_om_metadata
+
     metadata = dict(result.document.metadata)
     metadata.pop("source_start_line", None)
     qmd_line = metadata.get("qmd_line", metadata.get("line"))
+    # Strip inline `<!--om: ...-->` metadata and `<!--om-section: ...-->`
+    # provenance stamps from the displayed snippet so recall output never leads
+    # with a raw HTML comment.
+    content = _strip_om_metadata(result.document.content)[:500]
     return {
         "rank": result.rank,
         "score": result.score,
         "doc_id": result.document.doc_id,
         "source": result.document.source.value,
         "heading": result.document.heading,
-        "content": result.document.content[:500],
+        "content": content,
         "source_path": metadata.get("file_path"),
         "source_line": metadata.get("source_line"),
         "qmd_file": metadata.get("qmd_file"),

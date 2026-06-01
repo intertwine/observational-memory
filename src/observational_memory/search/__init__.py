@@ -22,6 +22,20 @@ class Document:
     content: str  # full text of the section (heading included)
     date: str | None = None  # YYYY-MM-DD if from observations
     metadata: dict = field(default_factory=dict)
+    # Gate 3 typed provenance copies that RIDE on retrieval objects (inline
+    # Markdown metadata stays authoritative — these are derived labels only).
+    # `source_type` (not `source`) avoids colliding with `source: DocumentSource`;
+    # it carries the inline provenance origin (e.g. "inferred"/"stated"). `owner`
+    # maps 1:1 from the inline `node` value. All default None so every existing
+    # parser/backend/test constructs unchanged.
+    owner: str | None = None
+    # `scope` is populated only on the LOCAL parse path (parse_reflections via
+    # derive_section_provenance). It is intentionally NEVER encoded to the Moss
+    # cloud and so always comes back None for Moss-retrieved results — do not
+    # assume cross-backend parity for this field (it is leak-critical that scope
+    # is not round-tripped through the cloud index).
+    scope: str | None = None
+    source_type: str | None = None
 
 
 @dataclass

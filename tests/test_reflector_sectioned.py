@@ -487,3 +487,159 @@ def test_parser_does_not_split_on_section_handle_inside_markdown_body():
     # The injected line stays inside the body, NOT a second patch.
     assert "SECTION_HANDLE: ref:archive" in patches[0].markdown
     assert "...and then the markdown body." in patches[0].markdown
+
+
+# --------------------------------------------------------------------------- #
+# Gate 3: section provenance survives the M3 sectioned reflect end-to-end.
+# --------------------------------------------------------------------------- #
+
+
+def test_sectioned_reflector_restamps_after_patch(monkeypatch, tmp_path):
+    """Run the M3 sectioned path end-to-end through run_reflector ->
+    finalize_reflection. On a FIRST stamping run (the on-disk fixture carries no
+    per-bullet `<!--om:-->` metadata yet), ensure_reflection_metadata adds that
+    metadata to every section, so every section's body changes and every H2 is
+    stamped exactly once; the doc must still round-trip byte-for-byte and a model
+    patch that omits the stamp gets deterministically re-stamped."""
+    from observational_memory.config import Config
+    from observational_memory.reflect import run_reflector
+    from observational_memory.reflection_sections import parse_reflection_document
+
+    config = Config(
+        memory_dir=tmp_path / "memory",
+        reflector_strategy="sectioned",
+        reflector_max_input_tokens=45000,
+    )
+    config.ensure_memory_dir()
+    config.reflections_path.write_text(REFLECTIONS)
+    config.observations_path.write_text(OBSERVATIONS)
+
+    def fake_compress(system_prompt, user_content, config, **kwargs):
+        # The model patches one section and does NOT emit any section stamp.
+        return (
+            "SECTION_HANDLE: ref:core-identity\n"
+            "UPDATED_MARKDOWN:\n"
+            "## Core Identity\n\n- **Name:** Alex\n- **Role:** staff engineer\n"
+        )
+
+    monkeypatch.setattr(reflect, "compress", fake_compress)
+    result = run_reflector(config, dry_run=True)
+    assert result is not None
+
+    parsed = parse_reflection_document(result)
+    assert parsed.sections, "expected H2 sections in the reassembled doc"
+    # First-run: every section changes (per-bullet metadata added) and is stamped.
+    for section in parsed.sections:
+        assert "<!--om-section:" in section.text, f"section {section.handle} missing stamp"
+    # Exactly one stamp per H2 (no duplication from the patch path).
+    assert result.count("<!--om-section:") == len(parsed.sections)
+    # The stamped document still round-trips byte-for-byte.
+    assert parsed.render() == result
+
+
+def test_sectioned_untouched_section_keeps_prior_last_reflected(monkeypatch, tmp_path):
+    """Gate 3 honesty: in the sectioned path an UNTOUCHED section must keep its
+    PRIOR `last_reflected` (it was not folded this run) while only the touched
+    section is restamped with today's date. A blanket restamp would lie about the
+    freshness of every untouched section at scale."""
+    from observational_memory.config import Config
+    from observational_memory.reflect import run_reflector
+
+    # Prior is already in steady state: per-bullet metadata + section markers
+    # dated 2026-05-09 on every section.
+    prior = (
+        "# Reflections\n\n"
+        "*Last updated: 2026-05-09 09:00 UTC*\n"
+        "*Last reflected: 2026-05-09*\n\n"
+        "## Core Identity\n\n"
+        "<!--om-section: last_reflected=2026-05-09 derived_from_obs_window=2026-05-08..2026-05-09-->\n"
+        "- **Name:** Alex <!--om: id=ome_aaa kind=identity source_type=inferred confidence=medium "
+        "sensitivity=personal actionability=high last_seen=2026-05-09T00:00:00Z seen_count=1 "
+        "node=local scope=cluster-->\n\n"
+        "## Preferences & Opinions\n\n"
+        "<!--om-section: last_reflected=2026-05-09 derived_from_obs_window=2026-05-08..2026-05-09-->\n"
+        "- prefers uv over pip <!--om: id=ome_bbb kind=preference source_type=inferred confidence=medium "
+        "sensitivity=normal actionability=medium last_seen=2026-05-09T00:00:00Z seen_count=1 "
+        "node=local scope=cluster-->\n"
+    )
+    observations = "# Observations\n\n## 2026-05-10\n\n- Worked on observational-memory: landed the router.\n"
+
+    config = Config(
+        memory_dir=tmp_path / "memory",
+        reflector_strategy="sectioned",
+        reflector_max_input_tokens=45000,
+    )
+    config.ensure_memory_dir()
+    config.reflections_path.write_text(prior)
+    config.observations_path.write_text(observations)
+
+    def fake_compress(system_prompt, user_content, config, **kwargs):
+        # Patch ONLY core-identity, preserving its existing bullet metadata id.
+        return (
+            "SECTION_HANDLE: ref:core-identity\n"
+            "UPDATED_MARKDOWN:\n"
+            "## Core Identity\n\n"
+            "- **Name:** Alex Smith <!--om: id=ome_aaa kind=identity source_type=inferred confidence=medium "
+            "sensitivity=personal actionability=high last_seen=2026-05-09T00:00:00Z seen_count=1 "
+            "node=local scope=cluster-->\n"
+        )
+
+    monkeypatch.setattr(reflect, "compress", fake_compress)
+    result = run_reflector(config, dry_run=True)
+    assert result is not None
+
+    # Touched section: fresh date; old marker dropped (exactly one marker).
+    core = result.split("## Core Identity")[1].split("## ")[0]
+    assert "last_reflected=2026-05-10" in core or "last_reflected=" in core
+    assert "last_reflected=2026-05-09" not in core
+    assert core.count("<!--om-section:") == 1
+    # Untouched section keeps its honest PRIOR date.
+    prefs = result.split("## Preferences & Opinions")[1]
+    assert "last_reflected=2026-05-09 derived_from_obs_window=2026-05-08..2026-05-09" in prefs
+    assert prefs.count("<!--om-section:") == 1
+
+
+def test_section_provenance_self_heals_reflowed_stale_marker():
+    """A model echo that reflows a stale `<!--om-section:` marker away from the
+    heading (after a blank line) must NOT accumulate: a changed section drops
+    EVERY stale marker in its body and emits exactly one fresh one."""
+    from datetime import datetime, timezone
+
+    from observational_memory.reflection_metadata import ensure_section_provenance
+
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    prior = (
+        "## Core Identity\n\n"
+        "<!--om-section: last_reflected=2026-05-30 derived_from_obs_window=2026-05-28..2026-05-29-->\n"
+        "- Name: Alex\n"
+    )
+    # Model echoes the stale marker AFTER a blank line, then changes a bullet.
+    reflowed = (
+        "## Core Identity\n\n"
+        "<!--om-section: last_reflected=2026-05-30 derived_from_obs_window=2026-05-28..2026-05-29-->\n\n"
+        "- Name: Alex Smith\n"
+    )
+    out = ensure_section_provenance(reflowed, obs_window=("2026-05-31", "2026-05-31"), now=now, prior_text=prior)
+    assert out.count("<!--om-section:") == 1
+    assert "last_reflected=2026-05-30" not in out
+    assert "last_reflected=2026-06-01" in out
+
+
+def test_section_provenance_blank_line_before_external_marker_is_deduped():
+    """A user/formatter that puts a blank line before an existing marker (Markdown
+    is user-editable) must still converge to a single marker when the section is
+    restamped — no two contradictory markers."""
+    from datetime import datetime, timezone
+
+    from observational_memory.reflection_metadata import ensure_section_provenance
+
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    doc = (
+        "# Reflections\n\n## Core Identity\n\n"
+        "<!--om-section: last_reflected=2026-05-01 derived_from_obs_window=2026-04-01..2026-05-01-->\n"
+        "- Name: Alex\n"
+    )
+    # prior_text="" forces a restamp; the externally-positioned marker must be removed.
+    out = ensure_section_provenance(doc, obs_window=("2026-05-28", "2026-06-01"), now=now)
+    assert out.count("<!--om-section:") == 1
+    assert "last_reflected=2026-05-01" not in out

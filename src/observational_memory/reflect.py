@@ -10,7 +10,11 @@ from pathlib import Path
 
 from .config import Config
 from .llm import compress
-from .reflection_metadata import ensure_reflection_metadata, prune_stale_snapshots
+from .reflection_metadata import (
+    ensure_reflection_metadata,
+    ensure_section_provenance,
+    prune_stale_snapshots,
+)
 from .reflection_patch import PatchParseError, parse_section_patches
 from .reflection_router import core_bundle_handles, route_chunk
 from .reflection_sections import parse_reflection_document, reassemble_document, slugify
@@ -241,6 +245,18 @@ def finalize_reflection(
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     result = _stamp_timestamps(result, now_utc, latest_obs_date or now_utc)
     result = ensure_reflection_metadata(result, node="local")
+    # Gate 3: stamp section-level rot-proof provenance over the observation
+    # window actually folded this run. The lower bound comes from the PRIOR
+    # on-disk reflections' `Last reflected` line (read before the new write
+    # lands); the upper bound is the latest consumed observation. A None window
+    # (no dated observations) leaves the document unstamped (default-preserving).
+    prior_reflections = config.reflections_path.read_text() if config.reflections_path.exists() else ""
+    obs_window = _compute_obs_window(prior_reflections, raw_observations)
+    # Pass the prior on-disk reflections so a section whose body did not change
+    # this run keeps its honest prior `last_reflected` (untouched sections must
+    # not be falsely restamped — critical under the sectioned strategy where most
+    # sections are reassembled byte-for-byte and were not folded).
+    result = ensure_section_provenance(result, obs_window=obs_window, prior_text=prior_reflections)
     result, _summary = prune_stale_snapshots(
         result,
         ttl_days=config.snapshot_ttl_days,
@@ -1173,6 +1189,51 @@ def _extract_latest_observation_date(observations: str) -> str | None:
     return max(dates) if dates else None
 
 
+def _extract_observation_date_range(observations: str) -> tuple[str, str] | None:
+    """Return the ``(min, max)`` ``## YYYY-MM-DD`` date span in *observations*.
+
+    Mirrors :func:`_extract_latest_observation_date` but returns the full span.
+    Returns None when there are no dated observation headers (fail-closed: the
+    caller then omits ``derived_from_obs_window`` entirely rather than stamping a
+    wrong/partial range).
+    """
+    dates = re.findall(r"^## (\d{4}-\d{2}-\d{2})", observations, flags=re.MULTILINE)
+    if not dates:
+        return None
+    return min(dates), max(dates)
+
+
+def _compute_obs_window(prior_reflections: str, raw_observations: str) -> tuple[str, str] | None:
+    """Compute the rot-proof observation-window date range folded this run.
+
+    The window is the NEW-observation subset actually consumed this run: slice
+    ``raw_observations`` with the prior ``Last reflected`` date (the lower bound,
+    recovered from the incoming reflections) via :func:`_filter_new_observations`,
+    then take that slice's ``(min, max)``. Fail-closed throughout:
+
+    - No dated observations at all -> None (caller omits the field).
+    - A prior reflected date but the new slice has no dated sections -> fall back
+      to a degenerate single-day range over the latest dated observation.
+
+    A date range is rot-proof by construction: it never dangles when individual
+    observations age out / are trimmed (the reason per-fact ``source_obs``
+    pointers are forbidden).
+    """
+    if not raw_observations.strip():
+        return None
+    latest = _extract_latest_observation_date(raw_observations)
+    if latest is None:
+        return None
+    prior = _parse_last_reflected(prior_reflections)
+    new_obs = _filter_new_observations(raw_observations, prior)
+    window = _extract_observation_date_range(new_obs)
+    if window is None:
+        # No dated sections in the consumed slice (e.g. no prior reflected date
+        # advanced past every observation). Stamp an honest single-day range.
+        return latest, latest
+    return window
+
+
 def _stamp_timestamps(reflections: str, updated: str, reflected: str) -> str:
     """Ensure reflections have correct ``Last updated`` and ``Last reflected`` lines.
 
@@ -1339,6 +1400,13 @@ def _run_cluster_reflector(config: Config, dry_run: bool = False) -> str | None:
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     result = _stamp_timestamps(result, now_utc, latest_obs_date or now_utc)
     result = ensure_reflection_metadata(result, node=store.cluster_config.node_id)
+    # Gate 3: stamp section-level provenance on the cluster path too (it persists
+    # through its own append_record, not finalize_reflection). The prior lower
+    # bound is the selected snapshot body's `Last reflected`. The section marker
+    # carries no `scope` key, so filter_reflection_entries_for_cluster (applied at
+    # append time) never drops it and never deletes a heading.
+    obs_window = _compute_obs_window(reflections, raw_observations)
+    result = ensure_section_provenance(result, obs_window=obs_window, prior_text=reflections)
     result, _summary = prune_stale_snapshots(
         result,
         ttl_days=config.snapshot_ttl_days,

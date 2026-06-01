@@ -307,6 +307,39 @@ def test_scope_local_sections_are_not_uploaded(fake_moss):
         backend.close()
 
 
+def test_scope_local_stamped_section_is_not_uploaded(fake_moss):
+    """Gate 3 leak guard: a wholly-local section that carries the section-level
+    `<!--om-section:` provenance stamp (the on-disk reality post-reflect) must
+    STILL be withheld. The stamp is not real body; stripping the local bullets
+    leaves only heading + stamp, which must not resurrect the section into the
+    cloud index and leak the heading + reflect cadence."""
+    backend = _backend()
+    try:
+        docs = _docs()
+        docs.append(
+            Document(
+                doc_id="ref:secret",
+                source=DocumentSource.REFLECTIONS,
+                heading="## Secret Project Codename",
+                content=(
+                    "## Secret Project Codename\n"
+                    "<!--om-section: last_reflected=2026-06-01 derived_from_obs_window=2026-05-28..2026-05-31-->\n"
+                    "- Pursuing Acme Corp <!--om: scope=local node=laptop-->"
+                ),
+            )
+        )
+        backend.index(docs)
+        client = _FakeMossClient.instances[-1]
+        uploaded_ids = {d.id for d in client.indexes["om-test"]}
+        assert "ref:secret" not in uploaded_ids
+        # And no uploaded doc text leaks the secret heading or the cadence.
+        for d in client.indexes["om-test"]:
+            assert "Secret Project Codename" not in d.text
+            assert "om-section" not in d.text
+    finally:
+        backend.close()
+
+
 def test_fail_closed_when_sdk_missing(monkeypatch):
     # No fake_moss fixture: ensure `import moss` fails.
     monkeypatch.setitem(sys.modules, "moss", None)
@@ -346,5 +379,111 @@ def test_get_backend_moss_with_creds_is_moss_backend(monkeypatch, fake_moss):
     backend = get_backend("moss", config)
     try:
         assert isinstance(backend, MossBackend)
+    finally:
+        backend.close()
+
+
+# --- Gate 3: typed owner/source_type round-trip + scope leak guards --------
+
+
+def test_moss_roundtrip_carries_owner_and_source_type(fake_moss):
+    backend = _backend()
+    try:
+        backend.index(
+            [
+                Document(
+                    doc_id="ref:active-projects",
+                    source=DocumentSource.REFLECTIONS,
+                    heading="## Active Projects",
+                    content=(
+                        "## Active Projects\n"
+                        "- Working on the voice feature <!--om: node=laptop source_type=stated scope=cluster-->\n"
+                    ),
+                )
+            ]
+        )
+        results = backend.search("voice", limit=5)
+        assert len(results) == 1
+        doc = results[0].document
+        assert doc.owner == "laptop"
+        assert doc.source_type == "stated"
+        # scope is never encoded to the cloud, so it comes back None.
+        assert doc.scope is None
+    finally:
+        backend.close()
+
+
+def test_moss_never_encodes_scope_adversarial(fake_moss):
+    for scope in ("local", "cluster"):
+        doc = Document(
+            doc_id="ref:x",
+            source=DocumentSource.REFLECTIONS,
+            heading="## X",
+            content="## X\n- fact",
+            owner="laptop",
+            scope=scope,
+            source_type="stated",
+        )
+        meta = MossBackend._encode_metadata(doc)
+        assert "scope" not in meta
+        # owner/source_type are encoded.
+        assert meta["owner"] == "laptop"
+        assert meta["source_type"] == "stated"
+
+
+def test_with_content_preserves_typed_fields(fake_moss):
+    from observational_memory.search.moss import _with_content
+
+    doc = Document(
+        doc_id="ref:mixed",
+        source=DocumentSource.REFLECTIONS,
+        heading="## Mixed",
+        content=(
+            "## Mixed\n"
+            "- Shared fact <!--om: node=laptop source_type=stated scope=cluster-->\n"
+            "- Secret note <!--om: node=phone source_type=inferred scope=local-->\n"
+        ),
+        # Pre-strip values that should NOT survive verbatim.
+        owner="stale",
+        scope="local",
+        source_type="stale",
+    )
+    stripped = "## Mixed\n- Shared fact <!--om: node=laptop source_type=stated scope=cluster-->"
+    out = _with_content(doc, stripped)
+    # Re-derived from the stripped content: only the shared bullet's identity.
+    assert out.owner == "laptop"
+    assert out.source_type == "stated"
+    assert out.scope == "cluster"
+
+
+def test_moss_mixed_scope_section_no_owner_leak(fake_moss):
+    """A section with one local bullet (different owner) uploads only shared
+    lines AND the encoded owner/source_type are re-derived from the stripped
+    content, never revealing the local bullet's owner."""
+    backend = _backend()
+    try:
+        backend.index(
+            [
+                Document(
+                    doc_id="ref:mixed",
+                    source=DocumentSource.REFLECTIONS,
+                    heading="## Mixed",
+                    content=(
+                        "## Mixed\n"
+                        "- Shared fact <!--om: node=laptop source_type=stated scope=cluster-->\n"
+                        "- Secret host-only note <!--om: node=secret-node source_type=inferred scope=local-->\n"
+                    ),
+                )
+            ]
+        )
+        client = _FakeMossClient.instances[-1]
+        uploaded = {d.id: d for d in client.indexes["om-test"]}
+        assert "ref:mixed" in uploaded
+        info = uploaded["ref:mixed"]
+        assert "Secret host-only note" not in info.text
+        # The local bullet's owner must not leak via the cloud metadata map.
+        assert info.metadata.get("owner") == "laptop"
+        assert "scope" not in info.metadata
+        assert "secret-node" not in (info.metadata.get("owner") or "")
     finally:
         backend.close()

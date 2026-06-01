@@ -6,6 +6,7 @@ from observational_memory.cli import cli
 from observational_memory.config import Config
 from observational_memory.reflection_metadata import (
     ensure_reflection_metadata,
+    ensure_section_provenance,
     filter_reflection_entries_for_cluster,
     filter_reflection_entries_for_host,
     find_reflection_conflicts,
@@ -139,3 +140,109 @@ def test_prune_command_writes_reflections(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "stale_sectioned" in result.output
+
+
+# --- Gate 3: section-level rot-proof provenance ---------------------------
+
+_NOW = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def test_ensure_section_provenance_stamps_each_h2_when_window_given():
+    doc = (
+        "# Reflections\n\n"
+        "## Core Identity\n- Name: Test\n\n"
+        "## Active Projects\n- PR #33 is open\n\n"
+        "## Preferences\n- Prefers terse replies\n"
+    )
+    out = ensure_section_provenance(doc, obs_window=("2026-05-28", "2026-05-31"), now=_NOW)
+    marker = "<!--om-section: last_reflected=2026-06-01 derived_from_obs_window=2026-05-28..2026-05-31-->"
+    assert out.count("<!--om-section:") == 3
+    for heading in ("## Core Identity", "## Active Projects", "## Preferences"):
+        # The marker is the line immediately after the heading.
+        lines = out.splitlines()
+        idx = lines.index(heading)
+        assert lines[idx + 1] == marker
+    # Bullet/body content is otherwise untouched.
+    assert "- Name: Test" in out
+    assert "- PR #33 is open" in out
+    assert "- Prefers terse replies" in out
+
+
+def test_ensure_section_provenance_none_window_is_strict_noop():
+    unstamped = "# Reflections\n\n## Active Projects\n- PR #33 is open\n"
+    assert ensure_section_provenance(unstamped, obs_window=None, now=_NOW) == unstamped
+    stamped = ensure_section_provenance(unstamped, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    # An already-stamped doc passes through byte-identical when window is None.
+    assert ensure_section_provenance(stamped, obs_window=None, now=_NOW) == stamped
+
+
+def test_ensure_section_provenance_is_idempotent():
+    doc = "# Reflections\n\n## Active Projects\n- PR #33 is open\n"
+    once = ensure_section_provenance(doc, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    twice = ensure_section_provenance(once, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    assert once == twice
+    assert twice.count("<!--om-section:") == 1
+
+
+def test_section_provenance_does_not_touch_per_bullet_pass():
+    doc = "# Reflections\n\n## Active Projects\n- PR #33 is open\n"
+    per_bullet = ensure_reflection_metadata(doc, now=_NOW, node="local")
+    stamped = ensure_section_provenance(per_bullet, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    # Per-bullet metadata is intact and unchanged.
+    bullet_line = next(line for line in stamped.splitlines() if line.lstrip().startswith("- PR #33"))
+    fields = parse_metadata(bullet_line)
+    assert fields.get("scope") == "cluster"
+    assert fields.get("node") == "local"
+    assert "id" in fields and "kind" in fields
+    # The section marker yields {} from parse_metadata (invisible to the bullet pass).
+    marker_line = next(line for line in stamped.splitlines() if line.lstrip().startswith("<!--om-section:"))
+    assert parse_metadata(marker_line) == {}
+    # Re-running the per-bullet pass over the stamped doc does not duplicate or
+    # mutate the section marker.
+    rerun = ensure_reflection_metadata(stamped, now=_NOW, node="local")
+    assert rerun.count("<!--om-section:") == 1
+
+
+def test_section_stamp_only_on_h2_not_h3():
+    doc = "# Reflections\n\n## Active Projects\n### Project Alpha\n- thing\n### Project Beta\n- other thing\n"
+    out = ensure_section_provenance(doc, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    lines = out.splitlines()
+    # Exactly one marker, right after the H2; none after either H3.
+    assert out.count("<!--om-section:") == 1
+    assert lines[lines.index("## Active Projects") + 1].startswith("<!--om-section:")
+    assert not lines[lines.index("### Project Alpha") + 1].startswith("<!--om-section:")
+    assert not lines[lines.index("### Project Beta") + 1].startswith("<!--om-section:")
+
+
+def test_section_provenance_degenerate_single_day_range():
+    doc = "# Reflections\n\n## Active Projects\n- thing\n"
+    out = ensure_section_provenance(doc, obs_window=("2026-05-31", "2026-05-31"), now=_NOW)
+    assert "derived_from_obs_window=2026-05-31..2026-05-31" in out
+
+
+def test_section_stamp_survives_cluster_filter_unchanged():
+    doc = "# Reflections\n\n## Active Projects\n- PR #33 is open <!--om: scope=cluster-->\n"
+    stamped = ensure_section_provenance(doc, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    filtered = filter_reflection_entries_for_cluster(stamped)
+    # A section with surviving shared content keeps its heading AND marker.
+    assert "## Active Projects" in filtered
+    assert filtered.count("<!--om-section:") == 1
+
+
+def test_wholly_local_section_drops_heading_and_cadence_stamp_for_cluster():
+    """Gate 3 leak guard: a section whose every bullet is scope=local must NOT
+    leak its heading OR its `<!--om-section:` cadence/obs-window stamp into shared
+    cluster memory, while a shared section keeps both."""
+    doc = (
+        "# Reflections\n\n"
+        "## Secret Project\n"
+        "- Pursuing Acme <!--om: scope=local node=laptop-->\n\n"
+        "## Shared\n"
+        "- Public fact <!--om: scope=cluster node=laptop-->\n"
+    )
+    stamped = ensure_section_provenance(doc, obs_window=("2026-05-30", "2026-05-31"), now=_NOW)
+    filtered = filter_reflection_entries_for_cluster(stamped)
+    assert "Secret Project" not in filtered
+    assert "## Shared" in filtered
+    # Exactly one stamp survives — the shared section's; the local one is gone.
+    assert filtered.count("<!--om-section:") == 1

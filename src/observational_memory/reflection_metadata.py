@@ -10,6 +10,15 @@ from hashlib import sha256
 _META_RE = re.compile(r"\s*<!--om:\s*(.*?)\s*-->\s*$")
 _BULLET_RE = re.compile(r"^(\s*[-*]\s+)(.*?)(\s*<!--om:\s*.*?\s*-->\s*)?$")
 _HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
+# A section-level provenance marker. Distinct prefix from `<!--om:` so the
+# per-bullet pass (`_META_RE`/`_BULLET_RE`/`parse_metadata`) never sees it: a
+# section marker is invisible to `ensure_reflection_metadata` (falls through the
+# `if not bullet` branch as a verbatim passthrough) and to the line-based cluster
+# and host scope filters (`parse_metadata` returns `{}` for it, so it carries no
+# `scope` key and can never be dropped). It lives on its own line immediately
+# after a `## ` heading so it rides inside `Section.text` and reassembles
+# byte-for-byte; it can never match `_H2_RE`, so it creates no spurious section.
+_SECTION_META_RE = re.compile(r"^\s*<!--om-section:\s*(.*?)\s*-->\s*$")
 
 
 @dataclass(frozen=True)
@@ -78,6 +87,122 @@ def ensure_reflection_metadata(
         for key, value in _default_fields(kind).items():
             fields.setdefault(key, value)
         output.append(f"{prefix}{body} {format_metadata(fields)}")
+    return "\n".join(output).rstrip() + "\n"
+
+
+def _split_h2_sections(text: str) -> list[tuple[str, list[str]]]:
+    """Split ``text`` into ``(heading_line, body_lines)`` per H2 section.
+
+    Lines before the first H2 are returned under an empty heading key ``""`` so
+    a preamble (``# Reflections`` + timestamp lines) round-trips. Each section's
+    body runs up to (but excluding) the next H2 heading.
+    """
+    sections: list[tuple[str, list[str]]] = []
+    current_heading = ""
+    current_body: list[str] = []
+    for line in text.splitlines():
+        heading = _HEADING_RE.match(line)
+        if heading is not None and len(heading.group(1)) == 2:
+            sections.append((current_heading, current_body))
+            current_heading = line
+            current_body = []
+        else:
+            current_body.append(line)
+    sections.append((current_heading, current_body))
+    return sections
+
+
+def _section_body_without_markers(body_lines: list[str]) -> str:
+    """A section body with every ``<!--om-section:`` marker line removed.
+
+    Used as the comparison key for change-detection: two renderings of the same
+    section are "unchanged" iff their non-marker bodies are byte-identical, so a
+    differing-only provenance stamp never counts as a content change.
+    """
+    return "\n".join(line for line in body_lines if not _SECTION_META_RE.match(line))
+
+
+def ensure_section_provenance(
+    text: str,
+    *,
+    obs_window: tuple[str, str] | None,
+    now: datetime | None = None,
+    prior_text: str = "",
+) -> str:
+    """Stamp section-level rot-proof provenance onto TOUCHED H2 sections of ``text``.
+
+    For every ``## `` (H2) section whose content CHANGED this run, emit exactly
+    one
+    ``<!--om-section: last_reflected=<date> derived_from_obs_window=<min>..<max>-->``
+    line as the section's first body line, immediately after the heading, and
+    drop EVERY pre-existing ``<!--om-section:`` marker anywhere in that section's
+    body (self-healing: idempotent, and resilient to a model echoing the stamp
+    on a reflowed line rather than heading-adjacent).
+
+    HONEST ``last_reflected``: a section is "changed" iff its non-marker body
+    differs from the same-named section in ``prior_text``. An UNCHANGED section
+    keeps its prior marker VERBATIM — it was not touched by this reflect, so its
+    ``last_reflected`` must not be refreshed. Under the sectioned/auto strategy
+    the untouched sections are reassembled byte-for-byte from the prior document,
+    so the vast majority of sections at scale correctly retain their honest prior
+    stamp. When ``prior_text`` is empty (the default — used by the function's own
+    unit tests and any single-pass caller that genuinely rewrote everything),
+    every section is treated as changed and restamped, preserving prior behavior.
+
+    ``obs_window`` is the ``(min, max)`` date range of the observation window
+    actually folded this run. When it is ``None`` the text is returned
+    BYTE-IDENTICAL (strict no-op) — this is the prune/idempotency guarantee: a
+    caller with no real reflect window (e.g. ``om prune``) must never fabricate
+    or refresh provenance. When the window is present but degenerate
+    (``min == max``) a single-day range is stamped (honest, never empty).
+
+    Only H2 headings are stamped; H3 (``### ``) subsection headers are left
+    untouched so subsection slug/handle routing is unaffected. The pass is
+    fail-closed: any unexpected line is emitted verbatim, and a document with no
+    H2 headings returns unchanged.
+
+    NOTE on the two ``last_reflected`` notions: this per-section
+    ``last_reflected`` is the WALL-CLOCK UTC date the reflect RAN (``now``),
+    answering "when was this section last touched by a reflect". It is
+    deliberately distinct from the document-level ``*Last reflected:*`` line
+    (stamped to the newest OBSERVATION date by ``_stamp_timestamps``); the two
+    can differ by the observe->reflect lag. A synthetic ``## Stale snapshots``
+    bucket that ``prune_stale_snapshots`` appends AFTER this pass is intentionally
+    left unstamped (it is not derived from an observation window).
+    """
+    if obs_window is None:
+        return text
+
+    now_date = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y-%m-%d")
+    window_min, window_max = obs_window
+    marker = f"<!--om-section: last_reflected={now_date} derived_from_obs_window={window_min}..{window_max}-->"
+
+    # Map prior heading -> non-marker body so an unchanged section is detected by
+    # byte-equality of its content (the marker line itself is excluded).
+    prior_bodies: dict[str, str] = {}
+    for heading_line, body_lines in _split_h2_sections(prior_text):
+        if heading_line:
+            prior_bodies[heading_line] = _section_body_without_markers(body_lines)
+
+    output: list[str] = []
+    for heading_line, body_lines in _split_h2_sections(text):
+        if not heading_line:
+            # Preamble before the first H2 — emit verbatim, never stamped.
+            output.extend(body_lines)
+            continue
+        current_body = _section_body_without_markers(body_lines)
+        prior_body = prior_bodies.get(heading_line)
+        unchanged = prior_body is not None and prior_body == current_body
+        output.append(heading_line)
+        if unchanged:
+            # Section was not touched this run: preserve its body verbatim,
+            # including any prior `<!--om-section:` marker (do NOT refresh).
+            output.extend(body_lines)
+        else:
+            # Touched (or new) section: emit one fresh marker right after the
+            # heading and drop every stale marker from the body (self-healing).
+            output.append(marker)
+            output.extend(line for line in body_lines if not _SECTION_META_RE.match(line))
     return "\n".join(output).rstrip() + "\n"
 
 
@@ -151,14 +276,63 @@ def infer_kind(body: str, section: str = "") -> str:
 
 
 def filter_reflection_entries_for_cluster(text: str) -> str:
-    """Remove host-local reflection entries before writing shared cluster snapshots."""
-    output: list[str] = []
-    for line in text.splitlines():
-        fields = parse_metadata(line)
-        if fields.get("scope") == "local":
-            continue
-        output.append(line)
+    """Remove host-local reflection entries before writing shared cluster snapshots.
+
+    Drops ``scope=local`` bullet lines. LEAK-CRITICAL (Gate 3): when a section
+    reduces to a bare heading with no surviving shared content, its H2 heading AND
+    any attached ``<!--om-section:`` provenance stamp are also dropped, so a
+    wholly-local section never leaks its title or its reflect cadence / obs-window
+    into shared cluster memory. (This also closes the pre-existing orphan-heading
+    leak for wholly-local sections.) Sections that retain at least one shared line
+    keep their heading and stamp unchanged.
+    """
+    kept = [line for line in text.splitlines() if parse_metadata(line).get("scope") != "local"]
+    output = _drop_empty_h2_sections(kept)
     return "\n".join(output).rstrip() + "\n"
+
+
+def _drop_empty_h2_sections(lines: list[str]) -> list[str]:
+    """Drop any H2 section that has no real content after local-line filtering.
+
+    A section is "empty" when, between its ``## `` heading and the next H2 (or
+    end), every line is blank or a ``<!--om-section:`` provenance stamp. Such a
+    section's heading + stamp are removed entirely. Lines before the first H2
+    (preamble) and any non-empty section are preserved verbatim.
+    """
+    # Group into (heading_line_or_None, body_lines).
+    groups: list[tuple[str | None, list[str]]] = []
+    preamble: list[str] = []
+    current: tuple[str, list[str]] | None = None
+    for line in lines:
+        heading = _HEADING_RE.match(line)
+        if heading is not None and len(heading.group(1)) == 2:
+            if current is not None:
+                groups.append(current)
+            elif preamble:
+                groups.append((None, preamble))
+                preamble = []
+            current = (line, [])
+        elif current is not None:
+            current[1].append(line)
+        else:
+            preamble.append(line)
+    if current is not None:
+        groups.append(current)
+    elif preamble:
+        groups.append((None, preamble))
+
+    output: list[str] = []
+    for heading_line, body_lines in groups:
+        if heading_line is None:
+            output.extend(body_lines)
+            continue
+        has_content = any(line.strip() and not _SECTION_META_RE.match(line) for line in body_lines)
+        if not has_content:
+            # Wholly-local (or otherwise empty) section: drop heading + stamp.
+            continue
+        output.append(heading_line)
+        output.extend(body_lines)
+    return output
 
 
 def filter_reflection_entries_for_host(text: str, *, local_node: str) -> str:
