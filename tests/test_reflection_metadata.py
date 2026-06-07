@@ -293,6 +293,24 @@ def test_diff_does_not_double_report_section_across_signals():
     assert len(conflicts) == 1
 
 
+def test_diff_reports_independent_singleton_kinds_in_one_section():
+    # Codex P2: two singleton high-stakes facts of DIFFERENT kinds under one
+    # heading, both changed, must BOTH report (section-level dedup hid one).
+    prior = (
+        "## Core Identity\n"
+        "- Name: Bryan <!--om: kind=identity actionability=high -->\n"
+        "- Prefers concise replies <!--om: kind=preference actionability=medium -->\n"
+    )
+    new = (
+        "## Core Identity\n"
+        "- Name: Bryan Young <!--om: kind=identity actionability=high -->\n"
+        "- Prefers expansive replies <!--om: kind=preference actionability=medium -->\n"
+    )
+    conflicts = diff_reflection_conflicts(prior, new)
+    assert len(conflicts) == 2
+    assert {c.kind for c in conflicts} == {"identity", "preference"}
+
+
 def _setup_conflict_cli(tmp_path, monkeypatch, new_doc):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))

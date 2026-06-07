@@ -769,10 +769,16 @@ def diff_reflection_conflicts(prior: str, new: str) -> list[ReflectionConflict]:
     new_entries = _iter_reviewable_entries(new)
 
     conflicts: list[ReflectionConflict] = []
+    # Signals 1 and 2 distinguish slots by (section, kind), so independent
+    # high-stakes facts of different kinds under one heading each report. Signal 3
+    # operates on solo (single-bullet) sections, where there is exactly one slot,
+    # so it dedupes at section granularity against whatever already fired there.
+    reported_slots: set[tuple[str, str]] = set()
     reported_sections: set[str] = set()
 
     def _record(prior_entry: dict[str, str], new_entry: dict[str, str], *, signal: str) -> None:
         conflicts.append(_diff_conflict(prior_entry, new_entry, signal=signal))
+        reported_slots.add((prior_entry["section"], prior_entry["kind"]))
         reported_sections.add(prior_entry["section"])
 
     # Signal 1: same explicit id on both sides, text diverged.
@@ -788,7 +794,7 @@ def diff_reflection_conflicts(prior: str, new: str) -> list[ReflectionConflict]:
     prior_slots = _singleton_slots(prior_entries)
     new_slots = _singleton_slots(new_entries)
     for key in sorted(prior_slots.keys() & new_slots.keys()):
-        if key[0] in reported_sections:
+        if key in reported_slots:
             continue
         prior_entry = prior_slots[key]
         new_entry = new_slots[key]
