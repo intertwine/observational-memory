@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -8,6 +9,7 @@ from observational_memory.config import Config
 from observational_memory.reflection_metadata import (
     SHAREABLE_SCOPES,
     _scope_is_shareable,
+    diff_reflection_conflicts,
     ensure_reflection_metadata,
     ensure_section_provenance,
     filter_reflection_document_for_shareout,
@@ -170,6 +172,183 @@ def test_find_reflection_conflicts_surfaces_non_snapshot_disagreements():
     assert len(conflicts) == 1
     assert conflicts[0].section == "Preferences & Opinions"
     assert conflicts[0].kind == "preference"
+
+
+def test_diff_no_conflict_when_identical():
+    doc = "## Core Identity\n- Name: Bryan <!--om: kind=identity id=ome_a actionability=high -->\n"
+    assert diff_reflection_conflicts(doc, doc) == []
+
+
+def test_diff_singleton_slot_divergence_without_id_echo():
+    prior = "## Core Identity\n- Name: Bryan <!--om: kind=identity actionability=high -->\n"
+    new = "## Core Identity\n- Name: Bryan Young <!--om: kind=identity actionability=high -->\n"
+    conflicts = diff_reflection_conflicts(prior, new)
+    assert len(conflicts) == 1
+    assert conflicts[0].section == "Core Identity"
+    assert conflicts[0].kind == "identity"
+    sides = {e["side"]: e["text"] for e in conflicts[0].entries}
+    assert sides == {"prior": "Name: Bryan", "new": "Name: Bryan Young"}
+    assert {e["signal"] for e in conflicts[0].entries} == {"slot"}
+
+
+def test_diff_id_divergence_when_metadata_comment_echoed():
+    prior = "## Policy\n- Never force push <!--om: kind=policy id=ome_xyz actionability=high -->\n"
+    new = "## Policy\n- Always force push <!--om: kind=policy id=ome_xyz actionability=high -->\n"
+    conflicts = diff_reflection_conflicts(prior, new)
+    assert len(conflicts) == 1
+    assert {e["signal"] for e in conflicts[0].entries} == {"id"}
+
+
+def test_diff_no_false_positive_when_section_gains_entry():
+    prior = "## Prefs\n- Prefers tabs <!--om: kind=preference id=ome_1 -->\n"
+    new = (
+        "## Prefs\n- Prefers tabs <!--om: kind=preference id=ome_1 -->\n"
+        "- Prefers dark mode <!--om: kind=preference id=ome_2 -->\n"
+    )
+    assert diff_reflection_conflicts(prior, new) == []
+
+
+def test_diff_no_false_positive_on_unchanged_multi_fact_section():
+    # The cross-host heuristic would flag this slot (two differing texts, two
+    # records); the prior-vs-new diff must not, because nothing changed.
+    doc = (
+        "## Prefs\n- Prefers tabs <!--om: kind=preference id=ome_1 -->\n"
+        "- Prefers dark mode <!--om: kind=preference id=ome_2 -->\n"
+    )
+    assert diff_reflection_conflicts(doc, doc) == []
+
+
+def test_diff_ignores_local_scope_and_snapshot_kinds():
+    prior = (
+        "## Core Identity\n- Name: Bryan <!--om: kind=identity scope=local actionability=high -->\n"
+        "## Status\n- Working on PR #1 <!--om: kind=snapshot actionability=low -->\n"
+    )
+    new = (
+        "## Core Identity\n- Name: Changed <!--om: kind=identity scope=local actionability=high -->\n"
+        "## Status\n- Working on PR #2 <!--om: kind=snapshot actionability=low -->\n"
+    )
+    assert diff_reflection_conflicts(prior, new) == []
+
+
+def test_diff_id_signal_reported_once_not_double_counted_by_slot():
+    # Same explicit id AND a singleton slot — must surface a single conflict.
+    prior = "## Mode\n- Mode: cautious <!--om: kind=mode id=ome_m actionability=high -->\n"
+    new = "## Mode\n- Mode: aggressive <!--om: kind=mode id=ome_m actionability=high -->\n"
+    conflicts = diff_reflection_conflicts(prior, new)
+    assert len(conflicts) == 1
+    assert {e["signal"] for e in conflicts[0].entries} == {"id"}
+
+
+def test_diff_empty_prior_is_noop():
+    new = "## Core Identity\n- Name: Bryan <!--om: kind=identity actionability=high -->\n"
+    assert diff_reflection_conflicts("", new) == []
+
+
+@pytest.mark.parametrize(
+    "prior_text, new_text",
+    [
+        ("Name: Bryan Young", "Name: **Bryan Young**"),  # markdown bold
+        ("Name: Bryan Young", "Name: `Bryan Young`"),  # backticks
+        ("Name: Bryan", "Name:  Bryan"),  # internal whitespace
+        ("Never force-push without approval", "Never force-push without approval."),  # trailing period
+        ('Prefers "concise" replies', "Prefers “concise” replies"),  # smart quotes
+        ("Range is 2026-01 - 2026-02", "Range is 2026-01 – 2026-02"),  # en-dash
+    ],
+)
+def test_diff_normalization_suppresses_cosmetic_changes(prior_text, new_text):
+    prior = f"## Core Identity\n- {prior_text} <!--om: kind=identity actionability=high -->\n"
+    new = f"## Core Identity\n- {new_text} <!--om: kind=identity actionability=high -->\n"
+    assert diff_reflection_conflicts(prior, new) == [], "cosmetic restyle must not be a conflict"
+
+
+def test_diff_downgrade_catches_guardrail_loosened_to_evergreen():
+    # The new side drops the policy trigger word AND would re-infer as evergreen;
+    # anchoring on the prior side's high-stakes classification still surfaces it.
+    prior = "## Deployment\n- Production deploys must not run without a second approver.\n"
+    new = "## Deployment\n- Production deploys can proceed with a single approver.\n"
+    conflicts = diff_reflection_conflicts(prior, new)
+    assert len(conflicts) == 1
+    assert {e["signal"] for e in conflicts[0].entries} == {"downgrade"}
+
+
+def test_diff_downgrade_catches_explicit_kind_and_scope_downgrade():
+    prior = "## Policy\n- Never deploy on Friday. <!--om: kind=policy -->\n"
+    new = "## Policy\n- Deploy any day including Friday. <!--om: kind=policy scope=local -->\n"
+    conflicts = diff_reflection_conflicts(prior, new)
+    assert len(conflicts) == 1
+
+
+def test_diff_downgrade_requires_solo_section_both_sides():
+    # New side gains a sibling bullet -> not solo -> ambiguous (add vs edit) -> skip.
+    prior = "## Deployment\n- Production deploys must not run without approval.\n"
+    new = "## Deployment\n- Production deploys can proceed.\n- Also enabled canary rollouts.\n"
+    assert diff_reflection_conflicts(prior, new) == []
+
+
+def test_diff_does_not_double_report_section_across_signals():
+    # Kind-preserved singleton + solo section: exactly one conflict, no duplicate.
+    prior = "## Mode\n- Working mode: cautious <!--om: kind=mode actionability=high -->\n"
+    new = "## Mode\n- Working mode: aggressive <!--om: kind=mode actionability=high -->\n"
+    conflicts = diff_reflection_conflicts(prior, new)
+    assert len(conflicts) == 1
+
+
+def test_diff_reports_independent_singleton_kinds_in_one_section():
+    # Codex P2: two singleton high-stakes facts of DIFFERENT kinds under one
+    # heading, both changed, must BOTH report (section-level dedup hid one).
+    prior = (
+        "## Core Identity\n"
+        "- Name: Bryan <!--om: kind=identity actionability=high -->\n"
+        "- Prefers concise replies <!--om: kind=preference actionability=medium -->\n"
+    )
+    new = (
+        "## Core Identity\n"
+        "- Name: Bryan Young <!--om: kind=identity actionability=high -->\n"
+        "- Prefers expansive replies <!--om: kind=preference actionability=medium -->\n"
+    )
+    conflicts = diff_reflection_conflicts(prior, new)
+    assert len(conflicts) == 2
+    assert {c.kind for c in conflicts} == {"identity", "preference"}
+
+
+def _setup_conflict_cli(tmp_path, monkeypatch, new_doc):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    config = Config()
+    config.ensure_memory_dir()
+    prior = "# Reflections\n\n## Core Identity\n- Name: Bryan <!--om: kind=identity actionability=high -->\n"
+    config.reflections_path.write_text(prior)
+    monkeypatch.setattr("observational_memory.reflect.run_reflector", lambda cfg, dry: new_doc)
+    return config
+
+
+def test_reflect_check_conflicts_reports_singleton_divergence(tmp_path, monkeypatch):
+    new_doc = "# Reflections\n\n## Core Identity\n- Name: Bryan Young <!--om: kind=identity actionability=high -->\n"
+    _setup_conflict_cli(tmp_path, monkeypatch, new_doc)
+    result = CliRunner().invoke(cli, ["reflect", "--check-conflicts"])
+    assert result.exit_code == 0, result.stderr
+    assert "1 high-stakes reflection conflict" in result.stderr
+    assert "Name: Bryan Young" in result.stderr
+
+
+def test_reflect_check_conflicts_json_is_pure_stdout(tmp_path, monkeypatch):
+    new_doc = "# Reflections\n\n## Core Identity\n- Name: Bryan Young <!--om: kind=identity actionability=high -->\n"
+    _setup_conflict_cli(tmp_path, monkeypatch, new_doc)
+    result = CliRunner().invoke(cli, ["reflect", "--json"])
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert len(payload["conflicts"]) == 1
+    assert payload["conflicts"][0]["kind"] == "identity"
+    assert "Running reflector" not in result.stdout  # chatter must stay off stdout
+
+
+def test_reflect_check_conflicts_clean_when_unchanged(tmp_path, monkeypatch):
+    new_doc = "# Reflections\n\n## Core Identity\n- Name: Bryan <!--om: kind=identity actionability=high -->\n"
+    _setup_conflict_cli(tmp_path, monkeypatch, new_doc)
+    result = CliRunner().invoke(cli, ["reflect", "--check-conflicts"])
+    assert result.exit_code == 0, result.stderr
+    assert "No high-stakes reflection conflicts" in result.stderr
 
 
 def test_prune_stale_snapshots_moves_entries_idempotently():

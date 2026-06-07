@@ -554,6 +554,28 @@ def filter_reflection_entries_for_host(text: str, *, local_node: str) -> str:
     return "\n".join(output).rstrip() + "\n"
 
 
+# High-stakes kinds whose disagreement is worth surfacing to the operator even
+# at low actionability. Shared by the cross-host conflict heuristic and the
+# single-host prior-vs-new diff so the "what counts as reviewable" gate can never
+# drift between the two callers.
+_HIGH_STAKES_KINDS = frozenset({"identity", "preference", "policy", "decision", "mode"})
+
+
+def _is_reviewable_entry(*, scope: str | None, kind: str, actionability: str) -> bool:
+    """Whether a reflection bullet is worth comparing for conflicts.
+
+    Local-scoped and snapshot (volatile operational) entries are never
+    reviewable. Otherwise an entry qualifies only when it is a high-stakes kind
+    or carries high actionability — the same gate the cluster heuristic and the
+    prior-vs-new diff share, so neither can silently widen or narrow it.
+    """
+    if scope == "local" or kind == "snapshot":
+        return False
+    if kind not in _HIGH_STAKES_KINDS and actionability != "high":
+        return False
+    return True
+
+
 def find_reflection_conflicts(snapshots: list[tuple[str, str, str]]) -> list[ReflectionConflict]:
     """Find operator-visible conflicts across reflection snapshot bodies.
 
@@ -575,9 +597,7 @@ def find_reflection_conflicts(snapshots: list[tuple[str, str, str]]) -> list[Ref
             fields = parse_metadata(line)
             kind = fields.get("kind") or infer_kind(bullet.group(2), section)
             actionability = fields.get("actionability", _default_fields(kind)["actionability"])
-            if fields.get("scope") == "local" or kind == "snapshot":
-                continue
-            if kind not in {"identity", "preference", "policy", "decision", "mode"} and actionability != "high":
+            if not _is_reviewable_entry(scope=fields.get("scope"), kind=kind, actionability=actionability):
                 continue
             text = bullet.group(2).strip()
             key = (section, kind)
@@ -600,6 +620,230 @@ def find_reflection_conflicts(snapshots: list[tuple[str, str, str]]) -> list[Ref
                 ReflectionConflict(section=section, kind=kind, actionability=actionability, entries=entries)
             )
     return conflicts
+
+
+def _iter_reviewable_entries(body: str) -> list[dict[str, str]]:
+    """Walk a reflections document, yielding reviewable high-stakes entries.
+
+    Each entry records its ``section``/``kind``/``actionability``, its stable
+    ``id`` (the explicit ``id=`` metadata when present, else a text hash) plus an
+    ``id_explicit`` flag, and the casefold-able ``text``. The gate matches
+    :func:`find_reflection_conflicts` exactly via :func:`_is_reviewable_entry`.
+    """
+    return [entry for entry in _iter_all_entries(body) if entry["reviewable"]]
+
+
+def _iter_all_entries(body: str) -> list[dict[str, str]]:
+    """Walk a reflections document, yielding EVERY non-empty bullet with a
+    ``reviewable`` flag set from :func:`_is_reviewable_entry`. The reviewable-only
+    walk filters this; the solo-section downgrade signal needs the full set so it
+    can tell a one-bullet section from a multi-bullet one regardless of kind."""
+    entries: list[dict[str, str]] = []
+    section = ""
+    for line in body.splitlines():
+        heading = _HEADING_RE.match(line)
+        if heading:
+            section = heading.group(2).strip()
+            continue
+        bullet = _BULLET_RE.match(line)
+        if not bullet:
+            continue
+        text = bullet.group(2).strip()
+        if not text:
+            continue
+        fields = parse_metadata(line)
+        kind = fields.get("kind") or infer_kind(text, section)
+        actionability = fields.get("actionability", _default_fields(kind)["actionability"])
+        explicit_id = fields.get("id")
+        entries.append(
+            {
+                "section": section,
+                "kind": kind,
+                "actionability": actionability,
+                "node": fields.get("node", ""),
+                "id": explicit_id or _entry_id(text),
+                "id_explicit": "1" if explicit_id else "",
+                "text": text,
+                "reviewable": "1"
+                if _is_reviewable_entry(scope=fields.get("scope"), kind=kind, actionability=actionability)
+                else "",
+            }
+        )
+    return entries
+
+
+# Punctuation/emphasis that a reflector freely adds or restyles without changing
+# meaning. Normalizing it away before comparison keeps the diff from firing on
+# cosmetic churn (bolding a name, curling a quote, an extra space, a trailing
+# period) — the precision the advisory lives or dies by.
+_COMPARE_TRANSLATION = {
+    ord("‘"): "'",
+    ord("’"): "'",
+    ord("“"): '"',
+    ord("”"): '"',
+    ord("–"): "-",
+    ord("—"): "-",
+}
+
+
+def _normalize_for_compare(text: str) -> str:
+    """Canonicalize a bullet's text for divergence comparison.
+
+    Normalizes smart quotes/dashes, strips Markdown emphasis (``*`` and
+    backticks), collapses internal whitespace, drops trailing sentence
+    punctuation, and casefolds — applied symmetrically to both sides so only a
+    genuine wording change reads as a divergence. Deliberately conservative: it
+    does NOT touch ``_`` (snake_case) to avoid collapsing distinct facts.
+    """
+    text = text.translate(_COMPARE_TRANSLATION)
+    text = text.replace("*", "").replace("`", "")
+    text = " ".join(text.split())
+    return text.strip().rstrip(".,;:!?").casefold()
+
+
+def _diff_conflict(prior_entry: dict[str, str], new_entry: dict[str, str], *, signal: str) -> ReflectionConflict:
+    actionability = "high" if "high" in {prior_entry["actionability"], new_entry["actionability"]} else "medium"
+    return ReflectionConflict(
+        section=prior_entry["section"],
+        kind=prior_entry["kind"],
+        actionability=actionability,
+        entries=[
+            {
+                "side": "prior",
+                "node": prior_entry["node"],
+                "entry_id": prior_entry["id"],
+                "actionability": prior_entry["actionability"],
+                "text": prior_entry["text"],
+                "signal": signal,
+            },
+            {
+                "side": "new",
+                "node": new_entry["node"],
+                "entry_id": new_entry["id"],
+                "actionability": new_entry["actionability"],
+                "text": new_entry["text"],
+                "signal": signal,
+            },
+        ],
+    )
+
+
+def diff_reflection_conflicts(prior: str, new: str) -> list[ReflectionConflict]:
+    """Surface high-stakes facts a single reflect cycle silently changed.
+
+    Compares the prior on-disk reflections document against the freshly reflected
+    one. ``find_reflection_conflicts`` is built for the cross-host case (it needs
+    two or more records to fire), so it returns nothing over one host's single
+    document; this diff is the single-host complement.
+
+    Three high-precision, false-positive-safe signals fire. Every text
+    comparison runs through :func:`_normalize_for_compare`, so cosmetic restyling
+    (bold, smart quotes, whitespace, a trailing period) never counts as a change.
+
+    * **id-divergence** — an explicit ``id=`` present in BOTH documents whose text
+      diverged. Unambiguous, but only when the reflector echoed the entry's
+      metadata comment across the edit.
+    * **singleton-slot divergence** — a high-stakes ``(section, kind)`` slot
+      holding exactly one reviewable entry on each side whose text differs.
+      Robust to id loss; targets a single Name / role / governing policy quietly
+      reworded. Requires one-to-one (never fires on a slot that gained/lost
+      entries).
+    * **solo-section downgrade** — a section that is a single bullet on BOTH
+      sides where the PRIOR bullet was high-stakes and the text diverged,
+      regardless of the NEW bullet's kind/scope. This is the load-bearing guard
+      against a guardrail being silently *loosened*: a reflector can reword
+      "deploys must not run without approval" into "deploys may run" and re-tag it
+      ``evergreen``/``scope=local``, which would otherwise drop it from review.
+      Anchoring reviewability on the prior side (fixed history, not this run's
+      model-chosen classification) closes that without inviting false positives.
+
+    Known residual (deferred, by design — precision over recall): a high-stakes
+    fact reworded *inside a multi-bullet section* while its kind changes is not
+    caught (the one-to-one anchor can't disambiguate it from an add/drop). Silent
+    drops are likewise not reported — under metadata-comment churn an edit can
+    masquerade as a drop, a false positive.
+
+    Read-only and advisory: callers must never mutate durable Markdown from this.
+    """
+    prior_entries = _iter_reviewable_entries(prior)
+    new_entries = _iter_reviewable_entries(new)
+
+    conflicts: list[ReflectionConflict] = []
+    # Signals 1 and 2 distinguish slots by (section, kind), so independent
+    # high-stakes facts of different kinds under one heading each report. Signal 3
+    # operates on solo (single-bullet) sections, where there is exactly one slot,
+    # so it dedupes at section granularity against whatever already fired there.
+    reported_slots: set[tuple[str, str]] = set()
+    reported_sections: set[str] = set()
+
+    def _record(prior_entry: dict[str, str], new_entry: dict[str, str], *, signal: str) -> None:
+        conflicts.append(_diff_conflict(prior_entry, new_entry, signal=signal))
+        reported_slots.add((prior_entry["section"], prior_entry["kind"]))
+        reported_sections.add(prior_entry["section"])
+
+    # Signal 1: same explicit id on both sides, text diverged.
+    prior_by_id = {e["id"]: e for e in prior_entries if e["id_explicit"]}
+    new_by_id = {e["id"]: e for e in new_entries if e["id_explicit"]}
+    for entry_id in sorted(prior_by_id.keys() & new_by_id.keys()):
+        prior_entry = prior_by_id[entry_id]
+        new_entry = new_by_id[entry_id]
+        if _normalize_for_compare(prior_entry["text"]) != _normalize_for_compare(new_entry["text"]):
+            _record(prior_entry, new_entry, signal="id")
+
+    # Signal 2: singleton high-stakes (section, kind) slot on each side, diverged.
+    prior_slots = _singleton_slots(prior_entries)
+    new_slots = _singleton_slots(new_entries)
+    for key in sorted(prior_slots.keys() & new_slots.keys()):
+        if key in reported_slots:
+            continue
+        prior_entry = prior_slots[key]
+        new_entry = new_slots[key]
+        if _normalize_for_compare(prior_entry["text"]) != _normalize_for_compare(new_entry["text"]):
+            _record(prior_entry, new_entry, signal="slot")
+
+    # Signal 3: solo-section downgrade — prior-anchored, so a new-side
+    # reclassification can't hide a reworded guardrail.
+    prior_solo = _solo_sections(prior, require_reviewable=True)
+    new_solo = _solo_sections(new, require_reviewable=False)
+    for section in sorted(prior_solo.keys() & new_solo.keys()):
+        if section in reported_sections:
+            continue
+        prior_entry = prior_solo[section]
+        new_entry = new_solo[section]
+        if _normalize_for_compare(prior_entry["text"]) != _normalize_for_compare(new_entry["text"]):
+            _record(prior_entry, new_entry, signal="downgrade")
+    return conflicts
+
+
+def _solo_sections(body: str, *, require_reviewable: bool) -> dict[str, dict[str, str]]:
+    """Map each section that holds exactly one non-empty bullet to that bullet.
+
+    When ``require_reviewable`` is set, only sections whose single bullet is a
+    high-stakes reviewable entry are returned (the prior-side anchor); otherwise
+    any single-bullet section qualifies (the new side, so a downgraded bullet
+    still pairs)."""
+    by_section: dict[str, list[dict[str, str]]] = {}
+    for entry in _iter_all_entries(body):
+        by_section.setdefault(entry["section"], []).append(entry)
+    solo: dict[str, dict[str, str]] = {}
+    for section, members in by_section.items():
+        if len(members) != 1:
+            continue
+        only = members[0]
+        if require_reviewable and not only["reviewable"]:
+            continue
+        solo[section] = only
+    return solo
+
+
+def _singleton_slots(entries: list[dict[str, str]]) -> dict[tuple[str, str], dict[str, str]]:
+    """Map ``(section, kind)`` to its sole reviewable entry, omitting slots with
+    zero or more than one entry (a one-to-one slot is the only safe place to read
+    a text change as a divergence rather than an addition/removal)."""
+    by_slot: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for entry in entries:
+        by_slot.setdefault((entry["section"], entry["kind"]), []).append(entry)
+    return {key: members[0] for key, members in by_slot.items() if len(members) == 1}
 
 
 def prune_stale_snapshots(
