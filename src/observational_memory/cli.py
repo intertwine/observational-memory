@@ -178,28 +178,106 @@ def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
     is_flag=True,
     help="Submit an offline OpenAI Batch job (API-key 'openai' provider) and exit; apply later with `om jobs poll`",
 )
+@click.option(
+    "--check-conflicts",
+    "check_conflicts",
+    is_flag=True,
+    help="Also diff prior vs new reflections for silently-changed high-stakes facts (read-only advisory)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable conflict report (implies --check-conflicts)")
 @click.pass_context
-def reflect(ctx: click.Context, dry_run: bool, async_mode: bool) -> None:
+def reflect(ctx: click.Context, dry_run: bool, async_mode: bool, check_conflicts: bool, as_json: bool) -> None:
     """Run the reflector to condense observations into long-term memory."""
     from .reflect import run_reflector
 
     config = ctx.obj["config"]
+    check_conflicts = check_conflicts or as_json
+
+    # --json keeps stdout pure for the machine report, so reflector chatter goes
+    # to stderr in that mode.
+    chatter_err = as_json
 
     # Async is opt-in via --async (explicit) or OM_OPENAI_ASYNC_MODE=batch (env).
-    # dry-run always runs synchronously (there's nothing to defer).
+    # dry-run always runs synchronously (there's nothing to defer). The conflict
+    # diff needs the new document in hand now, so it also forces a synchronous run.
     env_async = config.openai_async_mode.strip().lower() == "batch"
-    if not dry_run and (async_mode or env_async):
+    if not dry_run and not check_conflicts and (async_mode or env_async):
         _reflect_async(config, explicit=async_mode)
         return
+    if check_conflicts and async_mode:
+        # The diff needs the new document in hand, so an explicit --async is run
+        # synchronously here. Say so rather than swallowing the flag silently.
+        click.echo("Note: --check-conflicts requires a synchronous run; ignoring --async.", err=True)
 
-    click.echo("Running reflector...")
+    # Capture the prior on-disk reflections BEFORE the reflector writes, so the
+    # conflict diff compares the genuine pre-reflect state against the new doc.
+    prior_reflections = ""
+    if check_conflicts and config.reflections_path.exists():
+        prior_reflections = config.reflections_path.read_text()
+
+    click.echo("Running reflector...", err=chatter_err)
     result = run_reflector(config, dry_run)
     if result:
-        click.echo(f"Reflections updated ({len(result)} chars)")
-        if dry_run:
+        click.echo(f"Reflections updated ({len(result)} chars)", err=chatter_err)
+        if dry_run and not as_json:
             click.echo(result)
     else:
-        click.echo("No observations to reflect on.")
+        click.echo("No observations to reflect on.", err=chatter_err)
+
+    if check_conflicts:
+        from .reflection_metadata import diff_reflection_conflicts
+
+        conflicts = diff_reflection_conflicts(prior_reflections, result or "")
+        _emit_conflict_report(conflicts, as_json=as_json)
+
+
+def _emit_conflict_report(conflicts: list, as_json: bool) -> None:
+    """Emit the read-only conflict advisory: a human summary to stderr, the full
+    report to a throwaway temp file (only when conflicts exist), and machine JSON
+    to stdout when requested. Never writes durable memory; always exit 0."""
+    report_path = _write_conflict_report(conflicts) if conflicts else None
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "conflicts": [c.to_dict() for c in conflicts],
+                    "report_path": str(report_path) if report_path else None,
+                },
+                indent=2,
+            )
+        )
+
+    if not conflicts:
+        click.echo("No high-stakes reflection conflicts (prior vs new).", err=True)
+        return
+
+    plural = "s" if len(conflicts) != 1 else ""
+    click.echo(f"⚠ {len(conflicts)} high-stakes reflection conflict{plural} (prior vs new):", err=True)
+    for conflict in conflicts:
+        click.echo(f"  [{conflict.actionability}] {conflict.section} · {conflict.kind}", err=True)
+        for entry in conflict.entries:
+            click.echo(f"    {entry['side']:>5}: {entry['text']}", err=True)
+    if report_path:
+        click.echo(f"Full report: {report_path}", err=True)
+
+
+def _write_conflict_report(conflicts: list) -> Path:
+    """Write the full conflict report to a throwaway temp file and return its
+    path. The artifact is intentionally outside the memory store — never durable,
+    never synced. A single deterministic filename is reused (overwritten) each
+    run so repeated reflects don't litter the temp directory."""
+    import tempfile
+
+    lines = ["# Reflection conflict report", "", f"{len(conflicts)} high-stakes conflict(s) between prior and new.", ""]
+    for conflict in conflicts:
+        lines.append(f"## {conflict.section} · {conflict.kind} [{conflict.actionability}]")
+        for entry in conflict.entries:
+            lines.append(f"- **{entry['side']}** ({entry.get('signal', '?')}): {entry['text']}")
+        lines.append("")
+    report_path = Path(tempfile.gettempdir()) / "om-conflicts-latest.md"
+    report_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return report_path
 
 
 def _valid_backup_reason(reason: str) -> bool:

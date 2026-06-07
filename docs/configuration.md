@@ -301,6 +301,19 @@ Set `OM_OPENAI_ASYNC_MODE=batch` to make a plain `om reflect` (including schedul
 
 A live smoke test is opt-in and skipped unless `OPENAI_API_KEY` is present with usable billing; see `docs/MAINTAINERS.md`.
 
+### Check for silently-changed facts
+
+`om reflect --check-conflicts` runs a normal reflect and then diffs the prior `reflections.md` against the new one, surfacing high-stakes facts (identity, preferences, policy, decisions, working mode) that the reflector quietly *changed* — so a loosened guardrail or rewritten preference gets a human glance instead of being smoothed over silently.
+
+```bash
+om reflect --check-conflicts   # reflect, then print any prior-vs-new conflicts to stderr
+om reflect --json              # same, machine-readable report on stdout (implies --check-conflicts)
+```
+
+It is **read-only and advisory**: the check itself never edits durable memory and always exits `0`. A human summary goes to stderr; the full report is written to a throwaway file (`om-conflicts-latest.md` in your temp directory, overwritten each run, never synced). Pair with `--dry-run` to preview conflicts without writing the reflect.
+
+The diff is tuned for **precision over recall** — it only flags an unambiguous change to a single durable fact (matching by stable entry id, by one-to-one section/kind slot, or by a single-bullet section), and ignores cosmetic restyling (bold, smart quotes, whitespace, trailing punctuation). A high-stakes fact reworded inside a busy multi-bullet section while its kind also changes is intentionally not flagged, to avoid noise. Gate 1 backups remain the safety net for rolling back any reflect.
+
 ## Auth Store
 
 `om login` writes a single host-local file:
