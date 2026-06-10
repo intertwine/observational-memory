@@ -1062,12 +1062,12 @@ def talk(
     agent: str | None,
     as_json: bool,
 ) -> None:
-    """Have a spoken-style conversation with your memories. (Experimental, 0.7.x.)
+    """Have a spoken-style conversation with your memories. (Experimental.)
 
     Each turn runs recall over your memories in the background and grounds the
     reply in what it finds. Type 'exit' (or Ctrl-D) to end. Text-only for now;
-    pluggable voice providers (mic + speech) are planned for 0.8.0+ on the same
-    loop. Flags and output may change. See docs/talk-to-memories.md.
+    pluggable voice providers (mic + speech) are planned on the same loop.
+    Flags and output may change. See docs/talk-to-memories.md.
     """
     import json as json_mod
 

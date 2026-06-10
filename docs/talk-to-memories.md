@@ -1,6 +1,6 @@
 # Talk to your memories
 
-> **Status: experimental (0.7.x).** `om talk` is a text-only preview. Pluggable
+> **Status: experimental (first released in 0.8.0).** `om talk` is a text-only preview. Pluggable
 > voice providers (microphone + speech) are planned for 0.8.0+ on the same loop,
 > and a shared team/enterprise recall layer is a 1.0 direction — see
 > [`plans/team-memory-direction.md`](../plans/team-memory-direction.md). Flags
@@ -125,12 +125,12 @@ Optional tuning:
 `om talk` is the thin, visible tip of a backend-agnostic recall architecture.
 The plan:
 
-- **0.7.x — now:** experimental, text-only conversation; recall via the local
+- **0.8.0 — now:** experimental, text-only conversation; recall via the local
   `bm25` (default) / `qmd` backends or the opt-in `moss` cloud accelerator.
-- **0.8.0+:** **pluggable voice providers** (microphone + speech-to-text in,
+- **Next:** **pluggable voice providers** (microphone + speech-to-text in,
   text-to-speech out) on the existing `VoiceTransport` seam — no change to the
-  recall or conversation code. Kept out of 0.7.x because it needs audio
-  hardware that can't be exercised in CI.
+  recall or conversation code. Kept out of the first release because it needs
+  audio hardware that can't be exercised in CI.
 - **1.0 (direction):** a shared **team/enterprise** recall layer — local
   backends for personal recall, a shared semantic layer for cross-team — with a
   proper scope/governance model. "Chat / search across team memories" then falls

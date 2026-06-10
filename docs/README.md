@@ -14,6 +14,7 @@ This folder holds the longer guides for Observational Memory. The main README is
 ## Sync And Memory Safety
 
 - [OM Cluster sync](om-cluster-sync.md): encrypted multi-machine sync.
+- [OM Mail](mail-memory.md): email inboxes as a memory substrate between agents (experimental).
 - [OM Cluster validation checklist](om-cluster-validation.md): public-safe validation steps.
 - [Host memory coexistence](coexistence.md): how OM fits beside product memory systems.
 - [OM Cluster P2P evaluation](om-cluster-p2p-evaluation.md): current direct-peer design notes.
@@ -21,9 +22,9 @@ This folder holds the longer guides for Observational Memory. The main README is
 ## Maintainers
 
 - [Maintainer guide](MAINTAINERS.md): development, CI, QMD validation, release, and Homebrew work.
-- [v0.6.6 release notes](RELEASE-0.6.6.md): current release summary.
-- [v0.6.5 release notes](RELEASE-0.6.5.md): subscription auth (`om login`).
-- [v0.6.4 release notes](RELEASE-0.6.4.md): SessionStart timeout hardening.
+- [v0.8.0 release notes](RELEASE-0.8.0.md): current release — durable, provable, conversational memory plus the OM Mail preview.
+- [v0.7.0 release notes](RELEASE-0.7.0.md): section-targeted reflection at scale.
+- [v0.6.7 release notes](RELEASE-0.6.7.md): reflector budgets and output caps.
 
 ## Archive
 

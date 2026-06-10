@@ -1,36 +1,41 @@
 # Observational Memory
 
-![Observational Memory header showing local agent memory moving through Codex hooks, Claude, Grok, ChatGPT Memory, Claude Cowork, and Hermes.](assets/observational-memory-header.png)
+![Observational Memory header showing local agent memory shared across Claude Code, Codex, Grok, Claude Cowork, and Hermes, with reviewed export to hosted agents.](assets/observational-memory-header.png)
 
 [![PyPI version](https://img.shields.io/pypi/v/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![CI](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/intertwine/observational-memory?style=social)](https://github.com/intertwine/observational-memory/stargazers)
 
-**Local memory for the agents you already use.**
+**One local memory for your AI coding agents — so every session starts knowing your work instead of starting over.**
 
-Observational Memory, or `om`, gives Claude Code, Codex, Grok Build TUI, Claude Cowork, and Hermes one shared memory on your machine. It watches agent transcripts, writes useful notes into local Markdown files, and gives new sessions a compact startup context. You can search that memory later, export reviewed memory bundles for hosted platforms, or opt in to encrypted multi-machine sync with OM Cluster.
+Observational Memory, or `om`, watches what you do with Claude Code, Codex, Grok Build TUI, and Claude Cowork (Hermes joins through its [plugin](docs/hermes-plugin.md)), distills it into plain Markdown on your machine, and hands every new session a compact memory summary. What Claude learns today, Codex knows tomorrow.
 
-The current release is `v0.7.0`. It includes:
+- **No more cold starts.** Every session begins knowing who you are, how you work, and what you were doing.
+- **One memory across agents.** Switch tools without losing context.
+- **Your memory is yours.** Plain Markdown files on your machine — readable, searchable, backed up, never silently uploaded.
 
-- **Reflection that scales** — section-targeted reflection (`OM_REFLECTOR_STRATEGY=auto`) routes observations to the sections they affect, keeps a core bundle in every fold, patches only touched sections, and reassembles the rest byte-for-byte — so a growing `reflections.md` no longer forces whole-document resend; invalid model output fails closed, leaving memory unchanged
-- **Fail-closed startup context** — the Claude, Grok, and Cowork hooks route through bounded `om context` only; if it's unavailable they emit nothing (plus a stderr hint) instead of dumping raw, unbounded memory files
-- **Configurable, honest reflector budgets** — `OM_REFLECTOR_MAX_INPUT_TOKENS` / `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO` knobs, a default that no longer silently clamps your configured cap, and diagnostics that report configured-vs-effective limits
-- **Codex-safe reflector output cap** — `OM_REFLECTOR_OUTPUT_MAX_CHARS` bounds the emitted document on every backend (trimming at a section boundary), even the ChatGPT Codex path that rejects `max_output_tokens`
-- **Clean async-Batch errors** — `om reflect --async` reports billing/quota failures as a one-line message, not a raw traceback
-- **See and cap LLM spend** — every observe/reflect call records tokens and an estimated cost, with token/dollar budgets (hard or soft, per day/month/session) that stop a runaway job before it bills (`om usage status`, `om usage budget`)
-- **Offline reflection via OpenAI Batch** — `om reflect --async` submits a job and `om jobs poll` applies it later, at ~50% token cost on a metered OpenAI key
-- **Cheaper, faster observe/reflect** — bounded reflector input, ChatGPT Codex reasoning-effort control, and Anthropic prompt caching
-- **Higher-quality startup context** — cross-section de-duplication, freshness markers on stale operational facts, and cwd/task-aware scope, inspectable with `om context --quality-report`
-- **`om login` for your ChatGPT or SuperGrok subscription** so the observer and reflector run off your existing plan instead of a metered API key
-- first-class Grok Build TUI hooks and transcript observation
-- budgeted startup context through `om context`, with compact profile projection and project-level active-context routing
-- first-class recall through `om recall`
-- richer reflection metadata and host-memory controls
-- OM Cluster relay operations, health checks, and public-safe validation docs
-- Windows, macOS, and Linux install paths
+## New in v0.8.0
 
-For configuration of all of these — providers, usage budgets, async Batch, and startup quality — see [`docs/configuration.md`](docs/configuration.md). Subscription-auth background is in [`docs/RELEASE-0.6.5.md`](docs/RELEASE-0.6.5.md).
+v0.7.0 made reflection scale. v0.8.0 makes memory **trustworthy**:
+
+- **Durable** — `om backup` / `om restore`: host-local snapshots, plus an automatic safety snapshot before every reflection, so a bad write can always be rolled back.
+- **Provable** — every memory section records when it was last derived and from which window of observations, so you always know how fresh it is and where it came from. Memory you mark machine-local (`scope=local`) never leaves your machine through any sharing channel — sync, cloud search, or mail — and unknown scopes are denied by default. `om reflect --check-conflicts` flags high-stakes facts a reflection cycle silently changed.
+- **Conversational** — `om talk`: ask your memory questions in plain English and get answers grounded in live recall (experimental).
+- Plus: `om doctor` and `om context --quality-report` now report how big and how cold each memory section is, so future pruning decisions are grounded in data.
+
+And a sneak peek at where this is going: with **OM Mail (experimental)**, agents get their own email inboxes and exchange memory as signed messages — notes, encrypted context packs, and recall requests — across machines, harnesses, models, and vendors. Nothing is sent automatically: every exchange is a deliberate command, senders must be cryptographically pinned, and machine-local memory is filtered out before anything leaves. [See how it works](docs/mail-memory.md).
+
+Everything is additive and defaults are unchanged. Full details: [v0.8.0 release notes](docs/RELEASE-0.8.0.md).
+
+**Upgrading from 0.6.x or 0.7.x?**
+
+```bash
+brew upgrade observational-memory   # or: uv tool upgrade observational-memory
+om doctor
+```
+
+No config changes needed. New surfaces (`om backup`, `om talk`, `om mail`, `--check-conflicts`) do nothing until you invoke them. One new background behavior: `om reflect` snapshots your memory before writing, with rotating retention bounding disk use.
 
 ## Quick Install
 
@@ -50,15 +55,48 @@ om install
 om doctor
 ```
 
-Install the optional enterprise auth extras if you use Anthropic through Vertex AI or Bedrock:
+`om install` sets up Claude Code and Codex by default (`--all` adds Grok and Cowork) and asks which LLM provider to use — a metered API key, or your existing ChatGPT or SuperGrok subscription via `om login`. If you use Anthropic through Vertex AI or Bedrock, install with `uv tool install "observational-memory[enterprise]"` instead of Homebrew, then run `om install`.
 
-```bash
-uv tool install "observational-memory[enterprise]"
+## How Memory Flows
+
+```mermaid
+flowchart LR
+    A["Claude Code, Codex, Grok, Cowork, Hermes logs"] --> B["om observe"]
+    C["Claude auto-memory files"] --> D["search index"]
+    C --> F
+    B --> E["observations.md"]
+    E --> F["om reflect"]
+    F --> G["reflections.md"]
+    G --> H["profile.md + active.md"]
+    H --> I["om context startup pack"]
+    E --> J
+    G --> J["om recall / om search / om talk"]
+    G -. opt-in .-> K["om cluster sync / om mail"]
 ```
 
-## What It Does
+## First Week Workflow
 
-`om` keeps four main memory files under your local data directory:
+1. Install `om`.
+2. Run `om install` and answer the provider questions.
+3. Run `om doctor`.
+4. Use Claude Code, Codex, or Grok normally — memory accumulates on its own.
+5. Search memory when you need it:
+
+```bash
+om recall --query "current project status"
+om search "release checklist"
+```
+
+6. Talk to your memory (experimental — it works, but flags may change), or check what new sessions will see:
+
+```bash
+om talk --query "what was I working on last week?"
+om context --for codex --cwd "$PWD" --task "finish docs"
+```
+
+## Where Your Memory Lives
+
+`om` keeps four plain-Markdown files you can read, search, and back up:
 
 | File | Purpose |
 | --- | --- |
@@ -67,52 +105,77 @@ uv tool install "observational-memory[enterprise]"
 | `profile.md` | Compact stable context for startup. |
 | `active.md` | Compact current context for startup. |
 
-Those files are plain Markdown. You can read them, back them up, and search them.
-
-Default paths:
-
 | Platform | Memory directory | Config directory |
 | --- | --- | --- |
 | macOS / Linux | `~/.local/share/observational-memory/` | `~/.config/observational-memory/` |
 | Windows | `%LOCALAPPDATA%\observational-memory\` | `%APPDATA%\observational-memory\` |
 
-## How Memory Flows
-
-```mermaid
-flowchart LR
-    A["Claude Code, Codex, Grok, Cowork, Hermes logs"] --> B["om observe"]
-    C["Claude auto-memory files"] --> D["search index"]
-    B --> E["observations.md"]
-    E --> F["om reflect"]
-    D --> F
-    F --> G["reflections.md"]
-    G --> H["profile.md + active.md"]
-    H --> I["om context startup pack"]
-    G --> J["om recall / om search"]
-```
-
-## First Week Workflow
-
-1. Install `om`.
-2. Run `om install` and answer the provider questions.
-3. Run `om doctor`.
-4. Start using Claude Code, Codex, or Grok normally.
-5. Search memory when you need it:
+## Common Commands
 
 ```bash
-om recall --query "current project status"
-om search "release checklist"
+om status
+om doctor                       # health check, now with memory-growth report
+om observe --source codex
+om reflect
+om reflect --check-conflicts    # reflect + flag silently-changed high-stakes facts
+om reflect --async              # offline OpenAI Batch job at ~50% of the synchronous price
+om jobs poll                    # apply completed async jobs
+om backup --reason pre-experiment
+om restore --list
+om recall --query "what was decided about sync?"
+om talk
+om search "preferences" --json
+om usage status                 # token usage, cost, and budgets
+om usage budget set --daily-usd 5.00
+om context --quality-report     # startup-context dedup / freshness / budget report
+om export --target chatgpt
 ```
 
-6. Check generated startup context:
+Multi-machine and agent-to-agent memory are opt-in:
 
 ```bash
-om context --for codex --cwd "$PWD" --task "finish docs"
+# OM Cluster: encrypted full sync across YOUR machines
+om cluster init --name "Personal Memory" --transport filesystem:~/Sync/om-cluster --import-existing
+om cluster sync
+
+# OM Mail (experimental): selective memory exchange between DISTINCT agents.
+# Peers must exchange and pin keys first — see docs/mail-memory.md.
+om mail init --username my-agent
+om mail peers add peer@agentmail.to --key <PEER_PUBLIC_KEY> --shared-key <SHARED_KEY>
+om mail send-note peer@agentmail.to --text "decision: ship v0.8.0"
+om mail sync
 ```
+
+Do not sync `~/.local/share/observational-memory/` directly with Dropbox, iCloud, Syncthing, rsync, or a NAS. Use the cluster transport directory instead.
+
+## Agent Support
+
+| Host | Current support |
+| --- | --- |
+| Claude Code | Hooks for startup context and checkpoints. |
+| Codex | Hooks-first startup and Stop checkpoints, with an AGENTS fallback. |
+| Grok Build TUI | Native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation. |
+| Claude Cowork | Local plugin on macOS with hooks and `/recall`. |
+| Hermes | External memory-provider plugin through [intertwine/hermes-observational-memory](https://github.com/intertwine/hermes-observational-memory), plus manual session-log ingestion. |
+| ChatGPT / Claude Managed Agents | Reviewed export bundles through `om export` — not live sync; `om` never silently writes hosted memory. |
+
+Out-of-tree integrations have first-class seams: mail providers and CLI add-ons plug in through public entry points ([CONTRIBUTING.md](CONTRIBUTING.md)).
+
+## Architecture At A Glance
+
+<p align="center">
+  <img src="assets/system-diagram.png" alt="Observational Memory system diagram: agent hooks feed om observe into local markdown memory; om reflect consolidates it; om context, recall, search, talk, and doctor read it; opt-in cluster sync and OM Mail share it with scope filtering." width="980" />
+</p>
+
+- `om observe` turns transcripts into recent notes.
+- `om reflect` turns recent notes into durable memory — with provenance, scope rules, and a safety snapshot first.
+- `om context` gives agents a bounded memory summary at session start.
+- `om recall`, `om search`, and `om talk` retrieve more when that summary is not enough.
+- `om export` prepares reviewed memory seed bundles for hosted systems.
+- `om cluster` syncs encrypted records across machines when you opt in.
+- `om mail` (experimental) exchanges signed memory between distinct agents over email.
 
 ## Guides
-
-Start here:
 
 - [Documentation index](docs/README.md)
 - [Install and setup](docs/install.md)
@@ -127,79 +190,9 @@ Start here:
 - [Host memory coexistence](docs/coexistence.md)
 - [Maintainer guide](docs/MAINTAINERS.md)
 
-## Agent Support
+## Version
 
-| Host | Current support |
-| --- | --- |
-| Claude Code | Hooks for startup context and checkpoints. |
-| Codex | Hooks-first startup and Stop checkpoints, with an AGENTS fallback. |
-| Grok Build TUI | Native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation. |
-| Claude Cowork | Local plugin on macOS with hooks and `/recall`. |
-| Hermes | External memory-provider plugin through [intertwine/hermes-observational-memory](https://github.com/intertwine/hermes-observational-memory), plus manual session-log ingestion. |
-| ChatGPT / Claude Managed Agents | Reviewed export bundles through `om export`; `om` does not silently write hosted memory. |
-
-## Common Commands
-
-```bash
-om status
-om doctor
-om observe --source codex
-om reflect
-om reflect --async              # submit an offline OpenAI Batch job (API-key 'openai')
-om jobs poll                    # apply completed async jobs
-om recall --query "what was decided about sync?"
-om recall --handle startup:active
-om search "preferences" --json
-om usage status                 # token usage, cost, and budgets
-om usage budget set --daily-usd 5.00
-om context --quality-report     # startup-context dedup / freshness / budget report
-om export --target chatgpt
-om export --target claude-managed-agents --output ./om-claude-memory
-```
-
-OM Cluster is off until you initialize or join a cluster:
-
-```bash
-om cluster init --name "Personal Memory" --transport filesystem:~/Sync/om-cluster --import-existing
-om cluster invite --expires 10m
-om cluster join "omc1:..."
-om cluster requests
-om cluster approve join_...
-om cluster sync
-om cluster status
-```
-
-Do not sync `~/.local/share/observational-memory/` directly with Dropbox, iCloud, Syncthing, rsync, or a NAS. Use the cluster transport directory instead.
-
-## Architecture At A Glance
-
-<p align="center">
-  <img src="assets/system-diagram.jpeg" alt="Observational Memory system diagram showing agent hooks feeding shared local markdown memory, search, and reflection." width="980" />
-</p>
-
-The short version:
-
-- `om observe` turns transcripts into recent notes.
-- `om reflect` turns recent notes into durable memory.
-- `om context` gives agents a bounded startup pack.
-- `om recall` and `om search` retrieve more when the startup pack is not enough.
-- `om export` prepares reviewed memory seed bundles for hosted systems.
-- `om cluster` syncs encrypted records across machines when you opt in.
-
-## Release State
-
-`v0.7.0` is the current release. It makes reflection scale with **section-targeted reflection** (`OM_REFLECTOR_STRATEGY=legacy|sectioned|auto`, default `auto`): observations route to the sections they affect, a core bundle rides every fold, only touched sections are patched, and the rest is reassembled byte-for-byte — ending the O(chunks×size) whole-document resend at 10x/100x scale, with invalid model output failing closed. It builds on the v0.6.7 reflector budget knobs + output cap and fail-closed startup hooks, the v0.6.6 usage/cost/budget subsystem (`om usage`) and OpenAI Batch async reflection (`om reflect --async`). The addressable memory-unit store and hierarchical compaction are deferred to v0.8.0+ (issue #71).
-
-Before the next release, maintainers should run:
-
-```bash
-make check
-uv run ruff check .
-uv run ruff format --check .
-uv run pytest
-```
-
-See [docs/MAINTAINERS.md](docs/MAINTAINERS.md) for the full release workflow.
+Current release: **v0.8.0** — [release notes](docs/RELEASE-0.8.0.md). Built on v0.7.0's section-targeted reflection (reflection that updates only the affected memory sections, not the whole file) and the v0.6.x usage/budget and async-Batch subsystems. Maintainers: the release workflow lives in [docs/MAINTAINERS.md](docs/MAINTAINERS.md).
 
 ## Contributing
 

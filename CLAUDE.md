@@ -4,24 +4,27 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.7.0`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.8.0`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
-- section-targeted reflection for scale (`OM_REFLECTOR_STRATEGY=legacy|sectioned|auto`, default `auto`): routes observations to impacted sections, always includes a core bundle, patches only touched sections, reassembles byte-for-byte, fails closed on invalid model output — ends the O(chunks×size) whole-document resend at 10x/100x
-- fail-closed startup hooks (Claude/Grok/Cowork `SessionStart` route through bounded `om context` only; never dump raw `profile.md`/`active.md`/`reflections.md`/`observations.md` on failure)
-- configurable, honestly-diagnosed reflector input budget (`OM_REFLECTOR_MAX_INPUT_TOKENS`, `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO`; configured-vs-effective cap reporting)
-- Codex-safe reflector output cap (`OM_REFLECTOR_OUTPUT_MAX_CHARS`, section-boundary trim, applied post-call so it bounds the `openai-chatgpt` path too)
-- clean async-Batch error UX (`om reflect --async` reports billing/quota failures as one-line CLI errors, not tracebacks)
-- host-local usage/cost tracking and budgets with `om usage` (SQLite `usage.sqlite`, shipped pricing snapshot, hard/soft token & dollar budgets, `om doctor` integration)
-- offline reflection via the API-key OpenAI Batch API (`om reflect --async`, `om jobs list|poll|show|cancel`, `OM_OPENAI_ASYNC_MODE`)
-- observe/reflect cost & latency controls (bounded reflector input via `OM_REFLECTOR_CONTEXT_MAX_CHARS`, Codex reasoning effort via `OM_OPENAI_CHATGPT_REASONING_EFFORT`, Anthropic prompt caching)
+- v0.8.0 theme — trustworthy memory: durable, provable, conversational (see `docs/RELEASE-0.8.0.md`)
+- `om backup` / `om restore`: host-local snapshots, automatic pre-reflect safety snapshot, rotating retention, byte-faithful restore
+- `om talk` (experimental): spoken-style conversation grounded in live recall; `OM_TALK_RECALL_TIMEOUT`; recall timeout/unavailable distinguished from "no memory" in every recall consumer; Moss recall backend joins bm25/qmd
+- section provenance stamps (`last_reflected`, `derived_from_obs_window`) plus typed owner/scope/source on retrieval objects; inline Markdown stays authoritative
+- pluggable scope governance: all share-out paths (cluster snapshots, Moss upload, OM Mail) route through one resolver with `SHAREABLE_SCOPES`; unknown scopes denied by default; `scope=local` never leaves the host
+- `om reflect --check-conflicts`: read-only conflict report riding a normal reflect (`--dry-run --check-conflicts` for a pure audit); flags silently-changed high-stakes facts
+- memory-growth instrumentation (B0) in `om doctor` and `om context --quality-report`: per-document/per-section sizes and coldness from real stamps only, never a guess
+- OM Mail (experimental, CLI-only, off by default): email inboxes as a memory substrate — Ed25519-signed envelopes, locally pinned peers, encrypted context packs, recall negotiation, held-quarantine fail-closed; `agentmail` + `localdir` providers; validated live across two machines (`docs/mail-memory.md`)
+- public plugin seams: `observational_memory.mail_providers` and `observational_memory.cli_plugins` entry points (built-ins/core win collisions; broken plugins fail loud, not silent); contributor terms in `CONTRIBUTING.md`
+- async-Batch pre-submit model guard: cross-provider reflector models rejected before the Batch job is created
+- hermetic-by-default test suite: ambient `OM_*` and provider env stripped per test
+- section-targeted reflection for scale (`OM_REFLECTOR_STRATEGY=legacy|sectioned|auto`, default `auto`): routes observations to impacted sections, patches only touched sections, reassembles byte-for-byte, fails closed on invalid model output
+- fail-closed startup hooks (Claude/Grok/Cowork `SessionStart` route through bounded `om context` only; never dump raw memory files on failure)
+- reflector budgets and output caps (`OM_REFLECTOR_MAX_INPUT_TOKENS`, `OM_REFLECTOR_OBSERVATION_CHUNK_RATIO`, `OM_REFLECTOR_OUTPUT_MAX_CHARS`)
+- host-local usage/cost tracking and budgets with `om usage`; offline reflection via the API-key OpenAI Batch API (`om reflect --async`, `om jobs list|poll|show|cancel`)
 - startup-context quality controls (cross-section dedup, operational-fact freshness markers, cwd/task scope, `om context --quality-report`)
 - `om login` for OpenAI ChatGPT and xAI SuperGrok subscriptions (host-local token store, Codex Responses-API routing, per-workflow provider selection)
-- budgeted startup context with `om context`
-- first-class recall with `om recall`
-- first-class Grok Build TUI hooks and transcript observation
-- richer reflection metadata and host-local scope controls
 - opt-in OM Cluster sync, stdlib relay server (`om-relay`, `om cluster relay serve`), relay health checks, and public-safe cluster validation docs
 
 ## Build And Test
@@ -97,8 +100,10 @@ Current docs:
 - `docs/install.md`: user install guide.
 - `docs/integrations.md`: platform integrations.
 - `docs/search-and-recall.md`: startup, recall, search, and QMD basics.
+- `docs/talk-to-memories.md`: `om talk` conversation and recall backends.
 - `docs/configuration.md`: env vars, paths, providers, schedules.
 - `docs/om-cluster-sync.md`: OM Cluster operations.
+- `docs/mail-memory.md`: OM Mail — email inboxes as a memory substrate (experimental).
 - `docs/om-cluster-validation.md`: public-safe cluster validation.
 - `docs/MAINTAINERS.md`: maintainer workflows.
 
@@ -141,4 +146,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-`v0.7.0` has release notes in `docs/RELEASE-0.7.0.md`. Future release steps require explicit user approval.
+`v0.8.0` has release notes in `docs/RELEASE-0.8.0.md`. Future release steps require explicit user approval.
