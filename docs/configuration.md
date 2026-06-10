@@ -280,7 +280,7 @@ Overrides live at `~/.config/observational-memory/pricing.toml` (set `OM_PRICING
 
 ## Offline reflection with OpenAI Batch
 
-The OpenAI Batch API runs requests offline within a 24-hour window at about half the synchronous token cost, on a separate rate-limit pool. Observational Memory can submit a reflection as a Batch job and apply the result later — useful for cutting cost on a metered key and avoiding synchronous timeouts on long reflections.
+The OpenAI Batch API runs requests offline within a 24-hour window at about half the synchronous per-token price (the same tokens, discounted), on a separate rate-limit pool. Observational Memory can submit a reflection as a Batch job and apply the result later — useful for cutting cost on a metered key and avoiding synchronous timeouts on long reflections.
 
 This is **API-key only**. It works with the direct `openai` provider (`OPENAI_API_KEY`) and is never used for the `openai-chatgpt` subscription provider, which has no Batch API. If your reflector resolves to anything other than `openai`, `--async` errors with a clear message — set `OM_LLM_REFLECTOR_PROVIDER=openai` to use it.
 
