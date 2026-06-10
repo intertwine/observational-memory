@@ -7,8 +7,8 @@ class ObservationalMemory < Formula
 
   desc "Local cross-agent memory and search for coding agents"
   homepage "https://github.com/intertwine/observational-memory"
-  url "https://files.pythonhosted.org/packages/0b/99/23973cb24d2f24593443cfb2aab2af706aaf909abe99983e62a4a805ff0a/observational_memory-0.7.0.tar.gz"
-  sha256 "d83c6a331695af8c9fb7a4254c52f0c815a0fd1c2fa69f43bb24cc94c80df240"
+  url "https://files.pythonhosted.org/packages/01/36/41a5b8a599a59ad647dbbbce1affbbdfd0dc8e2234c95d0ec3f6143a4642/observational_memory-0.8.0.tar.gz"
+  sha256 "edde08d626ff3e504529fcf15fb9b775e8f189cc1b79978849de91e16b60a35d"
   license "MIT"
 
   depends_on "jq"
@@ -66,8 +66,8 @@ class ObservationalMemory < Formula
   end
 
   resource "anthropic" do
-    url "https://files.pythonhosted.org/packages/83/75/be0c357e33a5a56c8f9db5b4212f886138d2bf59c0952d858f6b75d710ef/anthropic-0.105.2-py3-none-any.whl"
-    sha256 "e53ed5f6bf36fb1ecb9b25d8634cfd30e02fab9fb3374a0c2d5c585874757230"
+    url "https://files.pythonhosted.org/packages/91/0f/a6110d713370bc92f074a622f8a5ebdec7e92360149b1048dca258a07b2f/anthropic-0.109.1-py3-none-any.whl"
+    sha256 "ce7d94a7657f2aa29338cca448945eac621b4f62c1794cf461cb32847223e9b8"
   end
 
   resource "anyio" do
@@ -86,8 +86,8 @@ class ObservationalMemory < Formula
   end
 
   resource "cryptography" do
-    url "https://files.pythonhosted.org/packages/df/3d/01f6dd9190170a5a241e0e98c2d04be3664a9e6f5b9b872cde63aff1c3dd/cryptography-48.0.0-cp311-abi3-macosx_10_9_universal2.whl"
-    sha256 "0c558d2cdffd8f4bbb30fc7134c74d2ca9a476f830bb053074498fbc86f41ed6"
+    url "https://files.pythonhosted.org/packages/1b/bc/ee4137cbbe105652c0ee4252792b78fc8e7afa4b8e61d9d5dc05a7f45731/cryptography-48.0.1-cp311-abi3-macosx_10_9_universal2.whl"
+    sha256 "3e4a1a3232eef2e6c732827d5722db29a0cc8b27af2a4d865b094cf954be9ca1"
   end
 
   resource "distro" do
@@ -116,13 +116,13 @@ class ObservationalMemory < Formula
   end
 
   resource "idna" do
-    url "https://files.pythonhosted.org/packages/de/a7/f76514cc40ad6234098ecdebda08732d75964776c51a42845b7da10649e2/idna-3.17-py3-none-any.whl"
-    sha256 "466e48829084efe2548012b855df21540b96f2e20e51bd124c851536556a592c"
+    url "https://files.pythonhosted.org/packages/1e/5e/d4e9f1a599fb8e573b7b87160658329fbf28d19eac2718f51fc3def3aa5a/idna-3.18-py3-none-any.whl"
+    sha256 "7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2"
   end
 
   resource "openai" do
-    url "https://files.pythonhosted.org/packages/0a/bf/ccff9be562e24207716d04ef9dc931c76aff0c89a7265da43e2104d7fe06/openai-2.38.0-py3-none-any.whl"
-    sha256 "ec6661c57b2dcc47414a767e6e3335c7ed3d19c9696999283a3c82e95c756a3c"
+    url "https://files.pythonhosted.org/packages/20/74/925d7b3892927e9804aaf58d374a45dc28e4420ff90e992272b77286343e/openai-2.41.1-py3-none-any.whl"
+    sha256 "a939565f350cb7443cb843b801b88c716ac8024b492fb94ca269d5f6b1bbefd6"
   end
 
   resource "pycparser" do
@@ -146,8 +146,8 @@ class ObservationalMemory < Formula
   end
 
   resource "tqdm" do
-    url "https://files.pythonhosted.org/packages/16/e1/3079a9ff9b8e11b846c6ac5c8b5bfb7ff225eee721825310c91b3b50304f/tqdm-4.67.3-py3-none-any.whl"
-    sha256 "ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf"
+    url "https://files.pythonhosted.org/packages/eb/75/1a0392bcc21c44dcdf87b3cf2d137e7829be2c083a1e38d44efca3d57a16/tqdm-4.68.2-py3-none-any.whl"
+    sha256 "d4240441fb5353290b87d6a85968c9decc131a99b8c7faa28269d829de669ede"
   end
 
   resource "typing-extensions" do
