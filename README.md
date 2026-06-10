@@ -117,7 +117,7 @@ om status
 om doctor                       # health check, now with memory-growth report
 om observe --source codex
 om reflect
-om reflect --check-conflicts    # flag silently-changed high-stakes facts
+om reflect --check-conflicts    # reflect + flag silently-changed high-stakes facts
 om reflect --async              # offline OpenAI Batch job at ~50% of the synchronous price
 om jobs poll                    # apply completed async jobs
 om backup --reason pre-experiment

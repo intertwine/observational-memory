@@ -42,10 +42,11 @@ Memory you can audit, with sharing rules that fail closed:
 Reflection can silently change a high-stakes fact. Now you can see it:
 
 ```bash
-om reflect --check-conflicts        # read-only advisory, exits 0
+om reflect --check-conflicts            # reflect as normal, plus a conflict report
+om reflect --dry-run --check-conflicts  # audit only — nothing is written
 ```
 
-It diffs the prior `reflections.md` against the new one and flags explicit-id divergence, slot divergence, and guardrail downgrades, writing a throwaway review artifact. Precision-first: it flags only what it is confident about. `--json` for machines.
+The check itself is a read-only advisory that always exits 0: it diffs the prior `reflections.md` against the new one and flags explicit-id divergence, slot divergence, and guardrail downgrades, writing a throwaway review artifact. Note that without `--dry-run` the reflection still writes as usual — the flag adds the report, it does not make `om reflect` read-only. Precision-first: it flags only what it is confident about. `--json` for machines.
 
 ## Growth measurement in `om doctor` (Gate 6)
 
