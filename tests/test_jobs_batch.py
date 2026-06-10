@@ -138,6 +138,36 @@ def test_provider_guard_requires_api_key(cfg, monkeypatch):
     assert "OPENAI_API_KEY" in str(exc.value)
 
 
+def test_cross_provider_model_rejected_before_submit(cfg, monkeypatch):
+    # Issue #77 repro: provider pinned to openai while an inherited reflector
+    # model still points at another provider. Without the guard this submits
+    # and fails at OpenAI's per-request validation hours later.
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    monkeypatch.setenv("OM_LLM_REFLECTOR_PROVIDER", "openai")
+    monkeypatch.setenv("OM_LLM_REFLECTOR_MODEL", "grok-4.3")
+    config = Config(memory_dir=cfg.memory_dir, env_file=cfg.env_file)
+    with pytest.raises(BatchProviderError) as exc:
+        submit_reflect_batch(config)
+    assert "grok-4.3" in str(exc.value)
+    assert "OM_LLM_REFLECTOR_MODEL" in str(exc.value)
+    # Failed fast: nothing was uploaded, no batch was created.
+    assert "uploaded" not in state
+    assert "created" not in state
+
+
+def test_openai_model_passes_pre_submit_guard(cfg, monkeypatch):
+    state: dict = {}
+    _install_fake_openai(monkeypatch, state)
+    monkeypatch.setenv("OM_LLM_REFLECTOR_PROVIDER", "openai")
+    monkeypatch.setenv("OM_LLM_REFLECTOR_MODEL", "gpt-5.5")
+    config = Config(memory_dir=cfg.memory_dir, env_file=cfg.env_file)
+    record = submit_reflect_batch(config)
+    assert record is not None
+    assert record.model == "gpt-5.5"
+    assert "created" in state
+
+
 def test_chunking_required_for_large_input(cfg, monkeypatch):
     _install_fake_openai(monkeypatch, {})
     # A huge observations file (well past the default per-call input ceiling)
