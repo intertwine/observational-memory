@@ -57,7 +57,9 @@ def _resolve_openai_provider(config: Config) -> str:
 
 # Mirrors the OpenAI branch of auth.commands._model_matches_provider (the
 # `om login` reconciliation, PR #64); keep the two prefix sets in sync.
-_OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt", "codex-")
+# `ft:` is API-key-only (fine-tuned model IDs like `ft:gpt-4o-mini:org::id`),
+# so it belongs here but deliberately NOT in the subscription-side sibling.
+_OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt", "codex-", "ft:")
 
 
 def _require_openai_model(model: str) -> None:

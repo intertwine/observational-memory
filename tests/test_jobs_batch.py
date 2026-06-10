@@ -156,15 +156,18 @@ def test_cross_provider_model_rejected_before_submit(cfg, monkeypatch):
     assert "created" not in state
 
 
-def test_openai_model_passes_pre_submit_guard(cfg, monkeypatch):
+@pytest.mark.parametrize("model", ["gpt-5.5", "ft:gpt-4o-mini:acme::abc123"])
+def test_openai_model_passes_pre_submit_guard(cfg, monkeypatch, model):
+    # Plain gpt-* and fine-tuned ft:... IDs are both valid OpenAI Batch models
+    # (the ft: case was a Codex review finding on PR #90).
     state: dict = {}
     _install_fake_openai(monkeypatch, state)
     monkeypatch.setenv("OM_LLM_REFLECTOR_PROVIDER", "openai")
-    monkeypatch.setenv("OM_LLM_REFLECTOR_MODEL", "gpt-5.5")
+    monkeypatch.setenv("OM_LLM_REFLECTOR_MODEL", model)
     config = Config(memory_dir=cfg.memory_dir, env_file=cfg.env_file)
     record = submit_reflect_batch(config)
     assert record is not None
-    assert record.model == "gpt-5.5"
+    assert record.model == model
     assert "created" in state
 
 
