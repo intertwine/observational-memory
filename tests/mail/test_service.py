@@ -400,7 +400,9 @@ def test_mail_sync_is_idempotent(two_nodes):
     assert first["ingested"] == 1
 
     second = mail_sync(config_b, provider=provider)
-    assert second["fetched"] == 0
+    # The cursor's own timestamp bucket is deliberately re-fetched (tie-bucket
+    # drain, PR #88 review); idempotency means nothing is PROCESSED twice.
+    assert second["fetched"] == second["skipped"]
     assert second["ingested"] == 0
     assert second["held"] == 0
     assert second["details"] == []
@@ -425,3 +427,49 @@ def test_send_note_to_unpinned_peer_fails_closed(two_nodes):
     provider, config_a, account_a, config_b, account_b = two_nodes
     with pytest.raises(MailServiceError, match="Unknown peer"):
         send_note(config_a, to=account_b.address, markdown="- nope\n", provider=provider)
+
+
+def test_rewind_cursor_preserves_format_and_fails_open(two_nodes):
+    assert service._rewind_cursor(None) is None
+    assert service._rewind_cursor("2026-06-10T12:00:00Z") == "2026-06-10T11:59:59Z"
+    assert service._rewind_cursor("2026-06-10T12:00:00.500000Z") == "2026-06-10T11:59:59.500000Z"
+    # Unparseable cursor degrades to a full re-fetch (seen-ids dedup), never a skip.
+    assert service._rewind_cursor("not-a-timestamp") is None
+
+
+def test_sync_drains_timestamp_ties_larger_than_limit(two_nodes):
+    """PR #88 review (P1) repro: three notes share one timestamp, limit=2.
+
+    The cursor advances to the shared timestamp after the first page; a
+    strictly-after fetch would exclude the third note forever. The rewound
+    cursor plus the widening fetch must drain the tie bucket instead.
+    """
+    from dataclasses import replace as dc_replace
+
+    provider, config_a, account_a, config_b, account_b = two_nodes
+    _pin(config_a, account_b)
+    _pin(config_b, account_a, auto_accept=True)
+    for index in range(3):
+        send_note(
+            config_a,
+            to=account_b.address,
+            markdown=f"- tied note {index}",
+            subject=f"tied-{index}",
+            provider=provider,
+        )
+    inbox_b = account_b.inbox_id
+    provider._inboxes[inbox_b] = [
+        dc_replace(message, timestamp="2026-06-10T12:00:00.000000Z") for message in provider._inboxes[inbox_b]
+    ]
+
+    first = mail_sync(config_b, provider=provider, limit=2)
+    assert first["ingested"] == 2
+    second = mail_sync(config_b, provider=provider, limit=2)
+    assert second["ingested"] == 1
+    observations = (config_b.memory_dir / "observations.md").read_text()
+    for index in range(3):
+        assert f"tied note {index}" in observations
+    # Steady state stays idempotent: re-fetched tie-bucket messages are
+    # deduped by seen-ids, nothing is reprocessed.
+    third = mail_sync(config_b, provider=provider, limit=2)
+    assert third["ingested"] == 0 and third["held"] == 0 and third["responded"] == 0

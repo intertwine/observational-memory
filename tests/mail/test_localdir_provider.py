@@ -152,3 +152,42 @@ class TestGetMessageFailures:
         inbox = provider.create_inbox(username="alpha")
         with pytest.raises(MailProviderError, match="Invalid"):
             provider.get_message(inbox_id=inbox.inbox_id, message_id="../../inbox")
+
+
+class TestPathContainment:
+    """PR #88 review (P2): addresses become path components under the shared
+    root and arrive from CLI input / pinned-peer config — path-shaped values
+    must be rejected before any directory is composed."""
+
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "../../escaped",
+            "../../escaped@om-mail.local",
+            "a/b@om-mail.local",
+            "alpha@om-mail.local/../..",
+            "..@om-mail.local",
+            ".hidden@om-mail.local",
+            "alpha@/etc",
+            "",
+        ],
+    )
+    def test_send_rejects_path_shaped_recipient(self, provider, tmp_path, address):
+        provider.create_inbox(username="alpha")
+        with pytest.raises(MailProviderError, match="Invalid localdir mailbox address"):
+            provider.send_message(inbox_id="alpha@om-mail.local", to=address, subject="s", text="t", attachments=())
+        outside = [p for p in tmp_path.rglob("*") if "mailroot" not in p.parts]
+        assert outside == []
+
+    def test_create_inbox_rejects_path_shaped_username(self, provider, tmp_path):
+        with pytest.raises(MailProviderError, match="Invalid localdir mailbox address"):
+            provider.create_inbox(username="../../escaped")
+        assert not (tmp_path / "escaped@om-mail.local").exists()
+        root = tmp_path / "mailroot"
+        assert not root.exists() or list(root.rglob("*")) == []
+
+    def test_list_and_get_reject_path_shaped_inbox_id(self, provider):
+        with pytest.raises(MailProviderError, match="Invalid localdir mailbox address"):
+            provider.list_messages(inbox_id="../../escaped")
+        with pytest.raises(MailProviderError, match="Invalid localdir mailbox address"):
+            provider.get_message(inbox_id="../../escaped", message_id="lm_1")

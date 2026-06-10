@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 from observational_memory.reflection_metadata import filter_reflection_document_for_shareout
@@ -303,6 +303,31 @@ def _ingest_note(config: Config, *, sender_address: str, payload: dict[str, Any]
     _append_observations(block, config)
 
 
+# Ceiling for the widening fetch when a full page is entirely already-seen.
+# Past this, sync makes no progress rather than skipping (pathological inboxes
+# with >1000 messages sharing one timestamp).
+_MAX_FETCH_LIMIT = 1000
+
+
+def _rewind_cursor(cursor: str | None) -> str | None:
+    """One second before the cursor, so its timestamp bucket is re-fetched.
+
+    Preserves the cursor's fractional-seconds style: providers like localdir
+    compare timestamps as strings, so the rewound value must stay in the same
+    format family. An unparseable cursor degrades to a full re-fetch (`None`),
+    which seen-ids dedup makes safe, never to a skip.
+    """
+    if not cursor:
+        return None
+    try:
+        parsed = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    rewound = parsed - timedelta(seconds=1)
+    fmt = "%Y-%m-%dT%H:%M:%S.%fZ" if "." in cursor else "%Y-%m-%dT%H:%M:%SZ"
+    return rewound.astimezone(timezone.utc).strftime(fmt)
+
+
 def mail_sync(
     config: Config,
     *,
@@ -332,14 +357,35 @@ def mail_sync(
     }
     max_timestamp = state.cursor or ""
 
-    summaries = provider.list_messages(inbox_id=account.inbox_id, after=state.cursor, limit=limit)
+    # Fetch from one second BEFORE the cursor: providers filter strictly
+    # after the cursor, so messages sharing the cursor's timestamp would
+    # otherwise be skipped forever when a page boundary cut through their
+    # tie bucket (seen-ids cannot recover messages that are never fetched).
+    # Re-fetched already-processed messages are deduped by seen-ids. When a
+    # full page is entirely seen, widen the fetch so a seen prefix larger
+    # than `limit` cannot mask unseen ties behind it.
+    after_param = _rewind_cursor(state.cursor)
+    fetch_limit = max(limit, 1)
+    while True:
+        summaries = provider.list_messages(inbox_id=account.inbox_id, after=after_param, limit=fetch_limit)
+        has_unseen = any(s.message_id not in seen for s in summaries)
+        if has_unseen or len(summaries) < fetch_limit or fetch_limit >= _MAX_FETCH_LIMIT:
+            break
+        fetch_limit = min(fetch_limit * 2, _MAX_FETCH_LIMIT)
     report["fetched"] = len(summaries)
+    processed = 0
     for summary in summaries:
-        if summary.timestamp and summary.timestamp > max_timestamp:
-            max_timestamp = summary.timestamp
         if summary.message_id in seen:
+            if summary.timestamp and summary.timestamp > max_timestamp:
+                max_timestamp = summary.timestamp
             report["skipped"] += 1
             continue
+        if processed >= limit:
+            # Leave the cursor behind the unprocessed tail: it is picked up
+            # by the next sync instead of being skipped.
+            break
+        if summary.timestamp and summary.timestamp > max_timestamp:
+            max_timestamp = summary.timestamp
         action, reason = _process_inbound(config, account, provider, summary.message_id, summary, respond=respond)
         report[action] += 1
         detail: dict[str, Any] = {"message_id": summary.message_id, "action": action}
@@ -348,6 +394,7 @@ def mail_sync(
         report["details"].append(detail)
         seen.add(summary.message_id)
         state.seen_ids.append(summary.message_id)
+        processed += 1
 
     state.cursor = max_timestamp or None
     write_mail_state(config, state)

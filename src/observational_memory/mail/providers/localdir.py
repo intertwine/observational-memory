@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import secrets
 import time
 from datetime import datetime, timezone
@@ -185,7 +186,7 @@ class LocalDirProvider:
         )
 
     def _inbox_dir(self, address: str) -> Path:
-        return self.root / "inboxes" / address
+        return self.root / "inboxes" / _safe_address(address)
 
     def _messages_dir(self, address: str) -> Path:
         return self._inbox_dir(address) / "messages"
@@ -194,6 +195,20 @@ class LocalDirProvider:
 def _utc_timestamp() -> str:
     """UTC ISO with microseconds: lexically sortable and monotonic-friendly."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+# Mailbox addresses become path components under {root}/inboxes/, and they
+# arrive from CLI input and pinned-peer config — allowlist them so a value
+# like "../../escaped@om-mail.local" can never compose a path outside the
+# shared mail root.
+_ADDRESS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}@[A-Za-z0-9][A-Za-z0-9.-]{0,127}")
+
+
+def _safe_address(address: str) -> str:
+    candidate = address.strip()
+    if not _ADDRESS_RE.fullmatch(candidate):
+        raise MailProviderError(f"Invalid localdir mailbox address: {address!r}")
+    return candidate
 
 
 def _safe_message_id(message_id: str) -> str:
