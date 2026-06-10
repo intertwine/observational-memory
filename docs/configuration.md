@@ -518,3 +518,16 @@ OM_CLUSTER_STARTUP_PULL_DEADLINE_MS=1500
 ```
 
 Relay and filesystem transports remain untrusted. Cluster trust comes from local keys, signatures, membership records, and approval state.
+
+## OM Mail (experimental)
+
+OM Mail exchanges signed memory messages between agents over email inboxes. See [mail-memory.md](mail-memory.md) for the full guide.
+
+| Variable | Meaning |
+| --- | --- |
+| `OM_MAIL_PROVIDER=agentmail` | Mail provider: `agentmail` (default) or `localdir` |
+| `OM_AGENTMAIL_API_KEY` | AgentMail API key (required for the `agentmail` provider) |
+| `OM_AGENTMAIL_BASE_URL` | AgentMail API base URL (default `https://api.agentmail.to/v0`) |
+| `OM_MAIL_LOCALDIR` | Shared message directory for the `localdir` provider |
+
+Mail state — account keys, pinned peers, sync cursor, held messages, opened packs — lives under `<memory_dir>/mail/` (`0600`, host-local, never synced), the same rule as `usage.sqlite` and `.provider-jobs/`.

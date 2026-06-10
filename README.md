@@ -122,6 +122,7 @@ Start here:
 - [Talk to your memories (`om talk`)](docs/talk-to-memories.md)
 - [Configuration](docs/configuration.md)
 - [OM Cluster sync](docs/om-cluster-sync.md)
+- [OM Mail: email inboxes as a memory substrate (experimental)](docs/mail-memory.md)
 - [OM Cluster validation checklist](docs/om-cluster-validation.md)
 - [Host memory coexistence](docs/coexistence.md)
 - [Maintainer guide](docs/MAINTAINERS.md)
@@ -199,3 +200,11 @@ uv run pytest
 ```
 
 See [docs/MAINTAINERS.md](docs/MAINTAINERS.md) for the full release workflow.
+
+## Contributing
+
+The `om` core is MIT licensed and stays that way. Pull requests are welcome —
+see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contributor
+terms (DCO sign-off plus a relicensing grant to Intertwine AI, the project
+steward, which also builds separately licensed team add-ons on the core's
+public plugin interfaces).

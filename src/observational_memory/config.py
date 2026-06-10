@@ -535,6 +535,16 @@ class Config:
     # Never applies to the openai-chatgpt subscription provider.
     openai_async_mode: str = field(default_factory=lambda: os.environ.get("OM_OPENAI_ASYNC_MODE", "off"))
 
+    # OM Mail (experimental email memory substrate). The provider seam keeps
+    # the mailbox a role, not a vendor: agentmail (API-first dynamic inboxes)
+    # or localdir (shared-directory provider for tests and local demos).
+    mail_provider: str = field(default_factory=lambda: os.environ.get("OM_MAIL_PROVIDER", "agentmail"))
+    agentmail_api_key: str | None = field(default_factory=lambda: os.environ.get("OM_AGENTMAIL_API_KEY"))
+    agentmail_base_url: str = field(
+        default_factory=lambda: os.environ.get("OM_AGENTMAIL_BASE_URL", "https://api.agentmail.to/v0")
+    )
+    mail_localdir: str | None = field(default_factory=lambda: os.environ.get("OM_MAIL_LOCALDIR"))
+
     @property
     def observations_path(self) -> Path:
         return self.memory_dir / "observations.md"
