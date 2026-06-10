@@ -209,6 +209,11 @@ class TestListMessages:
         assert "page_token" not in first_url
         assert "page_token=tok2" in second_url
         assert "after=2026-06-10T11%3A00%3A00Z" in second_url
+        # Oldest-first is load-bearing: the sync cursor advances to the max
+        # processed timestamp, so newest-first pages plus a backlog larger
+        # than `limit` would skip the unfetched middle forever.
+        assert "ascending=true" in first_url
+        assert "ascending=true" in second_url
 
     def test_stops_without_next_page_token(self, fake_http):
         fake = fake_http(

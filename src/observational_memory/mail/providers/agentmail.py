@@ -100,7 +100,11 @@ class AgentMailProvider:
         summaries: list[MailMessageSummary] = []
         page_token: str | None = None
         while len(summaries) < limit:
-            params: dict[str, Any] = {"limit": limit}
+            # AgentMail returns most-recent-first by default; the sync cursor
+            # advances to the max processed timestamp, so pages must drain
+            # oldest-first or a backlog larger than `limit` would be skipped
+            # forever once the cursor jumps past it.
+            params: dict[str, Any] = {"limit": limit, "ascending": "true"}
             if after:
                 params["after"] = after
             if page_token:
