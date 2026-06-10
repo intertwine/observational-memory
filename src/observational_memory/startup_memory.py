@@ -462,6 +462,10 @@ def startup_quality_report(
     # dedup, the durable-kind guard, and the freshest-across-sections logic).
     stale = _stale_facts_from_payload(payload.text, now=datetime.now(timezone.utc))
 
+    # Gate 6 (B0): read-only growth/coldness measurement of the durable memory
+    # documents. measure_memory_growth is pure and never raises.
+    from .growth import measure_memory_growth
+
     return {
         "budget_chars": budget,
         "used_chars": len(payload.text),
@@ -471,6 +475,7 @@ def startup_quality_report(
         # Accurate post-annotation section sizes straight from the emitted payload.
         "budget_by_section": payload.included_sections,
         "overflow_handles": [item["handle"] for item in payload.overflow],
+        "growth": measure_memory_growth(config),
     }
 
 

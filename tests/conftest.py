@@ -2,16 +2,45 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# Non-OM_* ambient env that feeds Config()/provider resolution. A developer's
+# real keys or regions must not leak into tests; tests that need these set them
+# explicitly with monkeypatch.setenv.
+_AMBIENT_PROVIDER_VARS = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "XAI_API_KEY",
+    "XAI_BASE_URL",
+    "AWS_REGION",
+    "CODEX_HOME",
+    "GROK_HOME",
+)
 
 
 @pytest.fixture(autouse=True)
-def _disable_usage_tracking_by_default(monkeypatch):
-    """Keep the usage subsystem from writing to a real DB during unrelated tests.
+def _hermetic_om_env(monkeypatch):
+    """Make every test hermetic against ambient OM configuration.
 
-    Usage/budget tests opt back in by setting ``OM_USAGE_TRACKING=1`` and pointing
-    ``OM_USAGE_DB`` at a tmp path.
+    ``Config()`` reads ``os.environ`` in dataclass default factories, so a
+    developer shell with real OM settings (e.g. ``OM_LLM_MODEL=grok-4.3``,
+    ``OM_BUDGET_MODE=soft``, ``OM_CLUSTER_ENABLED=1``) contaminates any test
+    that constructs a ``Config``. Strip every ``OM_*`` variable plus provider
+    credentials before each test. Tests that need specific values still work:
+    this autouse fixture runs first, and test-level ``monkeypatch.setenv``
+    calls land afterwards and override it.
+
+    Also keep the usage subsystem from writing to a real DB during unrelated
+    tests. Usage/budget tests opt back in by setting ``OM_USAGE_TRACKING=1``
+    and pointing ``OM_USAGE_DB`` at a tmp path.
     """
+    for key in list(os.environ):
+        if key.startswith("OM_"):
+            monkeypatch.delenv(key, raising=False)
+    for key in _AMBIENT_PROVIDER_VARS:
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("OM_USAGE_TRACKING", "0")
 
 

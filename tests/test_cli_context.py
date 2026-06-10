@@ -84,3 +84,72 @@ def test_recall_expands_startup_handle(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Project: OM Cluster" in result.output
+
+
+def test_quality_report_json_includes_growth_block(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    memory_dir = tmp_path / "data" / "observational-memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "reflections.md").write_text(
+        "# Reflections\n\n"
+        "## Core Identity\n"
+        "<!--om-section: last_reflected=2026-06-01 derived_from_obs_window=2026-05-20..2026-05-30-->\n"
+        "- Name: Bryan\n\n"
+        "## Active Projects\n### Alpha\n- Status: Active\n"
+    )
+
+    result = runner.invoke(cli, ["context", "--quality-report", "--json"])
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    growth = report["growth"]
+    assert [d["name"] for d in growth["documents"]] == [
+        "reflections.md",
+        "profile.md",
+        "active.md",
+        "observations.md",
+    ]
+    headings = [s["heading"] for s in growth["sections"]]
+    assert headings == ["Core Identity", "Active Projects"]
+    core = growth["sections"][0]
+    assert core["last_activity"] == "2026-06-01"
+    assert isinstance(core["age_days"], int)
+    # Active Projects has no recoverable timestamp: coldness unknown, never a guess.
+    assert growth["sections"][1]["age_days"] is None
+    assert growth["totals"]["total_bytes"] > 0
+
+
+def test_quality_report_text_includes_growth_section(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    memory_dir = tmp_path / "data" / "observational-memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "reflections.md").write_text("# Reflections\n\n## Active Projects\n- Project: OM\n")
+
+    result = runner.invoke(cli, ["context", "--quality-report"])
+
+    assert result.exit_code == 0, result.output
+    assert "memory growth (B0):" in result.output
+    assert "total memory:" in result.output
+    assert "reflections.md:" in result.output
+
+
+def test_quality_report_with_no_memory_files_exits_zero(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["context", "--quality-report", "--json"])
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    growth = report["growth"]
+    assert growth["sections"] == []
+    # The quality-report path itself materializes profile.md/active.md (existing
+    # behavior), but reflections.md stays absent and is measured as empty.
+    reflections = next(d for d in growth["documents"] if d["name"] == "reflections.md")
+    assert reflections["exists"] is False
+    assert reflections["bytes"] == 0
+    assert "error" not in growth

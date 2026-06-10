@@ -528,3 +528,79 @@ def test_status_reports_qmd_backend_details(monkeypatch, tmp_path):
     assert "Collection: observational-memory" in result.output
     assert "Embedded vectors: 10" in result.output
     assert "Pending vectors: 11" in result.output
+
+
+def test_doctor_includes_memory_growth_block(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    runner = CliRunner()
+
+    memory_dir = tmp_path / "data" / "observational-memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "reflections.md").write_text(
+        "# Reflections\n\n"
+        "## Core Identity\n"
+        "<!--om-section: last_reflected=2026-06-01 derived_from_obs_window=2026-05-20..2026-05-30-->\n"
+        "- Name: Bryan\n\n"
+        "## Active Projects\n### Alpha\n- Status: Active\n"
+    )
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(result.output)
+    growth = _get_check(data, "Memory growth (B0)")
+    assert growth is not None
+    assert growth["status"] == "PASS"
+    assert "reflections.md" in growth["detail"]
+    assert "2 section(s)" in growth["detail"]
+
+    largest = _get_check(data, "Memory growth: largest section")
+    assert largest is not None
+    assert largest["status"] == "PASS"
+
+    coldest = _get_check(data, "Memory growth: coldest section")
+    assert coldest is not None
+    assert coldest["status"] == "PASS"
+    assert "Core Identity" in coldest["detail"]
+
+
+def test_doctor_memory_growth_with_no_memory_files(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(result.output)
+    growth = _get_check(data, "Memory growth (B0)")
+    assert growth is not None
+    assert growth["status"] == "PASS"
+    assert "reflections.md not found" in growth["detail"]
+
+
+def test_doctor_never_fails_when_growth_measurement_raises(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+
+    def _boom(config, **kwargs):
+        raise RuntimeError("growth blew up")
+
+    monkeypatch.setattr("observational_memory.growth.measure_memory_growth", _boom)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(result.output)
+    growth = _get_check(data, "Memory growth (B0)")
+    assert growth is not None
+    assert growth["status"] == "WARN"
+    assert "growth blew up" in growth["detail"]
