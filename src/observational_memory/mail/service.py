@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parseaddr
 from typing import TYPE_CHECKING, Any, Callable
 
 from observational_memory.reflection_metadata import filter_reflection_document_for_shareout
@@ -250,9 +251,27 @@ def _om_attachment_bytes(message: MailMessage) -> bytes | None:
     return None
 
 
+def _has_shareable_body(content: str) -> bool:
+    """True if any non-heading, non-comment, non-blank line survived filtering.
+
+    Same rule as the Moss upload path: a section whose every bullet was
+    ``scope=local`` strips down to its heading plus provenance stamps, and
+    must be withheld entirely rather than leak the heading."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and not stripped.startswith("<!--"):
+            return True
+    return False
+
+
 def _run_local_recall(config: Config, query: str, limit: int) -> tuple[str, list[dict[str, Any]]]:
     """Fail-closed local recall, same path `om recall` uses: a backend that is
-    not ready or whose search() raises degrades to "unavailable", never a crash."""
+    not ready or whose search() raises degrades to "unavailable", never a crash.
+
+    The local index legitimately contains ``scope=local`` content, so every
+    result passes the Gate-4 share-out filter before it can leave the host —
+    the same single filter the cluster and Moss paths use. A result with no
+    shareable body left is dropped, not sent as a bare heading."""
     from observational_memory.search import get_backend
     from observational_memory.startup_memory import _strip_om_metadata
     from observational_memory.talk import RecallStatus
@@ -270,15 +289,20 @@ def _run_local_recall(config: Config, query: str, limit: int) -> tuple[str, list
         recall_status = RecallStatus.UNAVAILABLE.value
     payloads = []
     for result in results:
+        shared = filter_reflection_document_for_shareout(result.document.content)
+        if not _has_shareable_body(shared):
+            continue
         metadata = dict(result.document.metadata)
         payloads.append(
             {
                 "rank": result.rank,
                 "heading": result.document.heading,
-                "content": _strip_om_metadata(result.document.content)[:500],
+                "content": _strip_om_metadata(shared)[:500],
                 "source_path": metadata.get("file_path"),
             }
         )
+    if not payloads and recall_status == RecallStatus.OK.value:
+        recall_status = RecallStatus.EMPTY.value
     return recall_status, payloads
 
 
@@ -328,6 +352,11 @@ def _rewind_cursor(cursor: str | None) -> str | None:
     return rewound.astimezone(timezone.utc).strftime(fmt)
 
 
+def _bare_address(sender: str) -> str:
+    """Lower-cased addr-spec from a sender that may carry a display name."""
+    return parseaddr(sender)[1].strip().lower()
+
+
 def mail_sync(
     config: Config,
     *,
@@ -374,11 +403,27 @@ def mail_sync(
         fetch_limit = min(fetch_limit * 2, _MAX_FETCH_LIMIT)
     report["fetched"] = len(summaries)
     processed = 0
+    own_address = account.address.strip().lower()
     for summary in summaries:
         if summary.message_id in seen:
             if summary.timestamp and summary.timestamp > max_timestamp:
                 max_timestamp = summary.timestamp
             report["skipped"] += 1
+            continue
+        if _bare_address(summary.sender) == own_address:
+            # Some providers (AgentMail) list the inbox's own sent mail
+            # alongside received mail. Skip it before any trust check so
+            # outbound messages never resurface as held "unknown sender".
+            # A spoofed transport sender lands here too — silently dropped,
+            # which is as fail-closed as holding it.
+            if summary.timestamp and summary.timestamp > max_timestamp:
+                max_timestamp = summary.timestamp
+            report["skipped"] += 1
+            report["details"].append(
+                {"message_id": summary.message_id, "action": "skipped", "reason": "own sent message"}
+            )
+            seen.add(summary.message_id)
+            state.seen_ids.append(summary.message_id)
             continue
         if processed >= limit:
             # Leave the cursor behind the unprocessed tail: it is picked up

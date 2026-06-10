@@ -21,6 +21,7 @@ Why email? A dynamic inbox is durable, globally addressable, append-only, and co
 - Context packs are **always encrypted** (ChaCha20-Poly1305) with a shared key exchanged **out of band** (a password manager, not email). There is no plaintext-pack mode.
 - **Fail closed.** Unknown sender, key mismatch, bad signature, or undecryptable payload means the message is *held* — never ingested, never answered — and shown in `om mail inbox`.
 - **Nothing auto-executes.** Notes are ingested only on explicit `om mail accept`, or automatically only from peers you marked `auto_accept`. Recall requests are answered only for peers marked `allow_recall`, and only when you run `om mail sync --respond`.
+- **`--allow-recall` is broad.** Answers come from your local `om recall`, which searches everything it indexes — reflections, profile, and any agent auto-memory on the host — not just OM's own memory dir. Pin a peer with `--allow-recall` only if you trust them with your full recall surface. (Responses are still scope-filtered: `scope=local` content never leaves.)
 - **Outbound scope guard.** Every outbound markdown payload passes the share-out scope filter, so `scope=local` content never leaves the host — same rule as cluster.
 - Accepted mail content is **untrusted input**: it carries `source=mail:<address>` provenance in the observation block so reflection and audits can see where a fact came from.
 - Mail state lives under `<memory_dir>/mail/` (0600, host-local, never synced).

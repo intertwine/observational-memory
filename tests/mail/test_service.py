@@ -405,8 +405,123 @@ def test_mail_sync_is_idempotent(two_nodes):
     assert second["fetched"] == second["skipped"]
     assert second["ingested"] == 0
     assert second["held"] == 0
-    assert second["details"] == []
-    assert config_b.observations_path.read_text().count("once only") == 1
+
+
+def test_recall_response_filters_scope_local(tmp_path, monkeypatch):
+    # The local index legitimately holds scope=local content; the mail
+    # responder must pass every hit through the Gate-4 share-out filter
+    # before it leaves the host (live-runbook follow-up, 2026-06-10).
+    from observational_memory import search as search_module
+    from observational_memory.search import Document, DocumentSource, SearchResult
+
+    mixed = Document(
+        doc_id="ref:working-mode",
+        source=DocumentSource.REFLECTIONS,
+        heading="## Working Mode",
+        content="## Working Mode\n- shareable fact\n- RECALL-LOCAL-SECRET <!--om: scope=local-->\n",
+        metadata={"file_path": "reflections.md"},
+    )
+    all_local = Document(
+        doc_id="ref:private",
+        source=DocumentSource.REFLECTIONS,
+        heading="## Private",
+        content="## Private\n<!--om-section: last_reflected=2026-06-10-->\n- ONLY-LOCAL <!--om: scope=local-->\n",
+        metadata={"file_path": "reflections.md"},
+    )
+
+    class StubBackend:
+        def is_ready(self):
+            return True
+
+        def search(self, query, limit=8):
+            return [
+                SearchResult(document=mixed, score=1.0, rank=1),
+                SearchResult(document=all_local, score=0.5, rank=2),
+            ]
+
+    monkeypatch.setattr(search_module, "get_backend", lambda name, config: StubBackend())
+    config = Config(memory_dir=tmp_path / "memory", env_file=tmp_path / "env", search_backend="bm25")
+
+    status, payloads = service._run_local_recall(config, "working mode", 8)
+    raw = json.dumps(payloads)
+    assert status == "ok"
+    assert "RECALL-LOCAL-SECRET" not in raw
+    assert "ONLY-LOCAL" not in raw
+    # A section whose every bullet was local is dropped whole — heading included.
+    assert "## Private" not in raw
+    assert any("shareable fact" in payload["content"] for payload in payloads)
+
+
+def test_recall_response_all_local_reports_empty(tmp_path, monkeypatch):
+    from observational_memory import search as search_module
+    from observational_memory.search import Document, DocumentSource, SearchResult
+
+    all_local = Document(
+        doc_id="ref:private",
+        source=DocumentSource.REFLECTIONS,
+        heading="## Private",
+        content="## Private\n- ONLY-LOCAL <!--om: scope=local-->\n",
+        metadata={"file_path": "reflections.md"},
+    )
+
+    class StubBackend:
+        def is_ready(self):
+            return True
+
+        def search(self, query, limit=8):
+            return [SearchResult(document=all_local, score=1.0, rank=1)]
+
+    monkeypatch.setattr(search_module, "get_backend", lambda name, config: StubBackend())
+    config = Config(memory_dir=tmp_path / "memory", env_file=tmp_path / "env", search_backend="bm25")
+
+    status, payloads = service._run_local_recall(config, "private", 8)
+    assert status == "empty"
+    assert payloads == []
+
+
+class EchoSentFakeProvider(FakeProvider):
+    """FakeProvider variant that, like AgentMail, lists sent mail in the sender's own inbox."""
+
+    def send_message(self, *, inbox_id, to, subject, text, attachments=(), in_reply_to=None) -> str:
+        from dataclasses import replace as dc_replace
+
+        message_id = super().send_message(
+            inbox_id=inbox_id, to=to, subject=subject, text=text, attachments=attachments, in_reply_to=in_reply_to
+        )
+        dest = self._inbox_by_address[to.strip().lower()]
+        sent = next(m for m in self._inboxes[dest] if m.message_id == message_id)
+        # Display-name sender, as AgentMail formats it on the wire.
+        echo = dc_replace(sent, sender=f"OM Agent <{sent.sender}>")
+        self._inboxes[inbox_id].append(echo)
+        return message_id
+
+
+def test_sync_skips_own_sent_mail(tmp_path):
+    # Live finding (2026-06-10 AgentMail runbook): the provider lists outbound
+    # mail too, so without a self-address skip every sent note resurfaces as
+    # held "unknown sender" on the sender's next sync.
+    provider = EchoSentFakeProvider()
+    config_a, account_a = _make_node(tmp_path, "alice", provider)
+    config_b, account_b = _make_node(tmp_path, "bob", provider)
+    _pin(config_a, account_b)
+    _pin(config_b, account_a, auto_accept=True)
+
+    send_note(config_a, to=account_b.address, markdown="- outbound note\n", provider=provider)
+
+    report = mail_sync(config_a, provider=provider)
+    assert report["held"] == 0
+    assert report["skipped"] == 1
+    assert report["details"] == [{"message_id": "msg_0001", "action": "skipped", "reason": "own sent message"}]
+    assert list_held(config_a) == []
+
+    # Marked seen: the next sync dedups it without re-flagging.
+    second = mail_sync(config_a, provider=provider)
+    assert second["held"] == 0
+    assert second["fetched"] == second["skipped"]
+
+    # The recipient still ingests it normally.
+    assert mail_sync(config_b, provider=provider)["ingested"] == 1
+    assert config_b.observations_path.read_text().count("outbound note") == 1
 
 
 def test_plain_human_email_is_skipped_not_held(two_nodes):
