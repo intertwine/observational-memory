@@ -55,6 +55,28 @@ def _resolve_openai_provider(config: Config) -> str:
     return provider
 
 
+# Mirrors the OpenAI branch of auth.commands._model_matches_provider (the
+# `om login` reconciliation, PR #64); keep the two prefix sets in sync.
+# `ft:` is API-key-only (fine-tuned model IDs like `ft:gpt-4o-mini:org::id`),
+# so it belongs here but deliberately NOT in the subscription-side sibling.
+_OPENAI_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt", "codex-", "ft:")
+
+
+def _require_openai_model(model: str) -> None:
+    """Fail fast on a cross-provider model BEFORE the Batch job is created (#77).
+
+    OpenAI accepts such a batch at submit time and fails it hours later at
+    per-request validation — `om jobs cancel` then 409s on the already-failed
+    job. Rejecting up front turns that into a one-line CLI error.
+    """
+    if not (model or "").strip().lower().startswith(_OPENAI_MODEL_PREFIXES):
+        raise BatchProviderError(
+            f"Async Batch: reflector model {model!r} is not an OpenAI model, but the reflector "
+            "provider is 'openai'. Set OM_LLM_REFLECTOR_MODEL to a gpt-* model (or unset it to "
+            "use OM_OPENAI_MODEL)."
+        )
+
+
 def _enforce_batch_budget(config: Config, model: str, system_prompt: str, user_content: str, max_output: int) -> None:
     """Run the pre-submit budget gate, mirroring llm.compress's pre-call gate.
 
@@ -141,6 +163,7 @@ def submit_reflect_batch(config: Config) -> JobRecord | None:
     # provider) so a pinned `openai` job doesn't submit a foreign model.
     ignore_global = bool(config.operation_provider("reflector"))
     model = config.resolve_model(operation="reflector", provider="openai", ignore_global_model=ignore_global)
+    _require_openai_model(model)
 
     # Gate on budgets BEFORE creating the (cost-incurring) Batch job, exactly as
     # the synchronous path gates before dispatch — at the Batch-discounted price.
