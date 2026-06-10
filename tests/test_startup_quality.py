@@ -265,6 +265,11 @@ def test_quality_report_shape(cfg):
     assert report["used_chars"] <= report["budget_chars"]
     # The reported stale text must not carry the baked-in marker (no double "as of").
     assert all("verify" not in fact["text"] for fact in report["stale_operational_facts"])
+    # Gate 6 (B0): the read-only growth measurement rides on the quality report.
+    growth = report["growth"]
+    assert "error" not in growth
+    assert any(s["heading"] == "Active Projects" for s in growth["sections"])
+    assert growth["totals"]["reflections_bytes"] > 0
 
 
 # --- review fixes ---
