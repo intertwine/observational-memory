@@ -929,6 +929,11 @@ def _format_quality_report(report: dict) -> str:
         lines.append(f"  overflow (recall handles): {len(report['overflow_handles'])}")
         for handle in report["overflow_handles"]:
             lines.append(f"    - {handle}")
+    growth = report.get("growth")
+    if growth:
+        from .growth import format_growth_lines
+
+        lines.extend(f"  {line}" for line in format_growth_lines(growth))
     return "\n".join(lines)
 
 
@@ -4330,6 +4335,16 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
             )
     except Exception as e:
         _check("Usage tracking", "WARN", f"could not inspect usage subsystem: {e}")
+
+    # 14c. Memory growth (B0) — pure, read-only measurement (v0.8.0 Gate 6).
+    # Informational only; this block must never fail doctor.
+    try:
+        from .growth import growth_doctor_checks, measure_memory_growth
+
+        for name, status, detail in growth_doctor_checks(measure_memory_growth(config)):
+            _check(name, status, detail)
+    except Exception as e:
+        _check("Memory growth (B0)", "WARN", f"could not measure memory growth: {e}")
 
     # 15. Platform
     _check("Platform", "PASS", sys.platform)
