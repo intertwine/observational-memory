@@ -6664,3 +6664,34 @@ def jobs_cancel(ctx: click.Context, job_id: str) -> None:
     except BatchProviderError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Job {record.job_id} marked {record.status}." + (f" ({record.error})" if record.error else ""))
+
+
+def _register_cli_plugins() -> None:
+    """Attach out-of-tree command groups (e.g. separately licensed add-ons).
+
+    A plugin publishes a callable under the ``observational_memory.cli_plugins``
+    entry-point group; it receives the root Click group and registers its own
+    commands (``def register(cli: click.Group) -> None``). Core commands always
+    win a name collision, and a broken plugin must never take down the core
+    CLI — it degrades to a one-line stderr warning.
+    """
+    try:
+        from importlib.metadata import entry_points
+
+        eps = list(entry_points(group="observational_memory.cli_plugins"))
+    except Exception:
+        return
+    for entry_point in eps:
+        try:
+            before = dict(cli.commands)
+            register = entry_point.load()
+            register(cli)
+            # Core commands always win: restore anything a plugin shadowed.
+            for command_name, command in before.items():
+                if cli.commands.get(command_name) is not command:
+                    cli.commands[command_name] = command
+        except Exception as exc:
+            click.echo(f"Warning: om CLI plugin {entry_point.name!r} failed to load: {exc}", err=True)
+
+
+_register_cli_plugins()

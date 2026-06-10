@@ -18,6 +18,18 @@ first (people must *want* to keep mail flowing), then automation, then breadth,
 then the fabric features that make self-improvement compound, then the
 governance that lets a real team turn it on by default.
 
+## Packaging boundary
+
+Pairwise exchange — everything in Phases 1–3 — is and stays part of the
+MIT-licensed `om` core: any two agents can pin each other, exchange notes and
+packs, and negotiate recall, free, forever. The team-fabric capabilities in
+Phases 4–5 are designed against the core's public plugin seams (the
+`observational_memory.mail_providers` and `observational_memory.cli_plugins`
+entry-point groups) and may ship as separately licensed add-on packages
+maintained by Intertwine AI rather than in this repository. This document
+describes *what* gets built; it does not commit any feature to a particular
+package. Contributor terms for the core are in `CONTRIBUTING.md`.
+
 ## Phase 1 — Frictionless manual loop (ergonomics)
 
 The v1 pinning ceremony (copy address, copy public key, mint and share a pack

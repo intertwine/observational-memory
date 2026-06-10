@@ -15,6 +15,12 @@ if TYPE_CHECKING:
 
 KNOWN_MAIL_PROVIDERS = ("agentmail", "localdir")
 
+# Out-of-tree providers (and commercial add-ons) publish a factory under this
+# entry-point group: ``name = "package.module:factory"`` where
+# ``factory(config) -> MailProvider``. Built-in names always win, so a plugin
+# cannot shadow `agentmail`/`localdir`.
+PROVIDER_ENTRY_POINT_GROUP = "observational_memory.mail_providers"
+
 
 class MailProviderError(RuntimeError):
     """A provider operation failed (network, auth, malformed response)."""
@@ -100,4 +106,34 @@ def build_mail_provider(config: Config, provider_name: str | None = None) -> Mai
         if not config.mail_localdir:
             raise MailProviderError("OM_MAIL_LOCALDIR must point at a directory for the localdir provider.")
         return LocalDirProvider(config.mail_localdir)
+    plugin = _load_plugin_provider(name, config)
+    if plugin is not None:
+        return plugin
     raise MailProviderError(f"Unknown mail provider: {name!r} (known: {', '.join(KNOWN_MAIL_PROVIDERS)})")
+
+
+def _load_plugin_provider(name: str, config: Config) -> MailProvider | None:
+    """Resolve `name` against installed entry-point plugins (fail closed).
+
+    Returns ``None`` only when no plugin claims the name — every other failure
+    (broken import, factory raising, factory returning a non-provider) is a
+    hard ``MailProviderError`` so a misconfigured paid add-on is loud, never
+    silently absent.
+    """
+    from importlib.metadata import entry_points
+
+    try:
+        candidates = [ep for ep in entry_points(group=PROVIDER_ENTRY_POINT_GROUP) if ep.name == name]
+    except Exception:
+        return None
+    if not candidates:
+        return None
+    entry_point = candidates[0]
+    try:
+        factory = entry_point.load()
+        provider = factory(config)
+    except Exception as exc:
+        raise MailProviderError(f"Mail provider plugin {name!r} failed to load: {exc}") from exc
+    if not isinstance(provider, MailProvider):
+        raise MailProviderError(f"Mail provider plugin {name!r} did not return a MailProvider.")
+    return provider

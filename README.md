@@ -200,3 +200,11 @@ uv run pytest
 ```
 
 See [docs/MAINTAINERS.md](docs/MAINTAINERS.md) for the full release workflow.
+
+## Contributing
+
+The `om` core is MIT licensed and stays that way. Pull requests are welcome —
+see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contributor
+terms (DCO sign-off plus a relicensing grant to Intertwine AI, the project
+steward, which also builds separately licensed team add-ons on the core's
+public plugin interfaces).
