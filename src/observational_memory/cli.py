@@ -2236,6 +2236,410 @@ def _expand_transport_path(value: str) -> str:
     return os.path.expandvars(os.path.expanduser(value))
 
 
+@cli.group()
+def mail() -> None:
+    """OM Mail: email inboxes as a portable memory substrate (experimental)."""
+
+
+def _mail_exceptions() -> tuple[type[Exception], ...]:
+    from .mail.account import MailAccountError
+    from .mail.envelope import EnvelopeError
+    from .mail.pack import PackError
+    from .mail.provider import MailProviderError
+    from .mail.service import MailServiceError
+
+    return (MailAccountError, EnvelopeError, PackError, MailProviderError, MailServiceError)
+
+
+@mail.command("init")
+@click.option(
+    "--provider",
+    "provider_name",
+    default=None,
+    help="Mail provider: agentmail or localdir (default: OM_MAIL_PROVIDER).",
+)
+@click.option("--username", default=None, help="Requested inbox username (provider-generated if omitted).")
+@click.option("--display-name", default=None, help="Inbox display name.")
+@click.option("--force", is_flag=True, help="Replace an existing mail account.")
+@click.pass_context
+def mail_init(
+    ctx: click.Context,
+    provider_name: str | None,
+    username: str | None,
+    display_name: str | None,
+    force: bool,
+) -> None:
+    """Mint a dynamic inbox and a signing identity for this host."""
+    from .mail import build_mail_provider
+    from .mail.account import MailAccount, load_mail_account, new_mail_keypair, write_mail_account
+
+    config = ctx.obj["config"]
+    existing = load_mail_account(config)
+    if existing is not None and not force:
+        raise click.ClickException(f"Mail account already configured ({existing.address}). Use --force to replace it.")
+    try:
+        provider = build_mail_provider(config, provider_name)
+        inbox = provider.create_inbox(username=username, display_name=display_name)
+    except _mail_exceptions() as e:
+        raise click.ClickException(str(e)) from e
+    private_b64, public_b64 = new_mail_keypair()
+    account = MailAccount(
+        provider=provider.name,
+        inbox_id=inbox.inbox_id,
+        address=inbox.address,
+        display_name=inbox.display_name or display_name,
+        signing_private_key_b64=private_b64,
+        signing_public_key_b64=public_b64,
+        created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    write_mail_account(config, account)
+    click.echo(f"Mail account ready: {inbox.address} (provider: {provider.name})")
+    click.echo(f"Signing public key: {public_b64}")
+    click.echo("Share the address and public key with peers; they pin them with `om mail peers add`.")
+    click.echo("For context packs, exchange a shared key out of band: `om mail peers new-shared-key`.")
+
+
+@mail.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def mail_status(ctx: click.Context, as_json: bool) -> None:
+    """Show the mail account, pinned peers, held mail, and sync cursor."""
+    from .mail.account import list_held, load_mail_account, load_mail_peers, load_mail_state
+
+    config = ctx.obj["config"]
+    account = load_mail_account(config)
+    if account is None:
+        raise click.ClickException("No mail account configured. Run `om mail init` first.")
+    peers = load_mail_peers(config)
+    held = list_held(config)
+    state = load_mail_state(config)
+    payload = {
+        "address": account.address,
+        "provider": account.provider,
+        "inbox_id": account.inbox_id,
+        "signing_public_key_b64": account.signing_public_key_b64,
+        "peers": sorted(peers),
+        "held": len(held),
+        "cursor": state.cursor,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    click.echo(f"Address: {account.address} (provider: {account.provider})")
+    click.echo(f"Signing public key: {account.signing_public_key_b64}")
+    click.echo(f"Peers: {len(peers)}  Held messages: {len(held)}  Cursor: {state.cursor or '-'}")
+
+
+@mail.group("peers")
+def mail_peers() -> None:
+    """Manage pinned peers (the local trust anchor for inbound mail)."""
+
+
+@mail_peers.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def mail_peers_list(ctx: click.Context, as_json: bool) -> None:
+    """List pinned peers and their permissions."""
+    from .mail.account import load_mail_peers
+
+    peers = load_mail_peers(ctx.obj["config"])
+    payload = [
+        {
+            "address": peer.address,
+            "alias": peer.alias,
+            "signing_public_key_b64": peer.signing_public_key_b64,
+            "has_shared_key": bool(peer.shared_key_b64),
+            "allow_recall": peer.allow_recall,
+            "auto_accept": peer.auto_accept,
+        }
+        for peer in sorted(load_mail_peers(ctx.obj["config"]).values(), key=lambda p: p.address)
+    ]
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if not peers:
+        click.echo("No peers pinned. Add one with `om mail peers add ADDRESS --key PUBKEY`.")
+        return
+    for item in payload:
+        flags = [
+            "shared-key" if item["has_shared_key"] else None,
+            "allow-recall" if item["allow_recall"] else None,
+            "auto-accept" if item["auto_accept"] else None,
+        ]
+        alias = f" ({item['alias']})" if item["alias"] else ""
+        suffix = ", ".join(flag for flag in flags if flag) or "signed-only"
+        click.echo(f"{item['address']}{alias}: {suffix}")
+
+
+@mail_peers.command("add")
+@click.argument("address")
+@click.option("--alias", default=None, help="Friendly name for this peer.")
+@click.option("--key", "signing_public_key_b64", required=True, help="Peer's Ed25519 signing public key (b64url).")
+@click.option("--shared-key", "shared_key_b64", default=None, help="Out-of-band symmetric key for encrypted payloads.")
+@click.option(
+    "--allow-recall", is_flag=True, help="Answer this peer's recall requests during `om mail sync --respond`."
+)
+@click.option("--auto-accept", is_flag=True, help="Ingest this peer's memory notes without explicit `om mail accept`.")
+@click.pass_context
+def mail_peers_add(
+    ctx: click.Context,
+    address: str,
+    alias: str | None,
+    signing_public_key_b64: str,
+    shared_key_b64: str | None,
+    allow_recall: bool,
+    auto_accept: bool,
+) -> None:
+    """Pin a peer's address and signing key (re-running re-pins)."""
+    from .mail.account import MailPeer, upsert_peer
+
+    peer = MailPeer(
+        address=address.strip().lower(),
+        alias=alias,
+        signing_public_key_b64=signing_public_key_b64,
+        shared_key_b64=shared_key_b64,
+        allow_recall=allow_recall,
+        auto_accept=auto_accept,
+    )
+    upsert_peer(ctx.obj["config"], peer)
+    click.echo(f"Pinned peer {peer.address}.")
+
+
+@mail_peers.command("remove")
+@click.argument("address")
+@click.pass_context
+def mail_peers_remove(ctx: click.Context, address: str) -> None:
+    """Remove a pinned peer."""
+    from .mail.account import remove_peer
+
+    if not remove_peer(ctx.obj["config"], address):
+        raise click.ClickException(f"No pinned peer: {address}")
+    click.echo(f"Removed peer {address.strip().lower()}.")
+
+
+@mail_peers.command("new-shared-key")
+def mail_peers_new_shared_key() -> None:
+    """Mint a symmetric pack key; exchange it out of band, never over email."""
+    from .mail.account import new_shared_key_b64
+
+    click.echo(new_shared_key_b64())
+    click.echo("Share this key out of band (password manager, in person) — never over email.", err=True)
+    click.echo("Both sides store it with `om mail peers add ADDRESS --key PUBKEY --shared-key KEY`.", err=True)
+
+
+@mail.command("send-note")
+@click.argument("address")
+@click.option("--text", default=None, help="Note markdown.")
+@click.option("--file", "file_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
+@click.option("--subject", default=None, help="Short note subject.")
+@click.pass_context
+def mail_send_note(
+    ctx: click.Context,
+    address: str,
+    text: str | None,
+    file_path: Path | None,
+    subject: str | None,
+) -> None:
+    """Mail a memory note to a pinned peer (scope-filtered before sending)."""
+    from .mail.service import send_note
+
+    if bool(text) == bool(file_path):
+        raise click.UsageError("Provide exactly one of --text or --file.")
+    markdown = text if text is not None else file_path.read_text()  # type: ignore[union-attr]
+    try:
+        result = send_note(ctx.obj["config"], to=address, markdown=markdown, subject=subject)
+    except _mail_exceptions() as e:
+        raise click.ClickException(str(e)) from e
+    encrypted = "encrypted" if result.get("encrypted") else "signed-plaintext"
+    click.echo(f"Sent memory-note {result['envelope_id']} to {result['to']} ({encrypted}).")
+
+
+@mail.command("send-pack")
+@click.argument("address")
+@click.option(
+    "--include",
+    default="profile.md,active.md,reflections.md",
+    show_default=True,
+    help="Comma-separated memory files to pack.",
+)
+@click.pass_context
+def mail_send_pack(ctx: click.Context, address: str, include: str) -> None:
+    """Mail an encrypted, scope-filtered context pack to a pinned peer."""
+    from .mail.service import send_pack
+
+    files = tuple(item.strip() for item in include.split(",") if item.strip())
+    try:
+        result = send_pack(ctx.obj["config"], to=address, include=files)
+    except _mail_exceptions() as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(f"Sent context-pack {result['envelope_id']} to {result['to']}: {', '.join(result['files'])}")
+
+
+@mail.command("ask")
+@click.argument("address")
+@click.option("--query", required=True, help="Recall query for the peer's memory.")
+@click.option("--limit", default=8, show_default=True, help="Maximum results requested.")
+@click.option(
+    "--wait", "wait_seconds", default=0.0, show_default=True, help="Seconds to poll for the answer (0 = don't wait)."
+)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def mail_ask(
+    ctx: click.Context,
+    address: str,
+    query: str,
+    limit: int,
+    wait_seconds: float,
+    as_json: bool,
+) -> None:
+    """Ask a peer's memory a question (recall negotiation over email)."""
+    from .mail.service import ask
+
+    try:
+        result = ask(ctx.obj["config"], to=address, query=query, limit=limit, wait_seconds=wait_seconds)
+    except _mail_exceptions() as e:
+        raise click.ClickException(str(e)) from e
+    if as_json:
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+        return
+    if result.get("status") == "answered":
+        response = result.get("response", {})
+        results = response.get("results", [])
+        if not results:
+            click.echo(f"Peer answered: no relevant memory ({response.get('recall_status', 'empty')}).")
+            return
+        for item in results:
+            click.echo(f"[{item.get('rank')}] {item.get('heading') or ''}".rstrip())
+            click.echo(str(item.get("content", "")).rstrip())
+            click.echo()
+        return
+    if result.get("status") == "timeout":
+        click.echo(
+            f"No answer within {wait_seconds:g}s. The peer answers on their next `om mail sync --respond`; "
+            f"pick it up later with `om mail sync` (request {result['request_id']})."
+        )
+        return
+    click.echo(
+        f"Request {result['request_id']} sent. The peer answers on their next `om mail sync --respond`; "
+        "pick it up later with `om mail sync`."
+    )
+
+
+@mail.command("sync")
+@click.option("--respond", is_flag=True, help="Answer pending recall requests from peers marked allow-recall.")
+@click.option("--limit", default=50, show_default=True, help="Maximum messages fetched per sync.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def mail_sync_cmd(ctx: click.Context, respond: bool, limit: int, as_json: bool) -> None:
+    """Fetch, verify, and route inbound mail (poll-based; nothing auto-executes)."""
+    from .mail.service import mail_sync
+
+    try:
+        report = mail_sync(ctx.obj["config"], respond=respond, limit=limit)
+    except _mail_exceptions() as e:
+        raise click.ClickException(str(e)) from e
+    if as_json:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+    click.echo(
+        "Mail sync: "
+        f"{report.get('fetched', 0)} fetched, {report.get('ingested', 0)} ingested, "
+        f"{report.get('responded', 0)} responded, {report.get('packs', 0)} packs, "
+        f"{report.get('responses', 0)} responses, {report.get('held', 0)} held, "
+        f"{report.get('skipped', 0)} skipped."
+    )
+    for detail in report.get("details", []):
+        click.echo(f"  - {detail}")
+    if report.get("held"):
+        click.echo("Held mail needs review: `om mail inbox`, then `om mail accept|reject MESSAGE_ID`.")
+
+
+@mail.command("inbox")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def mail_inbox(ctx: click.Context, as_json: bool) -> None:
+    """List held messages awaiting review (quarantine, fail-closed)."""
+    from .mail.account import list_held
+
+    held = list_held(ctx.obj["config"])
+    if as_json:
+        click.echo(json.dumps(held, indent=2, sort_keys=True))
+        return
+    if not held:
+        click.echo("No held messages.")
+        return
+    for record in held:
+        sender = record.get("sender", "?")
+        subject = record.get("subject", "")
+        click.echo(f"{record.get('message_id', '?')}: from {sender} — {record.get('reason', '?')} ({subject})")
+
+
+@mail.command("accept")
+@click.argument("message_id")
+@click.pass_context
+def mail_accept(ctx: click.Context, message_id: str) -> None:
+    """Ingest a held memory note into observations (re-verified, fail-closed)."""
+    from .mail.service import accept_held
+
+    try:
+        result = accept_held(ctx.obj["config"], message_id)
+    except _mail_exceptions() as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(f"Ingested memory-note from {result.get('sender', '?')} into observations.")
+
+
+@mail.command("reject")
+@click.argument("message_id")
+@click.pass_context
+def mail_reject(ctx: click.Context, message_id: str) -> None:
+    """Discard a held message without ingesting it."""
+    from .mail.service import reject_held
+
+    if not reject_held(ctx.obj["config"], message_id):
+        raise click.ClickException(f"No held message: {message_id}")
+    click.echo(f"Rejected {message_id}.")
+
+
+@mail.command("search")
+@click.option("--query", required=True, help="Substring to find in the local mail corpus.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
+@click.pass_context
+def mail_search(ctx: click.Context, query: str, as_json: bool) -> None:
+    """Search the local mail corpus (held mail, recall responses, opened packs).
+
+    Accepted notes flow into observations and are covered by `om search` /
+    `om recall`; this command covers the mail-side artifacts that have not
+    (or will never) become durable memory.
+    """
+    from .mail.account import mail_dir
+
+    base = mail_dir(ctx.obj["config"])
+    needle = query.lower()
+    matches: list[dict[str, str]] = []
+    for subdir in ("held", "responses", "packs"):
+        root = base / subdir
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if needle in line.lower():
+                    matches.append({"path": str(path), "line": str(line_number), "text": line.strip()[:200]})
+    if as_json:
+        click.echo(json.dumps(matches, indent=2, sort_keys=True))
+        return
+    if not matches:
+        click.echo("No matches in the local mail corpus.")
+        return
+    for match in matches:
+        click.echo(f"{match['path']}:{match['line']}: {match['text']}")
+
+
 def _backup_existing_memory(config: Config) -> Path | None:
     """Snapshot existing Markdown before a cluster init.
 

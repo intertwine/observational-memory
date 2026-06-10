@@ -122,6 +122,7 @@ Start here:
 - [Talk to your memories (`om talk`)](docs/talk-to-memories.md)
 - [Configuration](docs/configuration.md)
 - [OM Cluster sync](docs/om-cluster-sync.md)
+- [OM Mail: email inboxes as a memory substrate (experimental)](docs/mail-memory.md)
 - [OM Cluster validation checklist](docs/om-cluster-validation.md)
 - [Host memory coexistence](docs/coexistence.md)
 - [Maintainer guide](docs/MAINTAINERS.md)
