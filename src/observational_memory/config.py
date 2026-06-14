@@ -70,6 +70,19 @@ def _codex_user_dir() -> Path:
     return Path.home() / ".codex"
 
 
+def _opencode_config_dir() -> Path:
+    """Return the OpenCode per-user config directory."""
+    return Path(os.environ.get("OPENCODE_CONFIG_DIR", _xdg_config_home() / "opencode"))
+
+
+def _opencode_data_dir() -> Path:
+    """Return the OpenCode per-user data directory."""
+    override = os.environ.get("OPENCODE_DATA_DIR")
+    if override:
+        return Path(override)
+    return _xdg_data_home() / "opencode"
+
+
 def _cowork_app_support_dir() -> Path:
     """Return the directory containing Cowork local-agent-mode session/plugin trees.
 
@@ -347,6 +360,10 @@ class Config:
 
     # Codex CLI paths
     codex_home: Path = field(default_factory=lambda: Path(os.environ.get("CODEX_HOME", _codex_user_dir())))
+
+    # OpenCode paths
+    opencode_config_dir: Path = field(default_factory=_opencode_config_dir)
+    opencode_data_dir: Path = field(default_factory=_opencode_data_dir)
 
     # LLM settings
     llm_provider: str = field(
@@ -641,6 +658,18 @@ class Config:
     @property
     def hermes_sessions_dir(self) -> Path:
         return Path.home() / ".hermes" / "sessions"
+
+    @property
+    def opencode_plugins_dir(self) -> Path:
+        return self.opencode_config_dir / "plugins"
+
+    @property
+    def opencode_agents_md(self) -> Path:
+        return self.opencode_config_dir / "AGENTS.md"
+
+    @property
+    def opencode_events_dir(self) -> Path:
+        return self.memory_dir / ".opencode-events"
 
     # Grok Build TUI paths (xAI)
     grok_home: Path = field(default_factory=lambda: Path(os.environ.get("GROK_HOME", Path.home() / ".grok")))

@@ -143,6 +143,30 @@ ChatGPT exports are concise seeds that you review before adding to ChatGPT or a 
 
 Claude Managed Agents exports are small Markdown files plus a manifest. They are designed for memory-store import or review.
 
+## OpenCode
+
+OpenCode supports local plugins from `~/.config/opencode/plugins/` and global rules from `~/.config/opencode/AGENTS.md`. OM uses both. The plugin records message events into OM-owned JSONL files under the memory directory. The AGENTS fallback tells OpenCode how to load bounded startup context without bulk-reading generated memory files.
+
+Install it:
+
+```bash
+om install --opencode
+```
+
+Use it:
+
+```bash
+om context --for opencode --cwd "$PWD"
+om observe --source opencode
+om recall --query "what did we decide about the OpenCode harness?"
+```
+
+Notes:
+
+- The plugin is global, not project-local, so memory follows the user across repos.
+- OpenCode event shapes can change. The parser is defensive and ignores unknown events.
+- The fallback block lives in `~/.config/opencode/AGENTS.md` and can be removed with `om uninstall --opencode`.
+
 ## Grok Build TUI (xAI)
 
 Grok has excellent native hook support and also reads `~/.claude/settings.json` for compatibility.

@@ -1057,3 +1057,55 @@ class TestGrokInstall:
 
         assert result.exit_code == 0, result.output
         assert hook_file.exists()
+
+
+def test_install_opencode_plugin_and_agents_fallback(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--opencode",
+            "--no-cron",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    opencode_config = tmp_path / "config" / "opencode"
+    plugin = opencode_config / "plugins" / "observational-memory.js"
+    agents = opencode_config / "AGENTS.md"
+    assert plugin.exists()
+    plugin_text = plugin.read_text()
+    assert "opencode-event" in plugin_text
+    assert "message.updated" in plugin_text
+    agents_text = agents.read_text()
+    assert "<!-- observational-memory:opencode -->" in agents_text
+    assert 'om context --for opencode --cwd "$PWD"' in agents_text
+    assert "do not bulk-read generated memory files" in agents_text.lower()
+
+
+def test_opencode_event_appends_om_owned_jsonl(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["opencode-event", "--cwd", str(tmp_path / "repo")],
+        input='{"event":{"type":"message.updated","sessionID":"s1","message":{"role":"user","content":"hello"}}}',
+    )
+
+    assert result.exit_code == 0, result.output
+    event_dir = tmp_path / "data" / "observational-memory" / ".opencode-events"
+    files = list(event_dir.glob("*.jsonl"))
+    assert len(files) == 1
+    payload = json.loads(files[0].read_text().strip())
+    assert payload["cwd"] == str(tmp_path / "repo")
+    assert payload["event"]["type"] == "message.updated"

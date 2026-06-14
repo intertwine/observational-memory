@@ -16,14 +16,14 @@ import click
 from . import __version__
 from .config import Config
 
-_OBSERVE_SOURCES = ["claude", "codex", "grok", "hermes", "cowork", "claude-memory", "all"]
+_OBSERVE_SOURCES = ["claude", "codex", "opencode", "grok", "hermes", "cowork", "claude-memory", "all"]
 
 
 @click.group()
 @click.version_option(__version__, prog_name="om")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Observational Memory — shared memory for Claude Code, Codex CLI, and Hermes Agent."""
+    """Observational Memory — shared memory for Claude Code, Codex CLI, OpenCode, and Hermes Agent."""
     ctx.ensure_object(dict)
     Config().load_env_file()  # Seed os.environ before constructing final config
     config = Config()
@@ -48,12 +48,14 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
         observe_all_cowork,
         observe_all_grok,
         observe_all_hermes,
+        observe_all_opencode,
         observe_auto_memory,
         observe_claude_transcript,
         observe_codex_transcript,
         observe_cowork_transcript,
         observe_grok_transcript,
         observe_hermes_transcript,
+        observe_opencode_transcript,
     )
 
     config = ctx.obj["config"]
@@ -74,12 +76,15 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
             result = observe_cowork_transcript(transcript, config, dry_run)
         elif transcript_source == "grok":
             result = observe_grok_transcript(transcript, config, dry_run)
+        elif transcript_source == "opencode":
+            result = observe_opencode_transcript(transcript, config, dry_run)
         elif transcript_source == "claude-memory":
             raise click.ClickException("--transcript does not support --source claude-memory.")
         else:
             raise click.ClickException(
                 "Could not detect transcript source. "
-                "Pass --source claude, --source codex, --source grok, --source hermes, or --source cowork."
+                "Pass --source claude, --source codex, --source opencode, "
+                "--source grok, --source hermes, or --source cowork."
             )
         if result:
             click.echo(f"Observations updated ({len(result)} chars)")
@@ -99,6 +104,10 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
     if source in ("codex", "all"):
         click.echo("Scanning Codex sessions...")
         results.extend(observe_all_codex(config, dry_run))
+
+    if source in ("opencode", "all"):
+        click.echo("Scanning OpenCode sessions...")
+        results.extend(observe_all_opencode(config, dry_run))
 
     if source in ("hermes", "all"):
         click.echo("Scanning Hermes sessions...")
@@ -152,6 +161,12 @@ def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
     try:
         transcript.relative_to(config.codex_home / "sessions")
         return "codex"
+    except ValueError:
+        pass
+
+    try:
+        transcript.relative_to(config.opencode_events_dir)
+        return "opencode"
     except ValueError:
         pass
 
@@ -3267,8 +3282,14 @@ def _configure_llm(
 @click.option("--codex", "targets", flag_value="codex", help="Install Codex hooks plus AGENTS fallback")
 @click.option("--cowork", "targets", flag_value="cowork", help="Install Cowork plugin")
 @click.option("--grok", "targets", flag_value="grok", help="Install Grok Build TUI hooks (Claude compat aware)")
+@click.option("--opencode", "targets", flag_value="opencode", help="Install OpenCode plugin and AGENTS fallback")
 @click.option("--both", "targets", flag_value="both", default=True, help="Install Claude Code + Codex (default)")
-@click.option("--all", "targets", flag_value="all", help="Install all integrations including Cowork and Grok")
+@click.option(
+    "--all",
+    "targets",
+    flag_value="all",
+    help="Install all integrations including OpenCode, Cowork, and Grok",
+)
 @click.option(
     "--scheduler",
     type=click.Choice(_SCHEDULER_MODES, case_sensitive=False),
@@ -3300,7 +3321,7 @@ def install(
     bedrock_region: str | None,
     non_interactive: bool,
 ) -> None:
-    """Set up observational memory for Claude Code, Codex, Grok, and/or Cowork."""
+    """Set up observational memory for Claude Code, Codex, OpenCode, Grok, and/or Cowork."""
     config = ctx.obj["config"]
     config.ensure_memory_dir()
     scheduler_mode = _resolve_scheduler_mode(scheduler, cron_compat)
@@ -3357,6 +3378,9 @@ def install(
     if targets in ("cowork", "all"):
         _install_cowork_plugin(config)
 
+    if targets in ("opencode", "all"):
+        _install_opencode(config)
+
     if targets in ("grok", "all"):
         _install_grok(config)
 
@@ -3392,12 +3416,13 @@ def install(
 @click.option("--codex", "targets", flag_value="codex")
 @click.option("--cowork", "targets", flag_value="cowork")
 @click.option("--grok", "targets", flag_value="grok", help="Remove Grok Build TUI hooks")
+@click.option("--opencode", "targets", flag_value="opencode", help="Remove OpenCode plugin and AGENTS fallback")
 @click.option("--both", "targets", flag_value="both", default=True)
 @click.option("--all", "targets", flag_value="all")
 @click.option("--purge", is_flag=True, help="Also remove memory files")
 @click.pass_context
 def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
-    """Remove OM hooks/scheduler jobs for selected targets (claude/codex/grok/cowork)."""
+    """Remove OM hooks/scheduler jobs for selected targets (claude/codex/opencode/grok/cowork)."""
     config = ctx.obj["config"]
 
     if targets in ("claude", "both", "all"):
@@ -3408,6 +3433,9 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
 
     if targets in ("cowork", "all"):
         _uninstall_cowork_plugin(config)
+
+    if targets in ("opencode", "all"):
+        _uninstall_opencode(config)
 
     if targets in ("grok", "all"):
         _uninstall_grok(config)
@@ -3676,6 +3704,21 @@ def status(ctx: click.Context) -> None:
 
     cowork_transcripts = find_all_cowork(config.cowork_sessions_dir)
     click.echo(f"  Sessions: {len(cowork_transcripts)} audit.jsonl file(s) found")
+
+    # OpenCode status
+    opencode_plugin = config.opencode_plugins_dir / _OPENCODE_PLUGIN_NAME
+    click.echo("\nOpenCode:")
+    click.echo(f"  Plugins dir: {config.opencode_plugins_dir}")
+    opencode_plugin_status = "installed" if opencode_plugin.exists() else "not installed (run `om install --opencode`)"
+    opencode_agents_status = "not installed"
+    if config.opencode_agents_md.exists() and _OPENCODE_OM_MARKER in config.opencode_agents_md.read_text():
+        opencode_agents_status = "installed"
+    opencode_event_count = 0
+    if config.opencode_events_dir.exists():
+        opencode_event_count = len(list(config.opencode_events_dir.glob("*.jsonl")))
+    click.echo(f"  OM plugin: {opencode_plugin_status}")
+    click.echo(f"  AGENTS fallback: {opencode_agents_status}")
+    click.echo(f"  Event logs: {opencode_event_count} file(s)")
 
     # Grok Build TUI status (Phase 1 hook support)
     grok_hook_file = config.grok_hooks_dir / "observational-memory.json"
@@ -6064,6 +6107,95 @@ def grok_checkpoint(ctx: click.Context, transcript: Path | None) -> None:
     else:
         results = observe_all_grok(config)
         click.echo(f"Grok checkpoint: processed {len(results)} sessions")
+
+
+# --- OpenCode integration ---
+
+_OPENCODE_PLUGIN_NAME = "observational-memory.js"
+_OPENCODE_OM_MARKER = "<!-- observational-memory:opencode -->"
+_OPENCODE_OM_BLOCK = f"""{_OPENCODE_OM_MARKER}
+## Observational Memory for OpenCode
+
+OpenCode loads this global AGENTS.md from ~/.config/opencode. At the start of substantial work, run:
+
+`om context --for opencode --cwd "$PWD"`
+
+Use the returned startup context. Do not bulk-read generated memory files. For targeted history, run:
+
+- `om recall --query "<query>"`
+- `om search "<query>"`
+
+The OpenCode plugin installed by OM records message events locally so `om observe --source opencode` can distill them.
+{_OPENCODE_OM_MARKER}"""
+
+
+def _install_opencode(config: Config) -> None:
+    import re
+    import shutil as shutil_mod
+
+    config.opencode_plugins_dir.mkdir(parents=True, exist_ok=True)
+    source = Path(__file__).parent / "hooks" / "opencode" / _OPENCODE_PLUGIN_NAME
+    target = config.opencode_plugins_dir / _OPENCODE_PLUGIN_NAME
+    shutil_mod.copy2(source, target)
+    click.echo(f"Installed OpenCode plugin in {target}")
+
+    agents_md = config.opencode_agents_md
+    agents_md.parent.mkdir(parents=True, exist_ok=True)
+    if agents_md.exists():
+        existing = agents_md.read_text()
+        if _OPENCODE_OM_MARKER in existing:
+            pattern = rf"\n*{re.escape(_OPENCODE_OM_MARKER)}.*?{re.escape(_OPENCODE_OM_MARKER)}\n*"
+            replaced = re.sub(pattern, "\n\n" + _OPENCODE_OM_BLOCK + "\n", existing, flags=re.DOTALL)
+            agents_md.write_text(replaced.strip() + "\n")
+        else:
+            agents_md.write_text(existing.rstrip() + "\n\n" + _OPENCODE_OM_BLOCK + "\n")
+    else:
+        agents_md.write_text(_OPENCODE_OM_BLOCK + "\n")
+    click.echo(f"Installed OpenCode AGENTS fallback in {agents_md}")
+
+
+def _uninstall_opencode(config: Config) -> None:
+    import re
+
+    plugin = config.opencode_plugins_dir / _OPENCODE_PLUGIN_NAME
+    if plugin.exists():
+        plugin.unlink()
+        click.echo(f"Removed OpenCode plugin {plugin}")
+
+    agents_md = config.opencode_agents_md
+    if agents_md.exists():
+        content = agents_md.read_text()
+        if _OPENCODE_OM_MARKER in content:
+            pattern = rf"\n*{re.escape(_OPENCODE_OM_MARKER)}.*?{re.escape(_OPENCODE_OM_MARKER)}\n*"
+            content = re.sub(pattern, "\n", content, flags=re.DOTALL)
+            agents_md.write_text(content.strip() + "\n" if content.strip() else "")
+            click.echo("Removed observational memory from OpenCode AGENTS.md")
+
+
+@cli.command(hidden=True, name="opencode-event")
+@click.option("--cwd", type=click.Path(path_type=Path), default=None)
+@click.pass_context
+def opencode_event(ctx: click.Context, cwd: Path | None) -> None:
+    """Append one OpenCode plugin event to the OM-owned JSONL event log."""
+    import hashlib
+    from datetime import datetime, timezone
+
+    config = ctx.obj["config"]
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        return
+    cwd_text = str(cwd or Path.cwd())
+    event = payload.get("event", {})
+    session_id = str(event.get("sessionID") or event.get("session", {}).get("id") or "default")
+    key = hashlib.sha256(f"{cwd_text}:{session_id}".encode()).hexdigest()[:24]
+    config.opencode_events_dir.mkdir(parents=True, exist_ok=True)
+    path = config.opencode_events_dir / f"{key}.jsonl"
+    payload.setdefault("cwd", cwd_text)
+    payload.setdefault("received_at", datetime.now(timezone.utc).isoformat())
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 # --- Grok Build TUI (xAI) integration (re-applied after restore) ---

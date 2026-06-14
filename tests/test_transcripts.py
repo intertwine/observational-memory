@@ -1,5 +1,6 @@
 """Tests for transcript parsers."""
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -434,3 +435,42 @@ class TestGrokParser:
 
         assert len(messages) == 1
         assert messages[0].content == "before after [tool call details omitted for observation]"
+
+
+class TestOpenCodeParser:
+    def test_parse_plugin_message_events(self, tmp_path):
+        from observational_memory.transcripts.opencode import parse_transcript
+
+        transcript = tmp_path / "opencode.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "event": {
+                        "type": "message.updated",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "ship OpenCode support"}],
+                            "time": "2026-06-14T00:00:00Z",
+                        },
+                    }
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "event": {
+                        "type": "message.updated",
+                        "message": {"role": "assistant", "content": "I will add an OpenCode plugin."},
+                    }
+                }
+            )
+            + "\n"
+            + json.dumps({"event": {"type": "session.idle"}})
+            + "\n"
+        )
+
+        messages = parse_transcript(transcript)
+        assert [m.role for m in messages] == ["user", "assistant"]
+        assert messages[0].content == "ship OpenCode support"
+        assert messages[1].content == "I will add an OpenCode plugin."
+        assert all(m.source == "opencode" for m in messages)
