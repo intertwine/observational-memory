@@ -54,6 +54,33 @@ om context --for codex --cwd "$PWD" --task "review current work"
 om recall --query "current work" --for codex --cwd "$PWD"
 ```
 
+## Kimi Code CLI
+
+Kimi Code CLI supports lifecycle hooks in `~/.kimi/config.toml`. Install OM hooks with:
+
+```bash
+om install --kimi
+```
+
+What gets installed:
+
+- `SessionStart` hook: calls `om context --for kimi` for startup memory.
+- `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `StopFailure` hooks: call `om kimi-checkpoint` to record safe hook JSON in `~/.kimi/observational-memory-events.jsonl`.
+
+Kimi hooks do not expose a full Claude-style transcript today, so OM observes the lifecycle events it receives instead of scraping private provider data. Run a manual observe pass with:
+
+```bash
+om observe --source kimi
+om observe --transcript ~/.kimi/observational-memory-events.jsonl --source kimi
+```
+
+Use recall directly inside Kimi when you need deeper context:
+
+```bash
+om context --for kimi --cwd "$PWD" --task "continue the current feature"
+om recall --query "the feature we were implementing" --for kimi --cwd "$PWD"
+```
+
 ## Claude Cowork
 
 Install on macOS:

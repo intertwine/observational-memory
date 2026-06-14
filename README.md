@@ -9,7 +9,7 @@
 
 **One local memory for your AI coding agents — so every session starts knowing your work instead of starting over.**
 
-Observational Memory, or `om`, watches what you do with Claude Code, Codex, OpenCode, Grok Build TUI, and Claude Cowork (Hermes joins through its [plugin](docs/hermes-plugin.md)), distills it into plain Markdown on your machine, and hands every new session a compact memory summary. What Claude learns today, Codex knows tomorrow.
+Observational Memory, or `om`, watches what you do with Claude Code, Codex, OpenCode, Kimi Code CLI, Grok Build TUI, and Claude Cowork (Hermes joins through its [plugin](docs/hermes-plugin.md)), distills it into plain Markdown on your machine, and hands every new session a compact memory summary. What Claude learns today, Codex knows tomorrow.
 
 - **No more cold starts.** Every session begins knowing who you are, how you work, and what you were doing.
 - **One memory across agents.** Switch tools without losing context.
@@ -55,13 +55,13 @@ om install
 om doctor
 ```
 
-`om install` sets up Claude Code and Codex by default (`--all` adds OpenCode, Grok, and Cowork) and asks which LLM provider to use — a metered API key, or your existing ChatGPT or SuperGrok subscription via `om login`. If you use Anthropic through Vertex AI or Bedrock, install with `uv tool install "observational-memory[enterprise]"` instead of Homebrew, then run `om install`.
+`om install` sets up Claude Code and Codex by default (`--all` adds OpenCode, Kimi, Grok, and Cowork) and asks which LLM provider to use — a metered API key, or your existing ChatGPT or SuperGrok subscription via `om login`. If you use Anthropic through Vertex AI or Bedrock, install with `uv tool install "observational-memory[enterprise]"` instead of Homebrew, then run `om install`.
 
 ## How Memory Flows
 
 ```mermaid
 flowchart LR
-    A["Claude Code, Codex, OpenCode, Grok, Cowork, Hermes logs"] --> B["om observe"]
+    A["Claude Code, Codex, OpenCode, Kimi, Grok, Cowork, Hermes logs"] --> B["om observe"]
     C["Claude auto-memory files"] --> D["search index"]
     C --> F
     B --> E["observations.md"]
@@ -79,7 +79,7 @@ flowchart LR
 1. Install `om`.
 2. Run `om install` and answer the provider questions.
 3. Run `om doctor`.
-4. Use Claude Code, Codex, OpenCode, or Grok normally — memory accumulates on its own.
+4. Use Claude Code, Codex, OpenCode, Kimi, or Grok normally — memory accumulates on its own.
 5. Search memory when you need it:
 
 ```bash
@@ -155,6 +155,7 @@ Do not sync `~/.local/share/observational-memory/` directly with Dropbox, iCloud
 | Claude Code | Hooks for startup context and checkpoints. |
 | Codex | Hooks-first startup and Stop checkpoints, with an AGENTS fallback. |
 | OpenCode | Global plugin records message events, with a global AGENTS fallback for startup context. |
+| Kimi Code CLI | Hooks for startup context plus prompt/subagent checkpoints captured from Kimi lifecycle JSON. |
 | Grok Build TUI | Native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation. |
 | Claude Cowork | Local plugin on macOS with hooks and `/recall`. |
 | Hermes | External memory-provider plugin through [intertwine/hermes-observational-memory](https://github.com/intertwine/hermes-observational-memory), plus manual session-log ingestion. |

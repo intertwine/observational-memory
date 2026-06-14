@@ -75,6 +75,11 @@ def _opencode_config_dir() -> Path:
     return Path(os.environ.get("OPENCODE_CONFIG_DIR", _xdg_config_home() / "opencode"))
 
 
+def _kimi_user_dir() -> Path:
+    """Return the Kimi Code CLI per-user directory."""
+    return Path.home() / ".kimi"
+
+
 def _cowork_app_support_dir() -> Path:
     """Return the directory containing Cowork local-agent-mode session/plugin trees.
 
@@ -355,6 +360,12 @@ class Config:
 
     # OpenCode paths
     opencode_config_dir: Path = field(default_factory=_opencode_config_dir)
+
+    # OpenCode paths
+    opencode_config_dir: Path = field(default_factory=_opencode_config_dir)
+
+    # Kimi Code CLI paths
+    kimi_home: Path = field(default_factory=lambda: Path(os.environ.get("KIMI_HOME", _kimi_user_dir())))
 
     # LLM settings
     llm_provider: str = field(
@@ -661,6 +672,14 @@ class Config:
     @property
     def opencode_events_dir(self) -> Path:
         return self.memory_dir / ".opencode-events"
+
+    @property
+    def kimi_config_path(self) -> Path:
+        return self.kimi_home / "config.toml"
+
+    @property
+    def kimi_om_events_path(self) -> Path:
+        return self.kimi_home / "observational-memory-events.jsonl"
 
     # Grok Build TUI paths (xAI)
     grok_home: Path = field(default_factory=lambda: Path(os.environ.get("GROK_HOME", Path.home() / ".grok")))

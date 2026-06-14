@@ -290,3 +290,11 @@ class TestProviderValidation:
     def test_bedrock_uses_aws_region(self, tmp_path):
         config = Config(env_file=tmp_path / "env", llm_provider="anthropic-bedrock", bedrock_region="us-east-1")
         assert config.validate_provider_config() == "anthropic-bedrock"
+
+
+def test_kimi_paths_live_under_kimi_home(tmp_path):
+    kimi_home = tmp_path / "kimi-home"
+    config = Config(kimi_home=kimi_home)
+
+    assert config.kimi_config_path == kimi_home / "config.toml"
+    assert config.kimi_om_events_path == kimi_home / "observational-memory-events.jsonl"

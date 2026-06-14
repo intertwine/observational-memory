@@ -1127,3 +1127,49 @@ def test_opencode_event_tolerates_null_session(monkeypatch, tmp_path):
     event_dir = tmp_path / "data" / "observational-memory" / ".opencode-events"
     files = list(event_dir.glob("*.jsonl"))
     assert len(files) == 1
+
+
+def test_install_kimi_writes_managed_hooks(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    kimi_home = tmp_path / "kimi"
+    kimi_home.mkdir()
+    monkeypatch.setenv("KIMI_HOME", str(kimi_home))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["install", "--kimi", "--no-cron", "--provider", "openai", "--llm-model", "gpt-4o-mini", "--non-interactive"],
+    )
+
+    assert result.exit_code == 0, result.output
+    content = (kimi_home / "config.toml").read_text()
+    parsed = tomllib.loads(content)
+    events = [hook["event"] for hook in parsed["hooks"]]
+    assert "SessionStart" in events
+    assert "UserPromptSubmit" in events
+    assert "SubagentStop" in events
+    assert "om context --for kimi" in content
+    assert "om kimi-checkpoint" in content
+
+
+def test_uninstall_kimi_removes_only_managed_block(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    kimi_home = tmp_path / "kimi"
+    kimi_home.mkdir()
+    monkeypatch.setenv("KIMI_HOME", str(kimi_home))
+    config_path = kimi_home / "config.toml"
+    config_path.write_text(
+        'model = "custom"\n\n'
+        "# --- observational-memory kimi hooks start ---\n"
+        "[[hooks]]\n"
+        'event = "Stop"\n'
+        'command = "om kimi-checkpoint"\n'
+        "# --- observational-memory kimi hooks end ---\n"
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["uninstall", "--kimi"])
+
+    assert result.exit_code == 0, result.output
+    assert config_path.read_text() == 'model = "custom"\n'

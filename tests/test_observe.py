@@ -336,3 +336,42 @@ class TestGrokObserver:
 
         assert result is None
         assert config.load_cursor()[str(transcript)] == 5
+
+
+@patch("observational_memory.observe.run_observer")
+def test_observe_kimi_transcript_parses_hook_events(mock_run_observer, tmp_path):
+    from observational_memory.observe import observe_kimi_transcript
+
+    transcript = tmp_path / "kimi-events.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": "build Kimi support",
+                        "om_captured_at": "2026-06-14T00:00:00Z",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "hook_event_name": "SubagentStop",
+                        "agent_name": "coder",
+                        "response": "done",
+                        "om_captured_at": "2026-06-14T00:00:01Z",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    config = Config(memory_dir=tmp_path / "memory")
+    config.min_messages = 1
+    mock_run_observer.return_value = "## 2026-06-14\n\n- kimi"
+
+    result = observe_kimi_transcript(transcript, config, dry_run=False)
+
+    assert result == "## 2026-06-14\n\n- kimi"
+    messages = mock_run_observer.call_args.args[0]
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[0].source == "kimi"
