@@ -48,16 +48,16 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
         observe_all_cowork,
         observe_all_grok,
         observe_all_hermes,
-        observe_all_opencode,
         observe_all_kimi,
+        observe_all_opencode,
         observe_auto_memory,
         observe_claude_transcript,
         observe_codex_transcript,
         observe_cowork_transcript,
         observe_grok_transcript,
         observe_hermes_transcript,
-        observe_opencode_transcript,
         observe_kimi_transcript,
+        observe_opencode_transcript,
     )
 
     config = ctx.obj["config"]

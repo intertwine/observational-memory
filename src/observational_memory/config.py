@@ -364,9 +364,6 @@ class Config:
     # OpenCode paths
     opencode_config_dir: Path = field(default_factory=_opencode_config_dir)
 
-    # OpenCode paths
-    opencode_config_dir: Path = field(default_factory=_opencode_config_dir)
-
     # Kimi Code CLI paths
     kimi_home: Path = field(default_factory=lambda: Path(os.environ.get("KIMI_HOME", _kimi_user_dir())))
 

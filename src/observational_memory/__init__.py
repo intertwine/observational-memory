@@ -1,3 +1,3 @@
-"""Cross-agent observational memory for Claude Code, Codex CLI, OpenCode, Kimi Code CLI, Grok Build TUI, Cowork, and Hermes Agent."""
+"""Cross-agent observational memory for Claude Code, Codex, OpenCode, Kimi, Grok, Cowork, and Hermes."""
 
 __version__ = "0.8.0"
