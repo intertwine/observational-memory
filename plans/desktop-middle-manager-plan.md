@@ -172,7 +172,7 @@ The adapter layer should not require OM to understand every vendor's internal st
 Every coding task runs in its own git worktree:
 
 ```text
-repo/.om/worktrees/<mission>/<task>/
+~/.local/share/observational-memory/worktrees/<repo-hash>/<mission>/<task>/
 ```
 
 Rules:
@@ -181,6 +181,7 @@ Rules:
 - No worker pushes to protected branches.
 - Every task starts from the same known base unless explicitly chained.
 - The manager records branch name, base commit, and changed files.
+- Worktrees do not live under the repo's gitignored `.om/` directory. A repo-level `git clean -fdx` must not be able to delete active worker checkouts.
 
 ### 5. Merge queue
 
@@ -295,6 +296,7 @@ Deliverables:
 - `om work init`, `inbox`, `plan`, `tasks`, `status`, and `archive`.
 - Manual status updates.
 - Mission files indexed by OM search.
+- `events.jsonl` retention policy, such as rotation after a fixed event count or compression into an archive sidecar when a mission is archived.
 
 Acceptance:
 
@@ -306,6 +308,7 @@ Deliverables:
 
 - Generic shell adapter.
 - Codex adapter.
+- PTY-backed launch support for interactive terminal agents such as Claude Code, OpenCode, and Grok Build TUI. These adapters should rely on OM's existing SessionStart/Stop hooks for output capture where possible instead of assuming clean subprocess stdout.
 - Worktree creation and cleanup.
 - Run logs and result collection.
 
