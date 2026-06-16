@@ -262,6 +262,40 @@ def test_doctor_flags_invalid_cowork_hooks_json(monkeypatch, tmp_path):
     assert check["detail"] == "missing top-level hooks object"
 
 
+def test_doctor_reports_opencode_integration(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    runner = CliRunner()
+
+    opencode_config = tmp_path / "config" / "opencode"
+    plugin = opencode_config / "plugins" / "observational-memory.js"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text('spawn("om", ["opencode-event"])\n')
+    agents = opencode_config / "AGENTS.md"
+    agents.write_text("<!-- observational-memory:opencode -->\n")
+    events_dir = tmp_path / "data" / "observational-memory" / ".opencode-events"
+    events_dir.mkdir(parents=True)
+    (events_dir / "session.jsonl").write_text('{"event":{"type":"session.idle"}}\n')
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(result.output)
+    plugin_check = _get_check(data, "OpenCode plugin")
+    assert plugin_check is not None
+    assert plugin_check["status"] == "PASS"
+
+    agents_check = _get_check(data, "OpenCode AGENTS fallback")
+    assert agents_check is not None
+    assert agents_check["status"] == "PASS"
+
+    logs_check = _get_check(data, "OpenCode event logs")
+    assert logs_check is not None
+    assert logs_check["status"] == "PASS"
+
+
 def test_doctor_reports_launchd_and_legacy_cron_on_macos(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OM_LLM_PROVIDER", "openai")

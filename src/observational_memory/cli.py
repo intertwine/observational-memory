@@ -4169,6 +4169,56 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("Cowork plugin", "WARN", "not installed", fix="Run: om install --cowork")
 
+    # 13. OpenCode plugin and fallback
+    opencode_plugin = config.opencode_plugins_dir / _OPENCODE_PLUGIN_NAME
+    if opencode_plugin.exists():
+        try:
+            plugin_text = opencode_plugin.read_text()
+            if "opencode-event" in plugin_text:
+                _check("OpenCode plugin", "PASS", str(opencode_plugin))
+            else:
+                _check(
+                    "OpenCode plugin",
+                    "FAIL",
+                    "plugin present but missing opencode-event",
+                    fix="Run: om install --opencode",
+                )
+        except Exception as e:
+            _check("OpenCode plugin", "FAIL", f"error reading plugin: {e}", fix="Run: om install --opencode")
+    else:
+        _check("OpenCode plugin", "WARN", "not installed", fix="Run: om install --opencode")
+
+    if config.opencode_agents_md.exists():
+        try:
+            agents_text = config.opencode_agents_md.read_text()
+            if _OPENCODE_OM_MARKER in agents_text:
+                _check("OpenCode AGENTS fallback", "PASS", str(config.opencode_agents_md))
+            else:
+                _check(
+                    "OpenCode AGENTS fallback",
+                    "WARN",
+                    "AGENTS.md present without OM block",
+                    fix="Run: om install --opencode",
+                )
+        except Exception as e:
+            _check(
+                "OpenCode AGENTS fallback",
+                "WARN",
+                f"error reading AGENTS.md: {e}",
+                fix="Run: om install --opencode",
+            )
+    else:
+        _check("OpenCode AGENTS fallback", "WARN", "not installed", fix="Run: om install --opencode")
+
+    if config.opencode_events_dir.exists():
+        event_logs = list(config.opencode_events_dir.glob("*.jsonl"))
+        if event_logs:
+            _check("OpenCode event logs", "PASS", f"{len(event_logs)} file(s)")
+        else:
+            _check("OpenCode event logs", "WARN", "events directory exists but contains no JSONL logs yet")
+    else:
+        _check("OpenCode event logs", "WARN", "no event logs yet")
+
     # 14. Grok Build TUI (Phase 1 hook support + Claude compatibility awareness)
     grok_hook_file = config.grok_hooks_dir / "observational-memory.json"
     if grok_hook_file.exists():

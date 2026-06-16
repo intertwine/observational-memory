@@ -16,7 +16,7 @@ export const ObservationalMemory = async ({ directory }) => {
   return {
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return
-      if (event.type === "message.updated" || event.type === "message.part.updated") send(event, directory)
+      if (event.type === "message.updated") send(event, directory)
       if (event.type === "session.idle") send(event, directory)
     },
     "experimental.session.compacting": async (_input, output) => {

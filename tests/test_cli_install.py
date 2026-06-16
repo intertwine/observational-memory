@@ -1086,6 +1086,8 @@ def test_install_opencode_plugin_and_agents_fallback(monkeypatch, tmp_path):
     plugin_text = plugin.read_text()
     assert "opencode-event" in plugin_text
     assert "message.updated" in plugin_text
+    assert "message.part.updated" not in plugin_text
+    assert "session.idle" in plugin_text
     agents_text = agents.read_text()
     assert "<!-- observational-memory:opencode -->" in agents_text
     assert 'om context --for opencode --cwd "$PWD"' in agents_text
