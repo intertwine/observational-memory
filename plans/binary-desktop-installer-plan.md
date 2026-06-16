@@ -98,7 +98,7 @@ Show:
 
 - Overall status: healthy, needs attention, or broken.
 - Provider status.
-- Hook install status for Claude Code, Codex, Grok, Hermes, and Cowork where available.
+- Hook install status for Claude Code, Codex, OpenCode, Kimi Code CLI, Grok, Hermes, and Cowork where available.
 - Search index status and a **Reindex** button.
 - Backup status and latest snapshot.
 - Memory growth and quality warnings.
@@ -386,7 +386,7 @@ Comparison sources: Devin by Cognition, Factory, Tembo, OpenHands.
 
 The desktop installer plan should stay the first adoption milestone, but the app can grow into a more valuable layer: a **local middle manager for agent work**.
 
-The opportunity is not to make OM another coding agent. The opportunity is to make OM the persistent, reviewable coordination layer that sits above Claude Code, Codex, Grok, Hermes, Cowork, Devin-style hosted agents, and future workers. The user talks to one manager. The manager remembers goals, breaks work into tasks, delegates to available agents, tracks work in plain files, serializes merges, runs checks, and keeps the human in control.
+The opportunity is not to make OM another coding agent. The opportunity is to make OM the persistent, reviewable coordination layer that sits above Claude Code, Codex, OpenCode, Kimi Code CLI, Grok, Hermes, Cowork, Devin-style hosted agents, and future workers. The user talks to one manager. The manager remembers goals, breaks work into tasks, delegates to available agents, tracks work in plain files, serializes merges, runs checks, and keeps the human in control.
 
 This matches OM's strengths:
 
@@ -457,7 +457,7 @@ Human intent
 
 This is different from a coding-agent vendor:
 
-- The worker can be Claude Code, Codex, Grok, Hermes, Cowork, Devin CLI, Factory Droid, OpenHands, or a future agent.
+- The worker can be Claude Code, Codex, OpenCode, Kimi Code CLI, Grok, Hermes, Cowork, Devin CLI, Factory Droid, OpenHands, or a future agent.
 - OM owns context continuity, not model execution.
 - OM records decisions and task outcomes into local memory after review.
 - OM can sync trusted personal coordination state through OM Cluster later, and exchange scoped task context through OM Mail later.
