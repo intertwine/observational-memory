@@ -300,6 +300,43 @@ def test_doctor_reports_opencode_integration(monkeypatch, tmp_path):
     assert logs_check["status"] == "PASS"
 
 
+def test_doctor_reports_kimi_hooks(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("OM_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli._import_provider_sdk", lambda provider: None)
+    kimi_home = tmp_path / "kimi"
+    kimi_home.mkdir()
+    monkeypatch.setenv("KIMI_HOME", str(kimi_home))
+    (kimi_home / "config.toml").write_text(
+        "# --- observational-memory kimi hooks start ---\n"
+        "[[hooks]]\n"
+        'event = "SessionStart"\n'
+        'command = "om context --for kimi"\n'
+        "\n"
+        "[[hooks]]\n"
+        'event = "UserPromptSubmit"\n'
+        'command = "om kimi-checkpoint"\n'
+        "# --- observational-memory kimi hooks end ---\n"
+    )
+    (kimi_home / "observational-memory-events.jsonl").write_text(
+        json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "hello"}) + "\n"
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+
+    data = json.loads(result.output)
+    hooks_check = _get_check(data, "Kimi hooks")
+    assert hooks_check is not None
+    assert hooks_check["status"] == "PASS"
+
+    log_check = _get_check(data, "Kimi event log")
+    assert log_check is not None
+    assert log_check["status"] == "PASS"
+
+
 def test_doctor_reports_launchd_and_legacy_cron_on_macos(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OM_LLM_PROVIDER", "openai")

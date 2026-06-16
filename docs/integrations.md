@@ -65,13 +65,20 @@ om install --kimi
 What gets installed:
 
 - `SessionStart` hook: calls `om context --for kimi` for startup memory.
-- `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `StopFailure` hooks: call `om kimi-checkpoint` to record safe hook JSON in `~/.kimi/observational-memory-events.jsonl`.
+- `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `StopFailure` hooks: call `om kimi-checkpoint` to record safe hook JSON in `~/.kimi/observational-memory-events.jsonl` and queue an observe pass.
 
-Kimi hooks do not expose a full Claude-style transcript today, so OM observes the lifecycle events it receives instead of scraping private provider data. Run a manual observe pass with:
+Kimi hooks do not expose a full Claude-style transcript today, so OM observes the lifecycle events it receives instead of scraping private provider data. You can also run a manual observe pass with:
 
 ```bash
 om observe --source kimi
 om observe --transcript ~/.kimi/observational-memory-events.jsonl --source kimi
+```
+
+Check the installation with:
+
+```bash
+om status
+om doctor
 ```
 
 Use recall directly inside Kimi when you need deeper context:

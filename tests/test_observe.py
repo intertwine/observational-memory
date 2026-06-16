@@ -375,3 +375,55 @@ def test_observe_kimi_transcript_parses_hook_events(mock_run_observer, tmp_path)
     messages = mock_run_observer.call_args.args[0]
     assert [message.role for message in messages] == ["user", "assistant"]
     assert messages[0].source == "kimi"
+
+
+@patch("observational_memory.observe.run_observer")
+def test_observe_kimi_transcript_cursor_stops_at_processed_boundary(mock_run_observer, tmp_path):
+    from observational_memory.observe import observe_kimi_transcript
+
+    transcript = tmp_path / "kimi-events.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": "first prompt",
+                        "om_captured_at": "2026-06-14T00:00:00Z",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "hook_event_name": "SubagentStop",
+                        "agent_name": "coder",
+                        "response": "first response",
+                        "om_captured_at": "2026-06-14T00:00:01Z",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    config = Config(memory_dir=tmp_path / "memory")
+    config.min_messages = 1
+
+    def append_during_observation(*_args, **_kwargs):
+        with transcript.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": "second prompt",
+                        "om_captured_at": "2026-06-14T00:00:02Z",
+                    }
+                )
+                + "\n"
+            )
+        return "## 2026-06-14\n\n- kimi"
+
+    mock_run_observer.side_effect = append_during_observation
+
+    result = observe_kimi_transcript(transcript, config, dry_run=False)
+
+    assert result == "## 2026-06-14\n\n- kimi"
+    assert config.load_cursor()[str(transcript)] == 2

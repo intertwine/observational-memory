@@ -1153,6 +1153,79 @@ def test_install_kimi_writes_managed_hooks(monkeypatch, tmp_path):
     assert "om kimi-checkpoint" in content
 
 
+def test_install_kimi_quotes_spaced_om_path_in_toml(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    kimi_home = tmp_path / "kimi"
+    kimi_home.mkdir()
+    monkeypatch.setenv("KIMI_HOME", str(kimi_home))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin dir/om")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["install", "--kimi", "--no-cron", "--provider", "openai", "--llm-model", "gpt-4o-mini", "--non-interactive"],
+    )
+
+    assert result.exit_code == 0, result.output
+    parsed = tomllib.loads((kimi_home / "config.toml").read_text())
+    commands = {hook["event"]: hook["command"] for hook in parsed["hooks"]}
+    assert commands["SessionStart"].startswith("'/tmp/bin dir/om' context --for kimi")
+    assert commands["UserPromptSubmit"].startswith("'/tmp/bin dir/om' kimi-checkpoint")
+
+
+def test_kimi_checkpoint_appends_and_queues_observe(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    kimi_home = tmp_path / "kimi"
+    kimi_home.mkdir()
+    monkeypatch.setenv("KIMI_HOME", str(kimi_home))
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    spawned = []
+    monkeypatch.setattr("observational_memory.cli._spawn_detached", lambda argv, cwd=None: spawned.append((argv, cwd)))
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["kimi-checkpoint"],
+        input=json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "remember this"}),
+    )
+
+    assert result.exit_code == 0, result.output
+    events = (kimi_home / "observational-memory-events.jsonl").read_text().splitlines()
+    assert len(events) == 1
+    assert json.loads(events[0])["prompt"] == "remember this"
+    assert spawned == [(["/tmp/bin/om", "observe", "--source", "kimi"], None)]
+
+
+def test_status_reports_kimi_hooks(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    kimi_home = tmp_path / "kimi"
+    kimi_home.mkdir()
+    monkeypatch.setenv("KIMI_HOME", str(kimi_home))
+    (kimi_home / "config.toml").write_text(
+        "# --- observational-memory kimi hooks start ---\n"
+        "[[hooks]]\n"
+        'event = "SessionStart"\n'
+        'command = "om context --for kimi"\n'
+        "\n"
+        "[[hooks]]\n"
+        'event = "UserPromptSubmit"\n'
+        'command = "om kimi-checkpoint"\n'
+        "# --- observational-memory kimi hooks end ---\n"
+    )
+    (kimi_home / "observational-memory-events.jsonl").write_text(
+        json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "hello"}) + "\n"
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert "Kimi Code CLI:" in result.output
+    assert "OM hooks: installed" in result.output
+    assert "Event log: 1 event(s)" in result.output
+
+
 def test_uninstall_kimi_removes_only_managed_block(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     kimi_home = tmp_path / "kimi"

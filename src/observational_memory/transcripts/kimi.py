@@ -10,13 +10,17 @@ from typing import Any
 from . import Message
 
 
-def parse_transcript(path: Path, *, after_index: int = 0) -> list[Message]:
+def parse_transcript(path: Path, *, after_index: int = 0, before_index: int | None = None) -> list[Message]:
     """Parse OM's Kimi hook-event log into normalized messages."""
     messages: list[Message] = []
     if not path.exists():
         return messages
 
-    for line_no, line in enumerate(path.read_text().splitlines(), start=1):
+    lines = path.read_text().splitlines()
+    if before_index is not None:
+        lines = lines[:before_index]
+
+    for line_no, line in enumerate(lines, start=1):
         if line_no <= after_index or not line.strip():
             continue
         try:

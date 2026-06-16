@@ -835,13 +835,14 @@ def observe_kimi_transcript(
     if not isinstance(after_index, int):
         after_index = 0
 
-    messages = parse_transcript(transcript_path, after_index=after_index)
+    processed_index = count_events(transcript_path)
+    messages = parse_transcript(transcript_path, after_index=after_index, before_index=processed_index)
     if not messages:
         return None
 
     result = run_observer(messages, config, dry_run, transcript_path=transcript_path, source="kimi")
     if result and not dry_run:
-        cursor[cursor_key] = count_events(transcript_path)
+        cursor[cursor_key] = processed_index
         config.save_cursor(cursor)
 
     return result

@@ -3739,6 +3739,27 @@ def status(ctx: click.Context) -> None:
     click.echo(f"  AGENTS fallback: {opencode_agents_status}")
     click.echo(f"  Event logs: {opencode_event_count} file(s)")
 
+    # Kimi Code CLI status
+    click.echo("\nKimi Code CLI:")
+    click.echo(f"  Config: {config.kimi_config_path}")
+    if config.kimi_config_path.exists():
+        try:
+            kimi_config = config.kimi_config_path.read_text()
+            if _KIMI_OM_BLOCK_START in kimi_config and _KIMI_OM_BLOCK_END in kimi_config:
+                click.echo("  OM hooks: installed")
+            else:
+                click.echo("  OM hooks: not installed (run `om install --kimi`)")
+        except Exception:
+            click.echo("  OM hooks: config present (unreadable)")
+    else:
+        click.echo("  OM hooks: not installed (run `om install --kimi`)")
+    if config.kimi_om_events_path.exists():
+        from .transcripts.kimi import count_events
+
+        click.echo(f"  Event log: {count_events(config.kimi_om_events_path)} event(s) at {config.kimi_om_events_path}")
+    else:
+        click.echo(f"  Event log: none yet ({config.kimi_om_events_path})")
+
     # Grok Build TUI status (Phase 1 hook support)
     grok_hook_file = config.grok_hooks_dir / "observational-memory.json"
     click.echo("\nGrok Build TUI:")
@@ -4238,7 +4259,38 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("OpenCode event logs", "WARN", "no event logs yet")
 
-    # 14. Grok Build TUI (Phase 1 hook support + Claude compatibility awareness)
+    # 14. Kimi Code CLI hooks
+    if config.kimi_config_path.exists():
+        try:
+            kimi_config = config.kimi_config_path.read_text()
+            has_block = _KIMI_OM_BLOCK_START in kimi_config and _KIMI_OM_BLOCK_END in kimi_config
+            has_context = "context --for kimi" in kimi_config
+            has_checkpoint = "kimi-checkpoint" in kimi_config
+            if has_block and has_context and has_checkpoint:
+                _check("Kimi hooks", "PASS", str(config.kimi_config_path))
+            elif has_block:
+                _check(
+                    "Kimi hooks", "FAIL", "OM block present but commands are incomplete", fix="Run: om install --kimi"
+                )
+            else:
+                _check("Kimi hooks", "WARN", "config present without OM block", fix="Run: om install --kimi")
+        except Exception as e:
+            _check("Kimi hooks", "WARN", f"error reading config: {e}", fix="Check ~/.kimi/config.toml")
+    else:
+        _check("Kimi hooks", "WARN", "config.toml not found", fix="Run: om install --kimi")
+
+    if config.kimi_om_events_path.exists():
+        from .transcripts.kimi import count_events
+
+        event_count = count_events(config.kimi_om_events_path)
+        if event_count:
+            _check("Kimi event log", "PASS", f"{event_count} event(s)")
+        else:
+            _check("Kimi event log", "WARN", f"empty event log at {config.kimi_om_events_path}")
+    else:
+        _check("Kimi event log", "WARN", "no Kimi events captured yet")
+
+    # 15. Grok Build TUI (Phase 1 hook support + Claude compatibility awareness)
     grok_hook_file = config.grok_hooks_dir / "observational-memory.json"
     if grok_hook_file.exists():
         _check("Grok OM hook file", "PASS", str(grok_hook_file))
@@ -6929,6 +6981,11 @@ def _build_kimi_checkpoint_command() -> str:
     return f"{_quote_hook_executable(om_path)} kimi-checkpoint"
 
 
+def _build_kimi_observe_worker_command() -> list[str]:
+    om_path = _find_om_path() or sys.argv[0] or "om"
+    return [om_path, "observe", "--source", "kimi"]
+
+
 def _render_kimi_hooks_block() -> str:
     lines = [
         _KIMI_OM_BLOCK_START,
@@ -7021,3 +7078,7 @@ def kimi_checkpoint(ctx: click.Context) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json_mod.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    try:
+        _spawn_detached(_build_kimi_observe_worker_command())
+    except OSError as e:
+        click.echo(f"Warning: failed to queue Kimi observation: {e}", err=True)
