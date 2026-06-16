@@ -1174,12 +1174,25 @@ def test_install_kimi_quotes_spaced_om_path_in_toml(monkeypatch, tmp_path):
     assert commands["UserPromptSubmit"].startswith("'/tmp/bin dir/om' kimi-checkpoint")
 
 
+def test_kimi_hook_commands_quote_windows_spaced_path(monkeypatch):
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "win32")
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: r"C:\Program Files\OM\om.exe")
+
+    from observational_memory.cli import _render_kimi_hooks_block
+
+    parsed = tomllib.loads(_render_kimi_hooks_block())
+    commands = {hook["event"]: hook["command"] for hook in parsed["hooks"]}
+    assert commands["SessionStart"].startswith('"C:\\Program Files\\OM\\om.exe" context --for kimi')
+    assert commands["UserPromptSubmit"].startswith('"C:\\Program Files\\OM\\om.exe" kimi-checkpoint')
+
+
 def test_kimi_checkpoint_appends_and_queues_observe(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     kimi_home = tmp_path / "kimi"
     kimi_home.mkdir()
     monkeypatch.setenv("KIMI_HOME", str(kimi_home))
     monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    monkeypatch.setattr("observational_memory.cli._kimi_observer_now", lambda: 1000.0)
     spawned = []
     monkeypatch.setattr("observational_memory.cli._spawn_detached", lambda argv, cwd=None: spawned.append((argv, cwd)))
     runner = CliRunner()
@@ -1195,6 +1208,56 @@ def test_kimi_checkpoint_appends_and_queues_observe(monkeypatch, tmp_path):
     assert len(events) == 1
     assert json.loads(events[0])["prompt"] == "remember this"
     assert spawned == [(["/tmp/bin/om", "observe", "--source", "kimi"], None)]
+
+
+def test_kimi_checkpoint_throttles_observe_worker(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    kimi_home = tmp_path / "kimi"
+    kimi_home.mkdir()
+    monkeypatch.setenv("KIMI_HOME", str(kimi_home))
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    monkeypatch.setattr("observational_memory.cli._kimi_observer_now", lambda: 1000.0)
+    spawned = []
+    monkeypatch.setattr("observational_memory.cli._spawn_detached", lambda argv, cwd=None: spawned.append((argv, cwd)))
+    runner = CliRunner()
+
+    for prompt in ("first", "second"):
+        result = runner.invoke(
+            cli,
+            ["kimi-checkpoint"],
+            input=json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": prompt}),
+        )
+        assert result.exit_code == 0, result.output
+
+    events = (kimi_home / "observational-memory-events.jsonl").read_text().splitlines()
+    assert len(events) == 2
+    assert spawned == [(["/tmp/bin/om", "observe", "--source", "kimi"], None)]
+
+
+def test_kimi_checkpoint_interval_zero_spawns_every_time(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    kimi_home = tmp_path / "kimi"
+    kimi_home.mkdir()
+    monkeypatch.setenv("KIMI_HOME", str(kimi_home))
+    monkeypatch.setenv("OM_KIMI_OBSERVER_INTERVAL_SECONDS", "0")
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    monkeypatch.setattr("observational_memory.cli._kimi_observer_now", lambda: 1000.0)
+    spawned = []
+    monkeypatch.setattr("observational_memory.cli._spawn_detached", lambda argv, cwd=None: spawned.append((argv, cwd)))
+    runner = CliRunner()
+
+    for prompt in ("first", "second"):
+        result = runner.invoke(
+            cli,
+            ["kimi-checkpoint"],
+            input=json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": prompt}),
+        )
+        assert result.exit_code == 0, result.output
+
+    assert spawned == [
+        (["/tmp/bin/om", "observe", "--source", "kimi"], None),
+        (["/tmp/bin/om", "observe", "--source", "kimi"], None),
+    ]
 
 
 def test_status_reports_kimi_hooks(monkeypatch, tmp_path):

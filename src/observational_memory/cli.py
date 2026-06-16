@@ -6986,6 +6986,73 @@ def _build_kimi_observe_worker_command() -> list[str]:
     return [om_path, "observe", "--source", "kimi"]
 
 
+def _kimi_observer_interval_seconds(default: int = 60) -> int:
+    raw_value = os.environ.get("OM_KIMI_OBSERVER_INTERVAL_SECONDS", str(default))
+    try:
+        interval = int(raw_value)
+    except ValueError:
+        click.echo(
+            f"Warning: invalid OM_KIMI_OBSERVER_INTERVAL_SECONDS={raw_value!r}; using default {default}.",
+            err=True,
+        )
+        return default
+    if interval < 0:
+        click.echo(
+            f"Warning: OM_KIMI_OBSERVER_INTERVAL_SECONDS must be >=0; using default {default}.",
+            err=True,
+        )
+        return default
+    return interval
+
+
+def _kimi_observer_now() -> float:
+    import time
+
+    return time.time()
+
+
+def _kimi_observer_state_path(config: Config) -> Path:
+    return config.memory_dir / ".kimi-observer-state.json"
+
+
+def _load_kimi_observer_last_spawn(config: Config) -> float:
+    path = _kimi_observer_state_path(config)
+    if not path.exists():
+        return 0.0
+    try:
+        data = json.loads(path.read_text())
+        return float(data.get("last_spawn", 0.0))
+    except Exception:
+        return 0.0
+
+
+def _record_kimi_observer_spawn(config: Config, timestamp: float) -> None:
+    path = _kimi_observer_state_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"last_spawn": timestamp}, sort_keys=True) + "\n")
+
+
+def _should_spawn_kimi_observer(config: Config) -> tuple[bool, float]:
+    now = _kimi_observer_now()
+    interval = _kimi_observer_interval_seconds()
+    if interval == 0:
+        return True, now
+    last_spawn = _load_kimi_observer_last_spawn(config)
+    return now - last_spawn >= interval, now
+
+
+def _queue_kimi_observer(config: Config) -> None:
+    should_spawn, now = _should_spawn_kimi_observer(config)
+    if not should_spawn:
+        return
+    try:
+        _spawn_detached(_build_kimi_observe_worker_command())
+    except OSError as e:
+        click.echo(f"Warning: failed to queue Kimi observation: {e}", err=True)
+        return
+    _record_kimi_observer_spawn(config, now)
+
+
 def _render_kimi_hooks_block() -> str:
     lines = [
         _KIMI_OM_BLOCK_START,
@@ -7078,7 +7145,4 @@ def kimi_checkpoint(ctx: click.Context) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json_mod.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-    try:
-        _spawn_detached(_build_kimi_observe_worker_command())
-    except OSError as e:
-        click.echo(f"Warning: failed to queue Kimi observation: {e}", err=True)
+    _queue_kimi_observer(config)

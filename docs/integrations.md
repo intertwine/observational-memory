@@ -81,6 +81,8 @@ om status
 om doctor
 ```
 
+Kimi checkpoint hooks queue observation at most once per minute by default. Set `OM_KIMI_OBSERVER_INTERVAL_SECONDS=0` to observe after every hook event, or raise it for quieter agentic sessions.
+
 Use recall directly inside Kimi when you need deeper context:
 
 ```bash

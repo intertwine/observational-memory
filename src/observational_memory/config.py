@@ -303,6 +303,9 @@ ENV_FILE_TEMPLATE = """\
 
 # Codex observer polling cadence (minutes)
 # OM_CODEX_OBSERVER_INTERVAL_MINUTES=15
+#
+# Kimi checkpoint observe throttle (seconds); set 0 to observe after every hook event
+# OM_KIMI_OBSERVER_INTERVAL_SECONDS=60
 
 # Memory backup (host-local versioned snapshots; never synced)
 # A snapshot of the durable Markdown is taken automatically before each reflect
