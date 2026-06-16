@@ -129,6 +129,8 @@ Suggested layout:
 
 `mission.md` holds goal, constraints, acceptance criteria, and risk. Each task file holds prompt, owner, dependencies, worktree, status, checks, links to PRs/diffs, and final result.
 
+`om work init` must also add a `.gitignore` entry for `.om/` unless the user opts out. Mission state, task logs, events, and artifacts are local operator state; they should not be committed to the project repo by accident.
+
 Why plain files:
 
 - The human can inspect and edit the plan.
@@ -138,14 +140,16 @@ Why plain files:
 
 ### 3. Worker adapter layer
 
-Define a narrow adapter interface:
+Define a narrow adapter protocol as CLI contracts, not in-process methods. The desktop app should be able to call `om work` commands over a process boundary and receive JSON output that matches the same schema used by local automation.
 
-- `prepare(repo, base_branch, task)`
-- `start(task, worktree, context_bundle)`
-- `status(run_id)`
-- `message(run_id, text)`
-- `stop(run_id)`
-- `collect(run_id)`
+Candidate command contracts:
+
+- `om work prepare --task <id> --json`
+- `om work start --task <id> --worktree <path> --context-bundle <path> --json`
+- `om work status --run <id> --json`
+- `om work message --run <id> --text <text> --json`
+- `om work stop --run <id> --json`
+- `om work collect --run <id> --json`
 
 Initial adapters should be local-only:
 
@@ -275,13 +279,14 @@ The desktop app should consume only JSON or JSONL from these commands.
 Deliverables:
 
 - Define `.om/work/` file schemas.
-- Define worker adapter protocol.
+- Define worker adapter command contracts and JSON envelopes.
 - Define mission/task/run/review event schemas.
 - Prototype a read-only desktop mission viewer using fixture files.
 
 Acceptance:
 
 - A mission can be created, edited in a text editor, and rendered in the app without running agents.
+- `om work init` adds `.om/` to `.gitignore` by default so mission state does not get committed accidentally.
 
 ### Phase B — Local task ledger and manual queue
 
@@ -355,12 +360,12 @@ Deliverables:
 
 - Devin adapter if the user has Devin access.
 - Factory adapter if the user has Droid access.
-- OpenHands adapter.
+- OpenHands adapter if the user has a local install or cloud access.
 - Optional issue tracker triggers.
 
 Acceptance:
 
-- OM can manage both local and hosted workers through the same mission ledger.
+- OM can manage both local and hosted workers through the same mission ledger when the user has installed and authorized those optional adapters.
 
 ## Adversarial review of the middle-management idea
 

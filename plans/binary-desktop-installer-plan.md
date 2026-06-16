@@ -198,7 +198,7 @@ Safety rules:
 - Context packs must show scope filtering before send.
 - Mail state remains host-local and is not cluster synced.
 
-Implementation requirement: mail status, peer listing, sync, and inbox review already have JSON output. Phase 0 should scope the remaining gaps precisely, especially accept/reject, send-note, send-pack, and ask flows.
+Implementation requirement: mail status, peer listing, sync, inbox review, and ask already have JSON output. Phase 0 should scope the remaining gaps precisely, especially accept, reject, send-note, and send-pack.
 
 ## Engineering plan
 
