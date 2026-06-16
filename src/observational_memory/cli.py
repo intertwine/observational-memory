@@ -16,14 +16,14 @@ import click
 from . import __version__
 from .config import Config
 
-_OBSERVE_SOURCES = ["claude", "codex", "opencode", "grok", "hermes", "cowork", "claude-memory", "all"]
+_OBSERVE_SOURCES = ["claude", "codex", "opencode", "kimi", "grok", "hermes", "cowork", "claude-memory", "all"]
 
 
 @click.group()
 @click.version_option(__version__, prog_name="om")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Observational Memory — shared memory for Claude Code, Codex CLI, OpenCode, and Hermes Agent."""
+    """Observational Memory — shared memory for Claude Code, Codex CLI, OpenCode, Kimi Code CLI, and Hermes Agent."""
     ctx.ensure_object(dict)
     Config().load_env_file()  # Seed os.environ before constructing final config
     config = Config()
@@ -48,6 +48,7 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
         observe_all_cowork,
         observe_all_grok,
         observe_all_hermes,
+        observe_all_kimi,
         observe_all_opencode,
         observe_auto_memory,
         observe_claude_transcript,
@@ -55,6 +56,7 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
         observe_cowork_transcript,
         observe_grok_transcript,
         observe_hermes_transcript,
+        observe_kimi_transcript,
         observe_opencode_transcript,
     )
 
@@ -72,6 +74,8 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
             result = observe_codex_transcript(transcript, config, dry_run)
         elif transcript_source == "hermes":
             result = observe_hermes_transcript(transcript, config, dry_run)
+        elif transcript_source == "kimi":
+            result = observe_kimi_transcript(transcript, config, dry_run)
         elif transcript_source == "cowork":
             result = observe_cowork_transcript(transcript, config, dry_run)
         elif transcript_source == "grok":
@@ -84,7 +88,7 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
             raise click.ClickException(
                 "Could not detect transcript source. "
                 "Pass --source claude, --source codex, --source opencode, "
-                "--source grok, --source hermes, or --source cowork."
+                "--source kimi, --source grok, --source hermes, or --source cowork."
             )
         if result:
             click.echo(f"Observations updated ({len(result)} chars)")
@@ -112,6 +116,10 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
     if source in ("hermes", "all"):
         click.echo("Scanning Hermes sessions...")
         results.extend(observe_all_hermes(config=config, dry_run=dry_run))
+
+    if source in ("kimi", "all"):
+        click.echo("Scanning Kimi Code events...")
+        results.extend(observe_all_kimi(config=config, dry_run=dry_run))
 
     if source in ("cowork", "all"):
         click.echo("Scanning Cowork sessions...")
@@ -175,6 +183,9 @@ def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
         return "hermes"
     except ValueError:
         pass
+
+    if transcript == config.kimi_om_events_path:
+        return "kimi"
 
     try:
         transcript.relative_to(config.cowork_sessions_dir)
@@ -3283,12 +3294,13 @@ def _configure_llm(
 @click.option("--cowork", "targets", flag_value="cowork", help="Install Cowork plugin")
 @click.option("--grok", "targets", flag_value="grok", help="Install Grok Build TUI hooks (Claude compat aware)")
 @click.option("--opencode", "targets", flag_value="opencode", help="Install OpenCode plugin and AGENTS fallback")
+@click.option("--kimi", "targets", flag_value="kimi", help="Install Kimi Code CLI hooks")
 @click.option("--both", "targets", flag_value="both", default=True, help="Install Claude Code + Codex (default)")
 @click.option(
     "--all",
     "targets",
     flag_value="all",
-    help="Install all integrations including OpenCode, Cowork, and Grok",
+    help="Install all integrations including OpenCode, Kimi, Cowork, and Grok",
 )
 @click.option(
     "--scheduler",
@@ -3321,7 +3333,7 @@ def install(
     bedrock_region: str | None,
     non_interactive: bool,
 ) -> None:
-    """Set up observational memory for Claude Code, Codex, OpenCode, Grok, and/or Cowork."""
+    """Set up observational memory for Claude Code, Codex, OpenCode, Kimi, Grok, and/or Cowork."""
     config = ctx.obj["config"]
     config.ensure_memory_dir()
     scheduler_mode = _resolve_scheduler_mode(scheduler, cron_compat)
@@ -3384,6 +3396,9 @@ def install(
     if targets in ("grok", "all"):
         _install_grok(config)
 
+    if targets in ("kimi", "all"):
+        _install_kimi(config)
+
     if scheduler_mode == "launchd":
         try:
             _install_launchd(config, targets)
@@ -3417,12 +3432,13 @@ def install(
 @click.option("--cowork", "targets", flag_value="cowork")
 @click.option("--grok", "targets", flag_value="grok", help="Remove Grok Build TUI hooks")
 @click.option("--opencode", "targets", flag_value="opencode", help="Remove OpenCode plugin and AGENTS fallback")
+@click.option("--kimi", "targets", flag_value="kimi", help="Remove Kimi Code CLI hooks")
 @click.option("--both", "targets", flag_value="both", default=True)
 @click.option("--all", "targets", flag_value="all")
 @click.option("--purge", is_flag=True, help="Also remove memory files")
 @click.pass_context
 def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
-    """Remove OM hooks/scheduler jobs for selected targets (claude/codex/opencode/grok/cowork)."""
+    """Remove OM hooks/scheduler jobs for selected targets (claude/codex/opencode/kimi/grok/cowork)."""
     config = ctx.obj["config"]
 
     if targets in ("claude", "both", "all"):
@@ -3439,6 +3455,9 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
 
     if targets in ("grok", "all"):
         _uninstall_grok(config)
+
+    if targets in ("kimi", "all"):
+        _uninstall_kimi(config)
 
     _uninstall_launchd(config, targets)
     _uninstall_schtasks(config, targets)
@@ -3719,6 +3738,27 @@ def status(ctx: click.Context) -> None:
     click.echo(f"  OM plugin: {opencode_plugin_status}")
     click.echo(f"  AGENTS fallback: {opencode_agents_status}")
     click.echo(f"  Event logs: {opencode_event_count} file(s)")
+
+    # Kimi Code CLI status
+    click.echo("\nKimi Code CLI:")
+    click.echo(f"  Config: {config.kimi_config_path}")
+    if config.kimi_config_path.exists():
+        try:
+            kimi_config = config.kimi_config_path.read_text()
+            if _KIMI_OM_BLOCK_START in kimi_config and _KIMI_OM_BLOCK_END in kimi_config:
+                click.echo("  OM hooks: installed")
+            else:
+                click.echo("  OM hooks: not installed (run `om install --kimi`)")
+        except Exception:
+            click.echo("  OM hooks: config present (unreadable)")
+    else:
+        click.echo("  OM hooks: not installed (run `om install --kimi`)")
+    if config.kimi_om_events_path.exists():
+        from .transcripts.kimi import count_events
+
+        click.echo(f"  Event log: {count_events(config.kimi_om_events_path)} event(s) at {config.kimi_om_events_path}")
+    else:
+        click.echo(f"  Event log: none yet ({config.kimi_om_events_path})")
 
     # Grok Build TUI status (Phase 1 hook support)
     grok_hook_file = config.grok_hooks_dir / "observational-memory.json"
@@ -4219,7 +4259,38 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     else:
         _check("OpenCode event logs", "WARN", "no event logs yet")
 
-    # 14. Grok Build TUI (Phase 1 hook support + Claude compatibility awareness)
+    # 14. Kimi Code CLI hooks
+    if config.kimi_config_path.exists():
+        try:
+            kimi_config = config.kimi_config_path.read_text()
+            has_block = _KIMI_OM_BLOCK_START in kimi_config and _KIMI_OM_BLOCK_END in kimi_config
+            has_context = "context --for kimi" in kimi_config
+            has_checkpoint = "kimi-checkpoint" in kimi_config
+            if has_block and has_context and has_checkpoint:
+                _check("Kimi hooks", "PASS", str(config.kimi_config_path))
+            elif has_block:
+                _check(
+                    "Kimi hooks", "FAIL", "OM block present but commands are incomplete", fix="Run: om install --kimi"
+                )
+            else:
+                _check("Kimi hooks", "WARN", "config present without OM block", fix="Run: om install --kimi")
+        except Exception as e:
+            _check("Kimi hooks", "WARN", f"error reading config: {e}", fix="Check ~/.kimi/config.toml")
+    else:
+        _check("Kimi hooks", "WARN", "config.toml not found", fix="Run: om install --kimi")
+
+    if config.kimi_om_events_path.exists():
+        from .transcripts.kimi import count_events
+
+        event_count = count_events(config.kimi_om_events_path)
+        if event_count:
+            _check("Kimi event log", "PASS", f"{event_count} event(s)")
+        else:
+            _check("Kimi event log", "WARN", f"empty event log at {config.kimi_om_events_path}")
+    else:
+        _check("Kimi event log", "WARN", "no Kimi events captured yet")
+
+    # 15. Grok Build TUI (Phase 1 hook support + Claude compatibility awareness)
     grok_hook_file = config.grok_hooks_dir / "observational-memory.json"
     if grok_hook_file.exists():
         _check("Grok OM hook file", "PASS", str(grok_hook_file))
@@ -6892,3 +6963,186 @@ def _register_cli_plugins() -> None:
 
 
 _register_cli_plugins()
+
+# --- Kimi Code CLI integration ---
+
+_KIMI_OM_BLOCK_START = "# --- observational-memory kimi hooks start ---"
+_KIMI_OM_BLOCK_END = "# --- observational-memory kimi hooks end ---"
+_KIMI_CHECKPOINT_EVENTS = ("UserPromptSubmit", "SubagentStart", "SubagentStop", "StopFailure")
+
+
+def _build_kimi_context_command() -> str:
+    om_path = _find_om_path() or "om"
+    return f"{_quote_hook_executable(om_path)} context --for kimi"
+
+
+def _build_kimi_checkpoint_command() -> str:
+    om_path = _find_om_path() or "om"
+    return f"{_quote_hook_executable(om_path)} kimi-checkpoint"
+
+
+def _build_kimi_observe_worker_command() -> list[str]:
+    om_path = _find_om_path() or sys.argv[0] or "om"
+    return [om_path, "observe", "--source", "kimi"]
+
+
+def _kimi_observer_interval_seconds(default: int = 60) -> int:
+    raw_value = os.environ.get("OM_KIMI_OBSERVER_INTERVAL_SECONDS", str(default))
+    try:
+        interval = int(raw_value)
+    except ValueError:
+        click.echo(
+            f"Warning: invalid OM_KIMI_OBSERVER_INTERVAL_SECONDS={raw_value!r}; using default {default}.",
+            err=True,
+        )
+        return default
+    if interval < 0:
+        click.echo(
+            f"Warning: OM_KIMI_OBSERVER_INTERVAL_SECONDS must be >=0; using default {default}.",
+            err=True,
+        )
+        return default
+    return interval
+
+
+def _kimi_observer_now() -> float:
+    import time
+
+    return time.time()
+
+
+def _kimi_observer_state_path(config: Config) -> Path:
+    return config.memory_dir / ".kimi-observer-state.json"
+
+
+def _load_kimi_observer_last_spawn(config: Config) -> float:
+    path = _kimi_observer_state_path(config)
+    if not path.exists():
+        return 0.0
+    try:
+        data = json.loads(path.read_text())
+        return float(data.get("last_spawn", 0.0))
+    except Exception:
+        return 0.0
+
+
+def _record_kimi_observer_spawn(config: Config, timestamp: float) -> None:
+    path = _kimi_observer_state_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"last_spawn": timestamp}, sort_keys=True) + "\n")
+
+
+def _should_spawn_kimi_observer(config: Config) -> tuple[bool, float]:
+    now = _kimi_observer_now()
+    interval = _kimi_observer_interval_seconds()
+    if interval == 0:
+        return True, now
+    last_spawn = _load_kimi_observer_last_spawn(config)
+    return now - last_spawn >= interval, now
+
+
+def _queue_kimi_observer(config: Config) -> None:
+    should_spawn, now = _should_spawn_kimi_observer(config)
+    if not should_spawn:
+        return
+    try:
+        _spawn_detached(_build_kimi_observe_worker_command())
+    except OSError as e:
+        click.echo(f"Warning: failed to queue Kimi observation: {e}", err=True)
+        return
+    _record_kimi_observer_spawn(config, now)
+
+
+def _render_kimi_hooks_block() -> str:
+    lines = [
+        _KIMI_OM_BLOCK_START,
+        "# Managed by `om install --kimi`. Kimi hooks receive JSON on stdin.",
+        "[[hooks]]",
+        'event = "SessionStart"',
+        f'command = "{_toml_basic_string(_build_kimi_context_command())}"',
+        "timeout = 15",
+        "",
+    ]
+    checkpoint_command = _toml_basic_string(_build_kimi_checkpoint_command())
+    for event in _KIMI_CHECKPOINT_EVENTS:
+        lines.extend(
+            [
+                "[[hooks]]",
+                f'event = "{event}"',
+                f'command = "{checkpoint_command}"',
+                "timeout = 5",
+                "",
+            ]
+        )
+    lines.append(_KIMI_OM_BLOCK_END)
+    return "\n".join(lines)
+
+
+def _toml_basic_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _replace_marked_block(content: str, block: str) -> str:
+    import re
+
+    pattern = rf"\n*{re.escape(_KIMI_OM_BLOCK_START)}.*?{re.escape(_KIMI_OM_BLOCK_END)}\n*"
+    if _KIMI_OM_BLOCK_START in content:
+        return re.sub(pattern, "\n\n" + block + "\n", content, flags=re.DOTALL).strip() + "\n"
+    return content.rstrip() + ("\n\n" if content.strip() else "") + block + "\n"
+
+
+def _remove_marked_block(content: str) -> str:
+    import re
+
+    pattern = rf"\n*{re.escape(_KIMI_OM_BLOCK_START)}.*?{re.escape(_KIMI_OM_BLOCK_END)}\n*"
+    return re.sub(pattern, "\n", content, flags=re.DOTALL).strip() + "\n"
+
+
+def _install_kimi(config: Config) -> None:
+    """Install Kimi Code CLI hooks in ~/.kimi/config.toml."""
+    path = config.kimi_config_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text() if path.exists() else ""
+    path.write_text(_replace_marked_block(existing, _render_kimi_hooks_block()))
+    click.echo(f"Installed Kimi Code CLI hooks in {path}")
+
+
+def _uninstall_kimi(config: Config) -> None:
+    """Remove OM-managed Kimi Code CLI hooks from ~/.kimi/config.toml."""
+    path = config.kimi_config_path
+    if not path.exists():
+        return
+    content = path.read_text()
+    if _KIMI_OM_BLOCK_START not in content:
+        return
+    updated = _remove_marked_block(content)
+    if updated.strip():
+        path.write_text(updated)
+        click.echo(f"Removed OM Kimi hooks from {path}")
+    else:
+        path.unlink()
+        click.echo(f"Removed {path}")
+
+
+@cli.command(hidden=True, name="kimi-checkpoint")
+@click.pass_context
+def kimi_checkpoint(ctx: click.Context) -> None:
+    """Capture Kimi hook JSON from stdin for later observation."""
+    import json as json_mod
+
+    config = ctx.obj["config"]
+    raw = sys.stdin.read().strip()
+    if not raw:
+        return
+    try:
+        payload = json_mod.loads(raw)
+    except json_mod.JSONDecodeError:
+        payload = {"hook_event_name": "Unknown", "raw": raw}
+    if not isinstance(payload, dict):
+        payload = {"hook_event_name": "Unknown", "raw": payload}
+    payload["om_captured_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    path = config.kimi_om_events_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json_mod.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    _queue_kimi_observer(config)

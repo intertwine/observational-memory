@@ -813,3 +813,45 @@ def observe_all_grok(config: Config | None = None, dry_run: bool = False) -> lis
             results.append(result)
 
     return results
+
+
+# --- Kimi Code CLI observation support ---
+
+
+def observe_kimi_transcript(
+    transcript_path: Path,
+    config: Config | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Run observer on OM-captured Kimi Code CLI hook events."""
+    if config is None:
+        config = Config()
+
+    from .transcripts.kimi import count_events, parse_transcript
+
+    cursor = config.load_cursor()
+    cursor_key = str(transcript_path)
+    after_index = cursor.get(cursor_key)
+    if not isinstance(after_index, int):
+        after_index = 0
+
+    processed_index = count_events(transcript_path)
+    messages = parse_transcript(transcript_path, after_index=after_index, before_index=processed_index)
+    if not messages:
+        return None
+
+    result = run_observer(messages, config, dry_run, transcript_path=transcript_path, source="kimi")
+    if result and not dry_run:
+        cursor[cursor_key] = processed_index
+        config.save_cursor(cursor)
+
+    return result
+
+
+def observe_all_kimi(config: Config | None = None, dry_run: bool = False) -> list[str]:
+    """Observe OM-captured Kimi Code CLI hook events, if present."""
+    if config is None:
+        config = Config()
+
+    result = observe_kimi_transcript(config.kimi_om_events_path, config, dry_run)
+    return [result] if result else []
