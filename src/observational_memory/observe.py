@@ -695,6 +695,56 @@ def _write_observations(new_observations: str, config: Config) -> None:
     _reindex_if_enabled(config)
 
 
+# --- OpenCode observation support ---
+
+
+def observe_opencode_transcript(
+    transcript_path: Path,
+    config: Config | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Run observer on one OM-owned OpenCode plugin event log."""
+    if config is None:
+        config = Config()
+
+    from .transcripts.opencode import parse_transcript
+
+    cursor = config.load_cursor()
+    cursor_key = str(transcript_path)
+    all_messages = parse_transcript(transcript_path)
+    if not all_messages:
+        return None
+
+    after_count = cursor.get(cursor_key)
+    after_index = int(after_count) if isinstance(after_count, (int, str)) and str(after_count).isdigit() else 0
+    if after_index > len(all_messages):
+        after_index = 0
+    messages = all_messages[after_index:]
+    if not messages:
+        return None
+
+    result = run_observer(messages, config, dry_run, transcript_path=transcript_path, source="opencode")
+    if result and not dry_run:
+        cursor[cursor_key] = len(all_messages)
+        config.save_cursor(cursor)
+    return result
+
+
+def observe_all_opencode(config: Config | None = None, dry_run: bool = False) -> list[str]:
+    """Scan recent OpenCode plugin event logs."""
+    from .transcripts.opencode import find_recent_sessions
+
+    if config is None:
+        config = Config()
+
+    results = []
+    for path in find_recent_sessions(config.opencode_events_dir):
+        result = observe_opencode_transcript(path, config, dry_run)
+        if result:
+            results.append(result)
+    return results
+
+
 # --- Grok observation support (Phase 2) ---
 
 

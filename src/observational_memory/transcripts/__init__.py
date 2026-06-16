@@ -1,4 +1,4 @@
-"""Transcript parsers for Claude Code, Codex CLI, Grok Build TUI, and Hermes Agent."""
+"""Transcript parsers for Claude Code, Codex CLI, OpenCode, Grok Build TUI, and Hermes Agent."""
 
 from __future__ import annotations
 

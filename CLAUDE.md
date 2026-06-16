@@ -55,7 +55,7 @@ CI runs `ruff check`, `ruff format --check`, and `pytest` on Python 3.11, 3.12, 
 
 ## Architecture
 
-Observational Memory is user-level memory for Claude Code, Codex, Grok Build TUI, Cowork, and Hermes.
+Observational Memory is user-level memory for Claude Code, Codex, OpenCode, Grok Build TUI, Cowork, and Hermes.
 
 ```text
 transcripts -> om observe -> observations.md
@@ -78,12 +78,13 @@ Important modules:
 - `src/observational_memory/search/`: BM25, QMD, and no-op search backends.
 - `src/observational_memory/sync/`: OM Cluster config, records, crypto, materialization, and transports.
 - `src/observational_memory/sync/relay_server.py`: supported stdlib relay server.
-- `src/observational_memory/transcripts/`: Claude, Codex, Grok, Cowork, Hermes, and Claude auto-memory parsers.
+- `src/observational_memory/transcripts/`: Claude, Codex, OpenCode, Grok, Cowork, Hermes, and Claude auto-memory parsers.
 
 ## Agent Integrations
 
 - Claude Code: hooks for startup context, session end, prompt submit, and pre-compact checkpoints.
 - Codex: hooks-first startup and Stop checkpoints, plus a conditional AGENTS fallback.
+- OpenCode: local plugin event capture plus a global AGENTS fallback.
 - Grok Build TUI: native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation.
 - Cowork: macOS local plugin with hooks and `/recall`.
 - Hermes: core `om` supports manual transcript ingestion; live startup context, search, explicit writes, and OM Cluster participation come from the external `intertwine/hermes-observational-memory` Hermes memory-provider plugin.
