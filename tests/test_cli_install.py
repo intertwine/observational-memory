@@ -1087,7 +1087,7 @@ def test_install_opencode_plugin_and_agents_fallback(monkeypatch, tmp_path):
     assert "opencode-event" in plugin_text
     assert "message.updated" in plugin_text
     assert "message.part.updated" not in plugin_text
-    assert "session.idle" in plugin_text
+    assert "session.idle" not in plugin_text
     agents_text = agents.read_text()
     assert "<!-- observational-memory:opencode -->" in agents_text
     assert 'om context --for opencode --cwd "$PWD"' in agents_text
@@ -1111,3 +1111,19 @@ def test_opencode_event_appends_om_owned_jsonl(monkeypatch, tmp_path):
     payload = json.loads(files[0].read_text().strip())
     assert payload["cwd"] == str(tmp_path / "repo")
     assert payload["event"]["type"] == "message.updated"
+
+
+def test_opencode_event_tolerates_null_session(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        ["opencode-event", "--cwd", str(tmp_path / "repo")],
+        input='{"event":{"type":"message.updated","session":null,"message":{"role":"user","content":"hello"}}}',
+    )
+
+    assert result.exit_code == 0, result.output
+    event_dir = tmp_path / "data" / "observational-memory" / ".opencode-events"
+    files = list(event_dir.glob("*.jsonl"))
+    assert len(files) == 1

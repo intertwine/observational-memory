@@ -6238,7 +6238,7 @@ def opencode_event(ctx: click.Context, cwd: Path | None) -> None:
         return
     cwd_text = str(cwd or Path.cwd())
     event = payload.get("event", {})
-    session_id = str(event.get("sessionID") or event.get("session", {}).get("id") or "default")
+    session_id = str(event.get("sessionID") or (event.get("session") or {}).get("id") or "default")
     key = hashlib.sha256(f"{cwd_text}:{session_id}".encode()).hexdigest()[:24]
     config.opencode_events_dir.mkdir(parents=True, exist_ok=True)
     path = config.opencode_events_dir / f"{key}.jsonl"

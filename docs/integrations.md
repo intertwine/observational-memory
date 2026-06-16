@@ -145,7 +145,7 @@ Claude Managed Agents exports are small Markdown files plus a manifest. They are
 
 ## OpenCode
 
-OpenCode supports local plugins from `~/.config/opencode/plugins/` and global rules from `~/.config/opencode/AGENTS.md`. OM uses both. The plugin records stable message and idle events into OM-owned JSONL files under the memory directory. The AGENTS fallback tells OpenCode how to load bounded startup context without bulk-reading generated memory files.
+OpenCode supports local plugins from `~/.config/opencode/plugins/` and global rules from `~/.config/opencode/AGENTS.md`. OM uses both. The plugin records stable message events into OM-owned JSONL files under the memory directory. The AGENTS fallback tells OpenCode how to load bounded startup context without bulk-reading generated memory files.
 
 Install it:
 

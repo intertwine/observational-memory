@@ -17,7 +17,6 @@ export const ObservationalMemory = async ({ directory }) => {
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return
       if (event.type === "message.updated") send(event, directory)
-      if (event.type === "session.idle") send(event, directory)
     },
     "experimental.session.compacting": async (_input, output) => {
       output.context.push("Use `om context --for opencode --cwd \"$PWD\"` or `om recall --query \"...\"` for Observational Memory when more project history is needed.")
