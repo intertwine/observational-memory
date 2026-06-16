@@ -274,7 +274,11 @@ def test_doctor_reports_opencode_integration(monkeypatch, tmp_path):
     plugin.parent.mkdir(parents=True)
     plugin.write_text('spawn("om", ["opencode-event"])\n')
     agents = opencode_config / "AGENTS.md"
-    agents.write_text("<!-- observational-memory:opencode -->\n")
+    agents.write_text(
+        "<!-- observational-memory:opencode -->\n"
+        "## Observational Memory for OpenCode\n"
+        "<!-- observational-memory:opencode -->\n"
+    )
     events_dir = tmp_path / "data" / "observational-memory" / ".opencode-events"
     events_dir.mkdir(parents=True)
     (events_dir / "session.jsonl").write_text('{"event":{"type":"session.idle"}}\n')

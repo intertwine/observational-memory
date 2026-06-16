@@ -48,6 +48,8 @@ def _extract_message(entry: dict[str, Any]) -> tuple[str, str, str] | None:
         return None
 
     event_type = str(event.get("type") or entry.get("type") or "")
+    # OpenCode event payloads have changed shape across builds. Accept typeless
+    # entries defensively, but drop typed lifecycle events that are not messages.
     if event_type and "message" not in event_type and "part" not in event_type:
         return None
 

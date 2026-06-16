@@ -6181,12 +6181,12 @@ The OpenCode plugin installed by OM records message events locally so `om observ
 
 def _install_opencode(config: Config) -> None:
     import re
-    import shutil as shutil_mod
+    import shutil
 
     config.opencode_plugins_dir.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).parent / "hooks" / "opencode" / _OPENCODE_PLUGIN_NAME
     target = config.opencode_plugins_dir / _OPENCODE_PLUGIN_NAME
-    shutil_mod.copy2(source, target)
+    shutil.copy2(source, target)
     click.echo(f"Installed OpenCode plugin in {target}")
 
     agents_md = config.opencode_agents_md

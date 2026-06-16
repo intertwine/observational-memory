@@ -75,14 +75,6 @@ def _opencode_config_dir() -> Path:
     return Path(os.environ.get("OPENCODE_CONFIG_DIR", _xdg_config_home() / "opencode"))
 
 
-def _opencode_data_dir() -> Path:
-    """Return the OpenCode per-user data directory."""
-    override = os.environ.get("OPENCODE_DATA_DIR")
-    if override:
-        return Path(override)
-    return _xdg_data_home() / "opencode"
-
-
 def _cowork_app_support_dir() -> Path:
     """Return the directory containing Cowork local-agent-mode session/plugin trees.
 
@@ -363,7 +355,6 @@ class Config:
 
     # OpenCode paths
     opencode_config_dir: Path = field(default_factory=_opencode_config_dir)
-    opencode_data_dir: Path = field(default_factory=_opencode_data_dir)
 
     # LLM settings
     llm_provider: str = field(
