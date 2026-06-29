@@ -157,6 +157,7 @@ Do not sync `~/.local/share/observational-memory/` directly with Dropbox, iCloud
 | Grok Build TUI | Native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation. |
 | Claude Cowork | Local plugin on macOS with hooks and `/recall`. |
 | Hermes | External memory-provider plugin through [intertwine/hermes-observational-memory](https://github.com/intertwine/hermes-observational-memory), plus manual session-log ingestion. |
+| Aside (agentic browser) | Observe-first peer: native `messages.jsonl` parser and `om observe --source aside`; warm start via the Aside `om` skill (no file hooks). |
 | ChatGPT / Claude Managed Agents | Reviewed export bundles through `om export` — not live sync; `om` never silently writes hosted memory. |
 
 Out-of-tree integrations have first-class seams: mail providers and CLI add-ons plug in through public entry points ([CONTRIBUTING.md](CONTRIBUTING.md)).

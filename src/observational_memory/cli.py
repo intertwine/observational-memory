@@ -16,7 +16,7 @@ import click
 from . import __version__
 from .config import Config
 
-_OBSERVE_SOURCES = ["claude", "codex", "grok", "hermes", "cowork", "claude-memory", "all"]
+_OBSERVE_SOURCES = ["claude", "codex", "grok", "hermes", "cowork", "aside", "claude-memory", "all"]
 
 
 @click.group()
@@ -43,11 +43,13 @@ def cli(ctx: click.Context) -> None:
 def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: bool) -> None:
     """Run the observer to compress transcripts into observations."""
     from .observe import (
+        observe_all_aside,
         observe_all_claude,
         observe_all_codex,
         observe_all_cowork,
         observe_all_grok,
         observe_all_hermes,
+        observe_aside_transcript,
         observe_auto_memory,
         observe_claude_transcript,
         observe_codex_transcript,
@@ -74,12 +76,15 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
             result = observe_cowork_transcript(transcript, config, dry_run)
         elif transcript_source == "grok":
             result = observe_grok_transcript(transcript, config, dry_run)
+        elif transcript_source == "aside":
+            result = observe_aside_transcript(transcript, config, dry_run)
         elif transcript_source == "claude-memory":
             raise click.ClickException("--transcript does not support --source claude-memory.")
         else:
             raise click.ClickException(
                 "Could not detect transcript source. "
-                "Pass --source claude, --source codex, --source grok, --source hermes, or --source cowork."
+                "Pass --source claude, --source codex, --source grok, --source hermes, "
+                "--source cowork, or --source aside."
             )
         if result:
             click.echo(f"Observations updated ({len(result)} chars)")
@@ -111,6 +116,10 @@ def observe(ctx: click.Context, transcript: Path | None, source: str, dry_run: b
     if source in ("grok", "all"):
         click.echo("Scanning Grok sessions...")
         results.extend(observe_all_grok(config, dry_run))
+
+    if source in ("aside", "all"):
+        click.echo("Scanning Aside sessions...")
+        results.extend(observe_all_aside(config, dry_run))
 
     if source in ("claude-memory", "all"):
         click.echo("Scanning Claude Code auto-memory files...")
@@ -164,6 +173,12 @@ def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
     try:
         transcript.relative_to(config.cowork_sessions_dir)
         return "cowork"
+    except ValueError:
+        pass
+
+    try:
+        transcript.relative_to(config.aside_sessions_root)
+        return "aside"
     except ValueError:
         pass
 
@@ -851,7 +866,7 @@ def _format_location(path: str | None, line: int | None) -> str | None:
 @click.option("--budget-chars", type=int, help="Maximum startup context characters to emit.")
 @click.option("--cwd", "routing_cwd", help="Current working directory for task-aware startup routing.")
 @click.option("--task", help="Current task summary for task-aware startup routing.")
-@click.option("--for", "agent", help="Host agent name, e.g. codex, claude, cowork, hermes.")
+@click.option("--for", "agent", help="Host agent name, e.g. codex, claude, cowork, hermes, aside.")
 @click.option(
     "--quality-report",
     is_flag=True,
@@ -944,7 +959,7 @@ def _format_quality_report(report: dict) -> str:
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output.")
 @click.option("--cwd", "routing_cwd", help="Current working directory to include in recall routing metadata.")
 @click.option("--task", help="Current task summary to include in recall routing metadata.")
-@click.option("--for", "agent", help="Host agent name, e.g. codex, claude, cowork, hermes.")
+@click.option("--for", "agent", help="Host agent name, e.g. codex, claude, cowork, hermes, aside.")
 @click.pass_context
 def recall(
     ctx: click.Context,
@@ -3676,6 +3691,15 @@ def status(ctx: click.Context) -> None:
 
     cowork_transcripts = find_all_cowork(config.cowork_sessions_dir)
     click.echo(f"  Sessions: {len(cowork_transcripts)} audit.jsonl file(s) found")
+
+    # Aside browser-agent status (observe-only; warm start is skill-driven)
+    from .transcripts.aside import find_all_transcripts as find_all_aside
+
+    aside_transcripts = find_all_aside(config.aside_home)
+    click.echo("\nAside:")
+    click.echo(f"  Sessions dir: {config.aside_home}")
+    click.echo(f"  Sessions: {len(aside_transcripts)} messages.jsonl file(s) found")
+    click.echo("  Integration: `om observe --source aside`; warm start via the Aside `om` skill (no file hooks)")
 
     # Grok Build TUI status (Phase 1 hook support)
     grok_hook_file = config.grok_hooks_dir / "observational-memory.json"

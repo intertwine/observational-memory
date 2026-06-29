@@ -209,6 +209,64 @@ def observe_all_cowork(config: Config | None = None, dry_run: bool = False) -> l
     return results
 
 
+def observe_aside_transcript(
+    transcript_path: Path,
+    config: Config | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """Run observer on a specific Aside ``messages.jsonl`` transcript.
+
+    Aside records carry no per-message UUID, so resumption is count-based
+    (matching Codex/Grok): the cursor stores the number of user/assistant
+    messages already observed for this transcript path.
+    """
+    from .transcripts.aside import parse_transcript
+
+    if config is None:
+        config = Config()
+
+    cursor = config.load_cursor()
+    cursor_key = str(transcript_path)
+    after_index = cursor.get(cursor_key)
+    if not isinstance(after_index, int):
+        after_index = 0
+
+    all_messages = parse_transcript(transcript_path, source="aside")
+    if not all_messages:
+        return None
+
+    if after_index > len(all_messages):
+        # Transcript was rotated/truncated; reprocess from the start safely.
+        after_index = 0
+
+    messages = all_messages[after_index:]
+    if not messages:
+        return None
+
+    result = run_observer(messages, config, dry_run, transcript_path=transcript_path, source="aside")
+
+    if result and not dry_run:
+        cursor[cursor_key] = len(all_messages)
+        config.save_cursor(cursor)
+
+    return result
+
+
+def observe_all_aside(config: Config | None = None, dry_run: bool = False) -> list[str]:
+    """Scan all recent Aside session transcripts and run observer on each."""
+    from .transcripts.aside import find_recent_transcripts
+
+    if config is None:
+        config = Config()
+
+    results = []
+    for path in find_recent_transcripts(config.aside_home):
+        result = observe_aside_transcript(path, config, dry_run)
+        if result:
+            results.append(result)
+    return results
+
+
 def observe_auto_memory(config: Config | None = None, dry_run: bool = False) -> tuple[list[str], list[str]]:
     """Scan Claude Code auto-memory files and update the search index.
 

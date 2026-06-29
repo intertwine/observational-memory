@@ -645,6 +645,10 @@ class Config:
     # Grok Build TUI paths (xAI)
     grok_home: Path = field(default_factory=lambda: Path(os.environ.get("GROK_HOME", Path.home() / ".grok")))
 
+    # Aside browser-agent paths. Sessions live at
+    # <aside_home>/u/<user-index>/agents/<agent>/sessions/<date>_<id>/messages.jsonl
+    aside_home: Path = field(default_factory=lambda: Path(os.environ.get("ASIDE_HOME", Path.home() / ".aside")))
+
     @property
     def grok_config_path(self) -> Path:
         return self.grok_home / "config.toml"
@@ -660,6 +664,11 @@ class Config:
     @property
     def cowork_sessions_dir(self) -> Path:
         return _cowork_app_support_dir() / "local-agent-mode-sessions"
+
+    @property
+    def aside_sessions_root(self) -> Path:
+        """Root under which Aside session ``messages.jsonl`` files are discovered."""
+        return self.aside_home
 
     @property
     def cowork_plugins_dir(self) -> Path:

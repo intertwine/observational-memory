@@ -434,3 +434,100 @@ class TestGrokParser:
 
         assert len(messages) == 1
         assert messages[0].content == "before after [tool call details omitted for observation]"
+
+
+class TestAsideParser:
+    """Tests for the Aside browser-agent transcript parser (messages.jsonl)."""
+
+    SAMPLE = (
+        '{"role":"system-message","content":"skill docs available","kind":"site_skill","timestamp":1782425628633}\n'
+        '{"role":"user","content":"Resume the Aside-om integration and re-test access.","timestamp":1782425628579}\n'
+        '{"role":"assistant","content":['
+        '{"type":"thinking","thinking":"Internal reasoning that must never leak.","thinkingSignature":"sig"},'
+        '{"type":"text","text":"I will read the project memory first."},'
+        '{"type":"toolCall","id":"toolu_1","name":"read_file","arguments":{"path":"memory/projects/om.md"}}'
+        '],"provider":"anthropic","model":"claude","responseId":"r1","timestamp":1782425630000}\n'
+        '{"role":"toolResult","toolName":"read_file","toolCallId":"toolu_1",'
+        '"content":[{"type":"text","text":"file body"}],"isError":false,"timestamp":1782425631000}\n'
+        '{"role":"assistant","content":['
+        '{"type":"text","text":"Sandbox access is restored; om 0.8.0 is reachable."},'
+        '{"type":"toolCall","id":"t2","name":"bash","arguments":{"title":"check om version","command":"om --version"}}'
+        '],"timestamp":1782425632000}\n'
+        '{"role":"user","content":"Great, wire it up.","timestamp":1782425633000}\n'
+    )
+
+    def test_parse_aside_messages_jsonl(self, tmp_path):
+        from observational_memory.transcripts.aside import parse_transcript as parse_aside
+
+        transcript = tmp_path / "messages.jsonl"
+        transcript.write_text(self.SAMPLE)
+
+        messages = parse_aside(transcript)
+
+        # system-message and toolResult records are skipped.
+        assert len(messages) == 4
+        assert all(m.source == "aside" for m in messages)
+        assert {m.role for m in messages} == {"user", "assistant"}
+
+        blob = "\n".join(m.content for m in messages)
+        # thinking blocks are dropped (never leak internal reasoning).
+        assert "Internal reasoning" not in blob
+        # text blocks preserved.
+        assert "read the project memory" in blob
+        # tool calls summarized with real (lowercase) Aside tool names.
+        assert "[read_file: memory/projects/om.md]" in blob
+        assert "[bash: check om version]" in blob
+
+    def test_timestamps_normalized_to_iso(self, tmp_path):
+        from observational_memory.transcripts.aside import parse_transcript as parse_aside
+
+        transcript = tmp_path / "messages.jsonl"
+        transcript.write_text(self.SAMPLE)
+
+        messages = parse_aside(transcript)
+        # epoch-ms ints become ISO-8601 UTC strings.
+        assert messages[0].timestamp.startswith("2026-")
+        assert "T" in messages[0].timestamp
+        assert messages[0].timestamp.endswith("+00:00")
+
+    def test_handles_empty_and_invalid(self, tmp_path):
+        from observational_memory.transcripts.aside import parse_transcript as parse_aside
+
+        empty = tmp_path / "empty.jsonl"
+        empty.write_text("")
+        assert parse_aside(empty) == []
+
+        bad = tmp_path / "bad.jsonl"
+        bad.write_text("not json\n{also not}\n")
+        assert parse_aside(bad) == []
+
+        missing = tmp_path / "nope.jsonl"
+        assert parse_aside(missing) == []
+
+    def test_find_transcripts_discovers_sessions(self, tmp_path):
+        from observational_memory.transcripts.aside import find_all_transcripts, find_recent_transcripts
+
+        # Real Aside layout: <home>/u/<idx>/agents/<agent>/sessions/<date>_<id>/messages.jsonl
+        s1 = tmp_path / "u" / "0" / "agents" / "main" / "sessions" / "2026-06-25_aaa"
+        s1.mkdir(parents=True)
+        (s1 / "messages.jsonl").write_text(self.SAMPLE)
+
+        time.sleep(0.05)
+        s2 = tmp_path / "u" / "0" / "agents" / "main" / "sessions" / "2026-06-26_bbb"
+        s2.mkdir(parents=True)
+        (s2 / "messages.jsonl").write_text(self.SAMPLE)
+
+        all_t = find_all_transcripts(tmp_path)
+        assert len(all_t) == 2
+        # oldest-first
+        assert all_t[0].parent.name == "2026-06-25_aaa"
+
+        recent = find_recent_transcripts(tmp_path)
+        assert len(recent) == 2
+        # newest-first
+        assert recent[0].parent.name == "2026-06-26_bbb"
+
+    def test_find_transcripts_missing_home(self, tmp_path):
+        from observational_memory.transcripts.aside import find_all_transcripts
+
+        assert find_all_transcripts(tmp_path / "nonexistent") == []

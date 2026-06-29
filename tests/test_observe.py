@@ -10,7 +10,9 @@ from observational_memory.observe import (
     _chunk_messages,
     _codex_messages_since_cursor,
     _format_messages,
+    observe_all_aside,
     observe_all_hermes,
+    observe_aside_transcript,
     observe_codex_transcript,
     observe_grok_transcript,
     observe_hermes_transcript,
@@ -336,3 +338,61 @@ class TestGrokObserver:
 
         assert result is None
         assert config.load_cursor()[str(transcript)] == 5
+
+
+class TestAsideObserver:
+    SAMPLE = (
+        '{"role":"user","content":"one","timestamp":1782425628000}\n'
+        '{"role":"assistant","content":[{"type":"text","text":"two"}],"timestamp":1782425629000}\n'
+        '{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"skip"}],"timestamp":1782425629500}\n'
+        '{"role":"user","content":"three","timestamp":1782425630000}\n'
+        '{"role":"assistant","content":[{"type":"text","text":"four"}],"timestamp":1782425631000}\n'
+        '{"role":"assistant","content":[{"type":"text","text":"five"}],"timestamp":1782425632000}\n'
+    )
+
+    @patch("observational_memory.observe.run_observer")
+    def test_observe_aside_transcript_updates_cursor_by_message_count(self, mock_run_observer, tmp_path):
+        mock_run_observer.return_value = "## 2026-06-25\n\n- checkpoint"
+
+        config = Config(memory_dir=tmp_path / "memory")
+        transcript = tmp_path / "messages.jsonl"
+        transcript.write_text(self.SAMPLE)
+
+        result = observe_aside_transcript(transcript, config, dry_run=False)
+
+        assert result == "## 2026-06-25\n\n- checkpoint"
+        # 5 user/assistant messages (toolResult skipped) -> cursor == 5
+        assert config.load_cursor()[str(transcript)] == 5
+        # source label propagates to the observer call
+        passed_msgs = mock_run_observer.call_args.args[0]
+        assert all(m.source == "aside" for m in passed_msgs)
+
+    @patch("observational_memory.observe.run_observer")
+    def test_observe_aside_transcript_is_incremental(self, mock_run_observer, tmp_path):
+        mock_run_observer.return_value = "## 2026-06-25\n\n- checkpoint"
+
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        transcript = tmp_path / "messages.jsonl"
+        transcript.write_text(self.SAMPLE)
+        config.save_cursor({str(transcript): 5})
+
+        # No new messages past the cursor -> returns None, observer not called.
+        result = observe_aside_transcript(transcript, config, dry_run=False)
+        assert result is None
+        mock_run_observer.assert_not_called()
+
+    @patch("observational_memory.observe.observe_aside_transcript")
+    def test_observe_all_aside_uses_config_aside_home(self, mock_observe, tmp_path):
+        aside_home = tmp_path / "aside"
+        sess = aside_home / "u" / "0" / "agents" / "main" / "sessions" / "2026-06-26_x"
+        sess.mkdir(parents=True)
+        transcript = sess / "messages.jsonl"
+        transcript.write_text(self.SAMPLE)
+        config = Config(memory_dir=tmp_path / "memory", aside_home=aside_home)
+
+        mock_observe.return_value = "## 2026-06-26\n\n- aside"
+        results = observe_all_aside(config=config, dry_run=True)
+
+        assert results == ["## 2026-06-26\n\n- aside"]
+        mock_observe.assert_called_once_with(transcript, config, True)

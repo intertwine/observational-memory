@@ -184,3 +184,58 @@ om observe --source grok --dry-run
 ```
 
 Grok also has its own experimental native memory (`~/.grok/memory/`). OM and Grok memory are independent peers — use OM when you want cross-agent (Claude + Codex + Grok + Hermes) shared memory.
+
+## Aside (Agentic Browser)
+
+[Aside](https://aside.com) is an agentic browser. Unlike Claude Code, Codex, and
+Grok, Aside has no native file-hook system — it runs its own daemon and drives
+work through skills and routines — so OM integrates with it as an **observe-first
+peer** (like the manual Hermes path), not through installed hooks.
+
+Aside persists one JSONL transcript per session at:
+
+```text
+~/.aside/u/<user-index>/agents/<agent>/sessions/<date>_<session-id>/messages.jsonl
+```
+
+Records are keyed by `role` (`user`, `assistant`, `toolResult`, `system-message`)
+with millisecond timestamps and carry no per-message UUID, so OM parses them with
+a dedicated `transcripts/aside.py` parser and resumes with a **count-based cursor**
+(the same strategy used for Codex and Grok).
+
+Write-back (session observations into OM):
+
+```bash
+om observe --source aside                              # auto-discover & ingest recent Aside sessions
+om observe --transcript ~/.aside/u/0/agents/main/sessions/<date>_<id>/messages.jsonl --source aside
+om observe --source aside --dry-run                   # preview without writing
+```
+
+Warm start (read context at the top of an Aside session): Aside reads OM's
+plain-Markdown stores directly through its **`om` skill** rather than a hook:
+
+```bash
+om context --for aside --cwd "$PWD"                    # budgeted startup JSON
+```
+
+The Aside-side skill ships with OM at
+`observational_memory/aside/skills/om/SKILL.md` (source:
+`src/observational_memory/aside/skills/om/SKILL.md`). Copy it into your Aside
+agent's skills directory (e.g. `~/.aside/u/<idx>/agents/<agent>/skills/user/om/`)
+to give Aside warm-start + write-back instructions.
+
+Check it:
+
+```bash
+om status   # look for the "Aside" section: sessions dir + discovered session count
+```
+
+Notes:
+
+- `assistant` turns are lists of typed blocks; `text` and `toolCall` blocks are kept
+  (tool calls summarized like the Claude parser), `thinking` blocks are dropped, and
+  `toolResult` / `system-message` records are skipped.
+- `ASIDE_HOME` overrides the discovery root (default `~/.aside`) for tests and
+  non-default installs.
+- There is no `om install --aside` because Aside has no hook surface to install into;
+  warm start is wired on the Aside side via the `om` skill.
