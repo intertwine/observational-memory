@@ -4,10 +4,11 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.8.0`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.9.0`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
+- v0.9.0 theme — broader, bounded agent memory: OpenCode and Kimi support plus bounded background observers (see `docs/RELEASE-0.9.0.md`)
 - v0.8.0 theme — trustworthy memory: durable, provable, conversational (see `docs/RELEASE-0.8.0.md`)
 - `om backup` / `om restore`: host-local snapshots, automatic pre-reflect safety snapshot, rotating retention, byte-faithful restore
 - `om talk` (experimental): spoken-style conversation grounded in live recall; `OM_TALK_RECALL_TIMEOUT`; recall timeout/unavailable distinguished from "no memory" in every recall consumer; Moss recall backend joins bm25/qmd
@@ -148,4 +149,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-`v0.8.0` has release notes in `docs/RELEASE-0.8.0.md`. Future release steps require explicit user approval.
+`v0.9.0` has release notes in `docs/RELEASE-0.9.0.md`. Future release steps require explicit user approval.

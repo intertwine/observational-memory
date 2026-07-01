@@ -15,18 +15,20 @@ Observational Memory, or `om`, watches what you do with Claude Code, Codex, Open
 - **One memory across agents.** Switch tools without losing context.
 - **Your memory is yours.** Plain Markdown files on your machine — readable, searchable, backed up, never silently uploaded.
 
-## New in v0.8.0
+## New in v0.9.0
 
-v0.7.0 made reflection scale. v0.8.0 makes memory **trustworthy**:
+v0.8.0 made memory trustworthy. v0.9.0 makes that memory **broader and safer to leave running**:
 
-- **Durable** — `om backup` / `om restore`: host-local snapshots, plus an automatic safety snapshot before every reflection, so a bad write can always be rolled back.
-- **Provable** — every memory section records when it was last derived and from which window of observations, so you always know how fresh it is and where it came from. Memory you mark machine-local (`scope=local`) never leaves your machine through any sharing channel — sync, cloud search, or mail — and unknown scopes are denied by default. `om reflect --check-conflicts` flags high-stakes facts a reflection cycle silently changed.
-- **Conversational** — `om talk`: ask your memory questions in plain English and get answers grounded in live recall (experimental).
-- Plus: `om doctor` and `om context --quality-report` now report how big and how cold each memory section is, so future pruning decisions are grounded in data.
+- **OpenCode support** - `om install --opencode` installs a global OpenCode plugin plus an `AGENTS.md` fallback, so OpenCode sessions can receive bounded startup context and write message events back into OM-owned logs.
+- **Kimi Code CLI support** - `om install --kimi` wires Kimi lifecycle hooks for startup context and prompt/subagent/failure checkpoints without scraping private provider data.
+- **Bounded background observation** - installed hooks and scheduler backstops now use a single `om observe-worker` lane with concurrency control, timeouts, stale-lock recovery, atomic writes, and a Claude transcript backstop.
+- **Public roadmap additions** - new plans cover optional OKF import/export, signed binary and desktop installers, and a future desktop coordination layer.
 
-And a sneak peek at where this is going: with **OM Mail (experimental)**, agents get their own email inboxes and exchange memory as signed messages — notes, encrypted context packs, and recall requests — across machines, harnesses, models, and vendors. Nothing is sent automatically: every exchange is a deliberate command, senders must be cryptographically pinned, and machine-local memory is filtered out before anything leaves. [See how it works](docs/mail-memory.md).
+OM Mail remains an **experimental** preview from v0.8.0: agents can exchange signed notes, encrypted context packs, and recall requests over email, but handshake tokens, live listening, digests, and team trust roots are deferred to a future 0.x release. [See how it works](docs/mail-memory.md).
 
-Everything is additive and defaults are unchanged. Full details: [v0.8.0 release notes](docs/RELEASE-0.8.0.md).
+Aside browser support is also under active development in draft PR [#98](https://github.com/intertwine/observational-memory/pull/98); it is not part of v0.9.0.
+
+Everything is additive and defaults are unchanged. Full details: [v0.9.0 release notes](docs/RELEASE-0.9.0.md).
 
 **Upgrading from 0.6.x or 0.7.x?**
 
@@ -35,7 +37,7 @@ brew upgrade observational-memory   # or: uv tool upgrade observational-memory
 om doctor
 ```
 
-No config changes needed. New surfaces (`om backup`, `om talk`, `om mail`, `--check-conflicts`) do nothing until you invoke them. One new background behavior: `om reflect` snapshots your memory before writing, with rotating retention bounding disk use.
+No config changes needed. New integrations are opt-in unless you run `om install --all`; installed background observers become more conservative and skip when another worker is already running.
 
 ## Quick Install
 
@@ -142,7 +144,7 @@ om cluster sync
 # Peers must exchange and pin keys first — see docs/mail-memory.md.
 om mail init --username my-agent
 om mail peers add peer@agentmail.to --key <PEER_PUBLIC_KEY> --shared-key <SHARED_KEY>
-om mail send-note peer@agentmail.to --text "decision: ship v0.8.0"
+om mail send-note peer@agentmail.to --text "decision: ship v0.9.0"
 om mail sync
 ```
 
@@ -159,6 +161,7 @@ Do not sync `~/.local/share/observational-memory/` directly with Dropbox, iCloud
 | Grok Build TUI | Native hook file with Claude-compatibility awareness, plus `updates.jsonl` observation. |
 | Claude Cowork | Local plugin on macOS with hooks and `/recall`. |
 | Hermes | External memory-provider plugin through [intertwine/hermes-observational-memory](https://github.com/intertwine/hermes-observational-memory), plus manual session-log ingestion. |
+| Aside browser | Draft first-class support is under active development in PR [#98](https://github.com/intertwine/observational-memory/pull/98); not shipped in v0.9.0. |
 | ChatGPT / Claude Managed Agents | Reviewed export bundles through `om export` — not live sync; `om` never silently writes hosted memory. |
 
 Out-of-tree integrations have first-class seams: mail providers and CLI add-ons plug in through public entry points ([CONTRIBUTING.md](CONTRIBUTING.md)).
@@ -194,7 +197,7 @@ Out-of-tree integrations have first-class seams: mail providers and CLI add-ons 
 
 ## Version
 
-Current release: **v0.8.0** — [release notes](docs/RELEASE-0.8.0.md). Built on v0.7.0's section-targeted reflection (reflection that updates only the affected memory sections, not the whole file) and the v0.6.x usage/budget and async-Batch subsystems. Maintainers: the release workflow lives in [docs/MAINTAINERS.md](docs/MAINTAINERS.md).
+Current release: **v0.9.0** — [release notes](docs/RELEASE-0.9.0.md). Built on v0.8.0's trustworthy-memory release, v0.7.0's section-targeted reflection, and the v0.6.x usage/budget and async-Batch subsystems. Maintainers: the release workflow lives in [docs/MAINTAINERS.md](docs/MAINTAINERS.md).
 
 ## Contributing
 
