@@ -339,12 +339,14 @@ class Config:
     """Runtime configuration — resolved from env vars and defaults."""
 
     CODEX_OBSERVE_LAUNCHD_LABEL = "com.intertwine.observational-memory.codex-observe"
+    CLAUDE_OBSERVE_LAUNCHD_LABEL = "com.intertwine.observational-memory.claude-observe"
     AUTO_MEMORY_LAUNCHD_LABEL = "com.intertwine.observational-memory.auto-memory"
     REFLECT_LAUNCHD_LABEL = "com.intertwine.observational-memory.reflect"
 
     # Windows Task Scheduler task names mirror the launchd labels for parity
     # across platforms — the stable identifier is the bare label.
     CODEX_OBSERVE_SCHTASKS_NAME = CODEX_OBSERVE_LAUNCHD_LABEL
+    CLAUDE_OBSERVE_SCHTASKS_NAME = CLAUDE_OBSERVE_LAUNCHD_LABEL
     AUTO_MEMORY_SCHTASKS_NAME = AUTO_MEMORY_LAUNCHD_LABEL
     REFLECT_SCHTASKS_NAME = REFLECT_LAUNCHD_LABEL
 
@@ -736,6 +738,10 @@ class Config:
         return self.launch_agents_dir / f"{self.CODEX_OBSERVE_LAUNCHD_LABEL}.plist"
 
     @property
+    def claude_observe_launchd_plist_path(self) -> Path:
+        return self.launch_agents_dir / f"{self.CLAUDE_OBSERVE_LAUNCHD_LABEL}.plist"
+
+    @property
     def auto_memory_launchd_plist_path(self) -> Path:
         return self.launch_agents_dir / f"{self.AUTO_MEMORY_LAUNCHD_LABEL}.plist"
 
@@ -750,6 +756,14 @@ class Config:
     @property
     def codex_observe_launchd_stderr_path(self) -> Path:
         return self.scheduler_log_dir / "codex-observe.err.log"
+
+    @property
+    def claude_observe_launchd_stdout_path(self) -> Path:
+        return self.scheduler_log_dir / "claude-observe.out.log"
+
+    @property
+    def claude_observe_launchd_stderr_path(self) -> Path:
+        return self.scheduler_log_dir / "claude-observe.err.log"
 
     @property
     def auto_memory_launchd_stdout_path(self) -> Path:
@@ -978,10 +992,16 @@ class Config:
 
     def load_cursor(self) -> dict:
         """Load the bookmark file tracking last-processed positions."""
-        if self.cursor_path.exists():
-            return json.loads(self.cursor_path.read_text())
-        return {}
+        if not self.cursor_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.cursor_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def save_cursor(self, cursor: dict) -> None:
+        from .sync.atomic import atomic_write_text
+
         self.ensure_memory_dir()
-        self.cursor_path.write_text(json.dumps(cursor, indent=2) + "\n")
+        atomic_write_text(self.cursor_path, json.dumps(cursor, indent=2) + "\n")

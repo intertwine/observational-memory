@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from observational_memory.cli import (
     ObserverWorkerTimeout,
     _acquire_codex_checkpoint_lock,
+    _observer_worker_lock_stale_seconds,
     _release_codex_checkpoint_lock,
     cli,
 )
@@ -163,6 +164,19 @@ def test_observe_transcript_auto_detects_hermes_session_paths(monkeypatch, tmp_p
     assert "No new messages to process." in result.output
 
 
+def test_observer_worker_timeout_escapes_exception_handlers():
+    timeout = ObserverWorkerTimeout("boom")
+
+    assert not isinstance(timeout, Exception)
+    assert not isinstance(timeout, TimeoutError)
+
+
+def test_observer_worker_lock_stale_default_tracks_timeout(monkeypatch):
+    monkeypatch.delenv("OM_OBSERVER_WORKER_LOCK_STALE_SECONDS", raising=False)
+
+    assert _observer_worker_lock_stale_seconds(timeout_seconds=300) == 360
+
+
 def test_codex_checkpoint_spawns_worker_and_records_state(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     runner = CliRunner()
@@ -175,6 +189,7 @@ def test_codex_checkpoint_spawns_worker_and_records_state(monkeypatch, tmp_path)
     class DummyPopen:
         def __init__(self, args, **kwargs):
             popen_calls.append((args, kwargs))
+            self.pid = 4242
 
     monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
     monkeypatch.setattr("subprocess.Popen", DummyPopen)
@@ -203,7 +218,9 @@ def test_codex_checkpoint_spawns_worker_and_records_state(monkeypatch, tmp_path)
     state = json.loads(config.codex_checkpoint_state_path.read_text())
     assert state[str(transcript)]["status"] == "in_progress"
     assert state[str(transcript)]["message_count"] == 7
-    assert any(config.codex_checkpoint_lock_dir.iterdir())
+    lock_paths = list(config.codex_checkpoint_lock_dir.iterdir())
+    assert len(lock_paths) == 1
+    assert (lock_paths[0] / "owner").read_text().startswith("pid=4242\n")
 
 
 def test_codex_checkpoint_skips_when_message_count_is_already_current(monkeypatch, tmp_path):
@@ -384,5 +401,29 @@ def test_codex_checkpoint_reclaims_dead_owner_lock(monkeypatch, tmp_path):
 
     assert _acquire_codex_checkpoint_lock(config, lock_path) is True
     assert (lock_path / "owner").read_text().startswith(f"pid={os.getpid()}\n")
+
+    _release_codex_checkpoint_lock(lock_path)
+
+
+def test_codex_checkpoint_does_not_reclaim_live_owner_lock(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+
+    lock_path = config.codex_checkpoint_lock_dir / "live-lock"
+    lock_path.mkdir(parents=True, exist_ok=True)
+    (lock_path / "owner").write_text("pid=12345\ncreated=123\n")
+    stale_time = time.time() - 120
+    os.utime(lock_path, (stale_time, stale_time))
+
+    def fake_kill(pid, sig):
+        assert pid == 12345
+        assert sig == 0
+
+    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setenv("OM_SESSION_OBSERVER_LOCK_STALE_MINUTES", "1")
+
+    assert _acquire_codex_checkpoint_lock(config, lock_path) is False
+    assert (lock_path / "owner").read_text().startswith("pid=12345\n")
 
     _release_codex_checkpoint_lock(lock_path)

@@ -24,3 +24,27 @@ def test_directory_lock_reclaims_dead_owner_pid(monkeypatch, tmp_path):
         lock.release()
 
     assert not lock_path.exists()
+
+
+def test_directory_lock_can_refuse_to_reclaim_live_stale_owner(monkeypatch, tmp_path):
+    lock_path = tmp_path / "observer.lock"
+    lock_path.mkdir()
+    (lock_path / "owner").write_text("pid=12345\ncreated=123\n")
+
+    def fake_kill(pid, sig):
+        assert pid == 12345
+        assert sig == 0
+
+    monkeypatch.setattr(os, "kill", fake_kill)
+    os.utime(lock_path, (0, 0))
+
+    lock = DirectoryLock(lock_path, timeout_seconds=0, stale_seconds=1, reclaim_alive_stale=False)
+
+    try:
+        lock.acquire()
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("live stale owner should not be reclaimed")
+
+    assert (lock_path / "owner").read_text().startswith("pid=12345\n")

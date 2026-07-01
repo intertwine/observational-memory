@@ -203,8 +203,11 @@ def test_schtasks_specs_both_targets_include_reflect_daily(windows_env):
     config = Config(memory_dir=windows_env["local_appdata"] / "obs")
     specs = _schtasks_job_specs(config, "both", om_path="C:/tools/om.exe")
     keys = [s["key"] for s in specs]
-    assert set(keys) == {"codex", "claude-memory", "reflect"}
+    assert set(keys) == {"codex", "claude", "claude-memory", "reflect"}
 
+    claude = next(s for s in specs if s["key"] == "claude")
+    assert claude["argv"] == ["C:/tools/om.exe", "observe-worker", "--source", "claude"]
+    assert claude["schedule_kind"] == "minute"
     reflect = next(s for s in specs if s["key"] == "reflect")
     assert reflect["schedule_kind"] == "daily"
     assert reflect["schedule_time"] == "04:00"
@@ -214,8 +217,8 @@ def test_schtasks_job_keys_for_targets_match_cron_keys():
     # Matches `_cron_job_keys_for_targets` so both backends include the same
     # set of OM-managed jobs for each install target.
     assert _schtasks_job_keys_for_targets("codex") == {"codex", "claude-memory", "reflect"}
-    assert _schtasks_job_keys_for_targets("claude") == {"claude-memory", "reflect"}
-    assert _schtasks_job_keys_for_targets("both") == {"codex", "claude-memory", "reflect"}
+    assert _schtasks_job_keys_for_targets("claude") == {"claude", "claude-memory", "reflect"}
+    assert _schtasks_job_keys_for_targets("both") == {"codex", "claude", "claude-memory", "reflect"}
     assert _schtasks_job_keys_for_targets("cowork") == set()
 
 
@@ -535,7 +538,7 @@ def test_claude_checkpoint_writes_state_and_holds_lock(windows_env, monkeypatch,
     transcript = tmp_path / "session.jsonl"
     transcript.write_text(_claude_transcript_line("a") + "\n")
 
-    monkeypatch.setattr("observational_memory.cli._spawn_detached", lambda argv, cwd=None: None)
+    monkeypatch.setattr("observational_memory.cli._spawn_detached", lambda argv, cwd=None: 5151)
 
     config = Config(memory_dir=windows_env["local_appdata"] / "observational-memory")
 
@@ -555,6 +558,7 @@ def test_claude_checkpoint_writes_state_and_holds_lock(windows_env, monkeypatch,
 
     lock_path = _checkpoint_lock_path(config.claude_checkpoint_lock_dir, transcript)
     assert lock_path.exists()
+    assert (lock_path / "owner").read_text().startswith("pid=5151\n")
 
 
 def test_claude_checkpoint_worker_runs_observer(windows_env, monkeypatch, tmp_path):

@@ -237,6 +237,23 @@ def test_cowork_target_does_not_manage_scheduler_jobs(monkeypatch, tmp_path):
     assert _desired_cron_jobs(config, "cowork") == {}
 
 
+def test_claude_target_manages_claude_scheduler_backstop(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+
+    specs = _launchd_job_specs(config, "claude", om_path="/tmp/bin/om")
+    assert {spec["key"] for spec in specs} == {"claude", "claude-memory", "reflect"}
+    claude = next(spec for spec in specs if spec["key"] == "claude")
+    assert claude["argv"] == ["/tmp/bin/om", "observe-worker", "--source", "claude"]
+    assert claude["start_interval"] == 900
+
+    assert _cron_job_keys_for_targets("claude") == {"claude", "claude-memory", "reflect"}
+    jobs = _desired_cron_jobs(config, "claude")
+    assert set(jobs) == {"claude", "claude-memory", "reflect"}
+    assert "observe-worker --source claude 2>/dev/null" in jobs["claude"]
+
+
 def test_install_codex_preserves_existing_config_and_hooks(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -855,6 +872,7 @@ def test_install_claude_cron_preserves_existing_codex_cron_job(monkeypatch, tmp_
     assert writes
     installed = writes[-1]
     assert "/existing/om observe --source codex" in installed
+    assert "observe-worker --source claude 2>/dev/null" in installed
     assert "observe-worker --source claude-memory" in installed
     assert "om reflect" in installed
 

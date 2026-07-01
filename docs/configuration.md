@@ -437,6 +437,7 @@ Unknown fields are preserved.
 Default schedules:
 
 - Codex observer backstop: every 15 minutes
+- Claude observer backstop: every 15 minutes
 - Claude auto-memory scan: hourly
 - reflector: daily at 04:00 local time
 
@@ -444,6 +445,12 @@ Tune Codex polling:
 
 ```bash
 OM_CODEX_OBSERVER_INTERVAL_MINUTES=10
+```
+
+Tune Claude polling:
+
+```bash
+OM_CLAUDE_OBSERVER_INTERVAL_MINUTES=10
 ```
 
 Tune in-session checkpoints:
@@ -457,11 +464,13 @@ Bound background observer workers:
 
 ```bash
 OM_OBSERVER_WORKER_TIMEOUT_SECONDS=300
-OM_OBSERVER_WORKER_LOCK_STALE_SECONDS=600
+OM_OBSERVER_WORKER_LOCK_STALE_SECONDS=360
 ```
 
 Installed hook and scheduler jobs use `om observe-worker`, which allows only
-one background observer at a time and stops work that exceeds the timeout.
+one background observer at a time and stops POSIX work that exceeds the timeout.
+On Windows, the bounded lane still uses the global lock and dead-owner cleanup,
+but Python cannot interrupt in-process observer work with SIGALRM.
 Manual `om observe ...` commands are not forced through that background lane.
 
 ## Search Backend

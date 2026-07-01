@@ -10,6 +10,7 @@ from observational_memory.observe import (
     _chunk_messages,
     _codex_messages_since_cursor,
     _format_messages,
+    _write_observations,
     observe_all_hermes,
     observe_codex_transcript,
     observe_grok_transcript,
@@ -214,6 +215,40 @@ class TestBackfillObserver:
         content = config.observations_path.read_text()
         assert "Existing" in content
         assert "New section" in content
+
+    def test_append_observations_uses_atomic_write(self, monkeypatch, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+        calls = []
+
+        def fake_atomic_write(path, text, mode=None):
+            calls.append((path, text, mode))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+        monkeypatch.setattr("observational_memory.sync.atomic.atomic_write_text", fake_atomic_write)
+        monkeypatch.setattr("observational_memory.startup_memory.refresh_startup_memory", lambda config: None)
+        monkeypatch.setattr("observational_memory.observe._reindex_if_enabled", lambda config: None)
+
+        _append_observations("## New section", config)
+
+        assert calls == [(config.observations_path, "## New section\n", None)]
+
+    def test_write_observations_uses_atomic_write(self, monkeypatch, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+        calls = []
+
+        def fake_atomic_write(path, text, mode=None):
+            calls.append((path, text, mode))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+        monkeypatch.setattr("observational_memory.sync.atomic.atomic_write_text", fake_atomic_write)
+        monkeypatch.setattr("observational_memory.startup_memory.refresh_startup_memory", lambda config: None)
+        monkeypatch.setattr("observational_memory.observe._reindex_if_enabled", lambda config: None)
+
+        _write_observations("## New section", config)
+
+        assert calls == [(config.observations_path, "## New section\n", None)]
 
 
 class TestCodexObserver:

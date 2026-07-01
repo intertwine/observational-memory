@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import json
 import os
 import shutil
@@ -20,7 +19,7 @@ from . import __version__
 from .config import Config
 
 _OBSERVE_SOURCES = ["claude", "codex", "opencode", "kimi", "grok", "hermes", "cowork", "claude-memory", "all"]
-_OBSERVER_WORKER_SOURCES = ["claude", "codex", "opencode", "kimi", "grok", "hermes", "cowork", "claude-memory", "all"]
+_OBSERVER_WORKER_SOURCES = _OBSERVE_SOURCES
 _T = TypeVar("_T")
 
 
@@ -28,7 +27,7 @@ class ObserverWorkerBusy(RuntimeError):
     """Raised when another background observer worker already owns the global slot."""
 
 
-class ObserverWorkerTimeout(TimeoutError):
+class ObserverWorkerTimeout(BaseException):
     """Raised when background observer work exceeds its wall-clock budget."""
 
 
@@ -230,7 +229,7 @@ def _observer_worker_timeout_seconds(default: int = 300) -> int:
 
 def _observer_worker_lock_stale_seconds(timeout_seconds: int | None = None) -> int:
     timeout = _observer_worker_timeout_seconds() if timeout_seconds is None else timeout_seconds
-    default = max(timeout + 60, 600)
+    default = max(timeout + 60, 60) if timeout > 0 else 600
     raw_value = os.environ.get("OM_OBSERVER_WORKER_LOCK_STALE_SECONDS", str(default))
     try:
         seconds = int(raw_value)
@@ -262,6 +261,7 @@ def _observer_worker_slot(config: Config, *, timeout_seconds: int | None = None)
         _observer_worker_lock_path(config),
         timeout_seconds=0,
         stale_seconds=_observer_worker_lock_stale_seconds(timeout),
+        reclaim_alive_stale=False,
     )
     try:
         lock.acquire()
@@ -3007,7 +3007,9 @@ def codex_checkpoint(ctx: click.Context) -> None:
         )
 
         worker_command = _build_codex_checkpoint_worker_command(transcript)
-        _spawn_detached(worker_command, cwd=payload.get("cwd"))
+        worker_pid = _spawn_detached(worker_command, cwd=payload.get("cwd"))
+        if worker_pid is not None:
+            _write_checkpoint_lock_owner(lock_path, pid=worker_pid)
     except Exception:
         _update_codex_checkpoint_state(
             config,
@@ -3029,6 +3031,7 @@ def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
     config = ctx.obj["config"]
     transcript = transcript.expanduser()
     lock_path = _codex_checkpoint_lock_path(config, transcript)
+    _write_checkpoint_lock_owner(lock_path)
 
     try:
 
@@ -3077,7 +3080,7 @@ def _build_claude_checkpoint_worker_command(transcript: Path) -> list[str]:
     return [om_path, "claude-checkpoint-worker", "--transcript", str(transcript)]
 
 
-def _spawn_detached(argv: list[str], cwd: str | Path | None = None) -> None:
+def _spawn_detached(argv: list[str], cwd: str | Path | None = None) -> int | None:
     """Spawn *argv* as a detached background process.
 
     Uses ``start_new_session`` on POSIX and ``CREATE_NEW_PROCESS_GROUP |
@@ -3099,7 +3102,8 @@ def _spawn_detached(argv: list[str], cwd: str | Path | None = None) -> None:
     else:
         popen_kwargs["start_new_session"] = True
 
-    subprocess.Popen(argv, **popen_kwargs)
+    proc = subprocess.Popen(argv, **popen_kwargs)
+    return getattr(proc, "pid", None)
 
 
 @cli.command(hidden=True, name="claude-checkpoint")
@@ -3182,7 +3186,9 @@ def claude_checkpoint(ctx: click.Context) -> None:
         )
 
         worker_command = _build_claude_checkpoint_worker_command(transcript)
-        _spawn_detached(worker_command, cwd=payload.get("cwd"))
+        worker_pid = _spawn_detached(worker_command, cwd=payload.get("cwd"))
+        if worker_pid is not None:
+            _write_checkpoint_lock_owner(lock_path, pid=worker_pid)
     except Exception:
         _update_checkpoint_state(
             config.claude_checkpoint_state_path,
@@ -3205,6 +3211,7 @@ def claude_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
     config = ctx.obj["config"]
     transcript = transcript.expanduser()
     lock_path = _checkpoint_lock_path(config.claude_checkpoint_lock_dir, transcript)
+    _write_checkpoint_lock_owner(lock_path)
 
     try:
 
@@ -5611,47 +5618,26 @@ def _checkpoint_lock_path(lock_dir: Path, transcript: Path) -> Path:
     return lock_dir / _hash_transcript_path(transcript)
 
 
-def _write_checkpoint_lock_owner(lock_path: Path) -> None:
+def _write_checkpoint_lock_owner(lock_path: Path, *, pid: int | None = None) -> None:
+    from .sync.atomic import write_lock_owner
+
     try:
-        (lock_path / "owner").write_text(f"pid={os.getpid()}\ncreated={datetime.now(timezone.utc).timestamp()}\n")
+        write_lock_owner(lock_path, pid=pid, created=datetime.now(timezone.utc).timestamp())
     except OSError:
         pass
 
 
 def _checkpoint_lock_owner_is_dead(lock_path: Path) -> bool:
-    owner = lock_path / "owner"
-    try:
-        text = owner.read_text()
-    except OSError:
-        return False
+    from .sync.atomic import lock_owner_process_is_dead
 
-    pid: int | None = None
-    for line in text.splitlines():
-        if not line.startswith("pid="):
-            continue
-        try:
-            pid = int(line.removeprefix("pid=").strip())
-        except ValueError:
-            return False
-        break
-
-    if pid is None or pid <= 0:
-        return False
-
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-    except OSError as e:
-        return e.errno == errno.ESRCH
-    return False
+    return lock_owner_process_is_dead(lock_path)
 
 
 def _checkpoint_lock_should_reclaim(lock_path: Path, stale_minutes: int) -> bool:
     if _checkpoint_lock_owner_is_dead(lock_path):
         return True
+    if (lock_path / "owner").exists():
+        return False
     if stale_minutes <= 0:
         return False
     try:
@@ -5839,6 +5825,11 @@ def _targets_include_codex_scheduler(targets: str) -> bool:
     return targets in ("codex", "both", "all")
 
 
+def _targets_include_claude_scheduler(targets: str) -> bool:
+    """Return whether a target selection should manage the Claude observer backstop."""
+    return targets in ("claude", "both", "all")
+
+
 def _targets_include_shared_scheduler(targets: str) -> bool:
     """Return whether a target selection should manage shared auto-memory/reflect jobs."""
     return targets in ("claude", "codex", "both", "all")
@@ -5860,6 +5851,20 @@ def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None)
                 "start_interval": _codex_observer_interval_minutes() * 60,
                 "stdout_path": config.codex_observe_launchd_stdout_path,
                 "stderr_path": config.codex_observe_launchd_stderr_path,
+            }
+        )
+
+    if _targets_include_claude_scheduler(targets):
+        specs.append(
+            {
+                "key": "claude",
+                "label": config.CLAUDE_OBSERVE_LAUNCHD_LABEL,
+                "plist_path": config.claude_observe_launchd_plist_path,
+                "argv": [resolved_om_path, "observe-worker", "--source", "claude"] if resolved_om_path else [],
+                "run_at_load": True,
+                "start_interval": _claude_observer_interval_minutes() * 60,
+                "stdout_path": config.claude_observe_launchd_stdout_path,
+                "stderr_path": config.claude_observe_launchd_stderr_path,
             }
         )
 
@@ -6050,24 +6055,32 @@ def _uninstall_launchd(config: Config, targets: str = "both") -> None:
 # --- Cron installation ---
 
 
-def _codex_observer_interval_minutes(default: int = 15) -> int:
-    raw_interval = os.environ.get("OM_CODEX_OBSERVER_INTERVAL_MINUTES", str(default))
+def _observer_interval_minutes(env_name: str, default: int = 15) -> int:
+    raw_interval = os.environ.get(env_name, str(default))
     try:
         interval = int(raw_interval)
     except ValueError:
         click.echo(
-            f"Warning: invalid OM_CODEX_OBSERVER_INTERVAL_MINUTES={raw_interval!r}; using default {default}.",
+            f"Warning: invalid {env_name}={raw_interval!r}; using default {default}.",
             err=True,
         )
         return default
 
     if interval <= 0:
         click.echo(
-            f"Warning: OM_CODEX_OBSERVER_INTERVAL_MINUTES must be >0; using default {default}.",
+            f"Warning: {env_name} must be >0; using default {default}.",
             err=True,
         )
         return default
     return min(interval, 59)
+
+
+def _codex_observer_interval_minutes(default: int = 15) -> int:
+    return _observer_interval_minutes("OM_CODEX_OBSERVER_INTERVAL_MINUTES", default)
+
+
+def _claude_observer_interval_minutes(default: int = 15) -> int:
+    return _observer_interval_minutes("OM_CLAUDE_OBSERVER_INTERVAL_MINUTES", default)
 
 
 def _cron_every_minutes(minutes: int) -> str:
@@ -6082,6 +6095,8 @@ def _cron_job_key(line: str) -> str | None:
         return "codex"
     if "om observe --source claude-memory" in line or "om observe-worker --source claude-memory" in line:
         return "claude-memory"
+    if "om observe --source claude" in line or "om observe-worker --source claude" in line:
+        return "claude"
     if "om reflect" in line:
         return "reflect"
     return None
@@ -6094,6 +6109,8 @@ def _cron_job_keys_for_targets(targets: str) -> set[str]:
         keys.update({"claude-memory", "reflect"})
     if _targets_include_codex_scheduler(targets):
         keys.add("codex")
+    if _targets_include_claude_scheduler(targets):
+        keys.add("claude")
     return keys
 
 
@@ -6120,7 +6137,7 @@ def _extract_crontab_lines(lines: list[str]) -> tuple[list[str], dict[str, str]]
 def _render_crontab_lines(preserved: list[str], om_jobs: dict[str, str]) -> list[str]:
     """Render preserved and OM job lines back into a crontab."""
     lines = list(preserved)
-    ordered_jobs = [om_jobs[key] for key in ("codex", "claude-memory", "reflect") if key in om_jobs]
+    ordered_jobs = [om_jobs[key] for key in ("codex", "claude", "claude-memory", "reflect") if key in om_jobs]
     if ordered_jobs:
         lines.append("# --- observational-memory ---")
         lines.extend(ordered_jobs)
@@ -6218,6 +6235,10 @@ def _desired_cron_jobs(config: Config, targets: str) -> dict[str, str]:
         codex_interval = _cron_every_minutes(_codex_observer_interval_minutes())
         jobs["codex"] = f"{codex_interval} * * * * {prefix}{om_path} observe-worker --source codex 2>/dev/null"
 
+    if _targets_include_claude_scheduler(targets):
+        claude_interval = _cron_every_minutes(_claude_observer_interval_minutes())
+        jobs["claude"] = f"{claude_interval} * * * * {prefix}{om_path} observe-worker --source claude 2>/dev/null"
+
     return jobs
 
 
@@ -6292,6 +6313,17 @@ def _schtasks_job_specs(config: Config, targets: str, om_path: str | None = None
             }
         )
 
+    if _targets_include_claude_scheduler(targets):
+        specs.append(
+            {
+                "key": "claude",
+                "name": config.CLAUDE_OBSERVE_SCHTASKS_NAME,
+                "argv": [resolved_om_path, "observe-worker", "--source", "claude"],
+                "schedule_minutes": _claude_observer_interval_minutes(),
+                "schedule_kind": "minute",
+            }
+        )
+
     if _targets_include_shared_scheduler(targets):
         specs.extend(
             [
@@ -6321,6 +6353,8 @@ def _schtasks_job_keys_for_targets(targets: str) -> set[str]:
         keys.update({"claude-memory", "reflect"})
     if _targets_include_codex_scheduler(targets):
         keys.add("codex")
+    if _targets_include_claude_scheduler(targets):
+        keys.add("claude")
     return keys
 
 
