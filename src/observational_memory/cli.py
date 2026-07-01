@@ -342,14 +342,6 @@ def _run_with_process_timeout(fn: Callable[..., _T], timeout_seconds: int, *args
     raise RuntimeError(f"background observer child failed: {payload}")
 
 
-def _run_bounded_observer_work(config: Config, fn: Callable[[], _T]) -> _T:
-    timeout = _observer_worker_timeout_seconds()
-    with _observer_worker_slot(config, timeout_seconds=timeout):
-        if sys.platform == "win32":
-            raise RuntimeError("Windows bounded observer work must use a top-level callable")
-        return _run_with_wall_timeout(fn, timeout)
-
-
 def _run_bounded_observer_call(config: Config, fn: Callable[..., _T], *args, **kwargs) -> _T:
     timeout = _observer_worker_timeout_seconds()
     with _observer_worker_slot(config, timeout_seconds=timeout):
