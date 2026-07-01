@@ -6,7 +6,7 @@ This guide is for people installing Observational Memory for day-to-day use. Mai
 
 - Python 3.11 or newer
 - `uv` or Homebrew
-- Claude Code, Codex, OpenCode, and/or Grok Build TUI if you want automatic hooks
+- Claude Code, Codex, OpenCode, Kimi Code CLI, and/or Grok Build TUI if you want automatic hooks
 - One LLM provider:
   - Anthropic API key
   - OpenAI API key
@@ -56,7 +56,7 @@ The installer sets up:
 - memory files in `~/.local/share/observational-memory/`
 - Claude Code hooks when requested
 - Codex hooks and the AGENTS fallback when requested
-- OpenCode plugin and Grok hooks when requested
+- OpenCode plugin, Kimi hooks, and Grok hooks when requested
 - background observer and reflector jobs
 
 Then check the install:
@@ -108,12 +108,14 @@ om install \
 om install --claude
 om install --codex
 om install --grok
+om install --opencode
+om install --kimi
 om install --both
 om install --cowork
 om install --all
 ```
 
-`--both` installs Claude Code and Codex support. `--all` also installs OpenCode, Grok support, and tries Cowork. Cowork is macOS-only.
+`--both` installs Claude Code and Codex support. `--all` also installs OpenCode, Kimi, Grok support, and tries Cowork. Cowork is macOS-only.
 
 ## Scheduler Choices
 

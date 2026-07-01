@@ -87,6 +87,6 @@ v0.8.0 also ships the public **plugin seams**: out-of-tree mail providers and CL
 
 ## Out of scope / next
 
-- **v0.9.0 is reserved for OM Mail GA** — handshake tokens, live listening, digests: see [plans/om-mail-next-steps.md](../plans/om-mail-next-steps.md).
+- OM Mail GA is deferred to a future 0.x release — handshake tokens, live listening, digests: see [plans/om-mail-next-steps.md](../plans/om-mail-next-steps.md). v0.9.0 was pulled forward for integration coverage and background-observer reliability.
 - The recall-quality benchmark (#81) runs in `observational-memory-bench` and will inform a future decision on default backend / fusion.
 - The full memory-unit store and destructive compaction remain deferred behind Gate-6 data (#71).

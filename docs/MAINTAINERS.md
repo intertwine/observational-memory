@@ -202,7 +202,7 @@ Runtime expectations:
 - It intentionally drops `session_meta`, raw tool output, and other machine-oriented records before the observer LLM sees them.
 - `om install` does not manage Hermes hooks, install the Hermes plugin, or set `memory.provider`; keep docs and status output truthful about that scope.
 - The Hermes plugin is installed with `hermes plugins install intertwine/hermes-observational-memory --no-enable` and activated with `hermes memory setup`.
-- Keep the plugin dependency line aligned with the current OM release line; for `v0.8.0`, the plugin should require `observational-memory>=0.8.0,<0.9`.
+- Keep the plugin dependency line aligned with the current OM release line; for `v0.9.0`, the plugin should require `observational-memory>=0.9.0,<0.10` after the plugin repo passes its compatibility validation.
 
 Tests that should protect Hermes behavior:
 
@@ -300,7 +300,7 @@ If `intertwine/tap` is not tapped locally, `make brew-check` exits with instruct
 
 ## Current Release Process
 
-`v0.8.0` is the current release (trustworthy memory: `om backup`/`om restore`, provenance + scope governance, `om reflect --check-conflicts`, `om talk`, growth instrumentation, and the experimental OM Mail preview; see `docs/RELEASE-0.8.0.md`). The release process below should be followed for future releases.
+`v0.9.0` is the current release (OpenCode and Kimi support plus bounded background observer workers; see `docs/RELEASE-0.9.0.md`). The release process below should be followed for future releases.
 
 Before cutting a patch release:
 
@@ -342,7 +342,7 @@ It is the authoritative way to prove "the om session start issue is fixed and wi
 
 Release flow:
 
-1. Confirm the docs and release notes in the latest [RELEASE-*.md](RELEASE-0.7.0.md) file (or create a new one for the next version).
+1. Confirm the docs and release notes in the latest [RELEASE-*.md](RELEASE-0.9.0.md) file (or create a new one for the next version).
 2. Bump the version with the appropriate `make bump-version BUMP=...` command.
 3. Run `make check`.
 4. Build with `make build`.
