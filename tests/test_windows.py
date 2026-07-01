@@ -9,14 +9,18 @@ additional platform-specific test infrastructure.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from click.testing import CliRunner
 
 from observational_memory import config as config_module
 from observational_memory.cli import (
+    ObserverWorkerTimeout,
     _claude_hook_commands,
     _resolve_scheduler_mode,
+    _run_bounded_observer_call,
+    _run_with_process_timeout,
     _schtasks_argv_to_command,
     _schtasks_job_keys_for_targets,
     _schtasks_job_specs,
@@ -24,6 +28,14 @@ from observational_memory.cli import (
 )
 from observational_memory.config import Config
 from observational_memory.sync.config import load_cluster_config
+
+
+def _sleep_past_process_timeout() -> None:
+    time.sleep(5)
+
+
+def _return_observer_value(_config: Config, value: int) -> int:
+    return value
 
 
 @pytest.fixture
@@ -195,7 +207,7 @@ def test_schtasks_specs_codex_target_includes_shared_jobs(windows_env):
     keys = [s["key"] for s in specs]
     assert set(keys) == {"codex", "claude-memory", "reflect"}
     codex = next(s for s in specs if s["key"] == "codex")
-    assert codex["argv"] == ["C:/tools/om.exe", "observe", "--source", "codex"]
+    assert codex["argv"] == ["C:/tools/om.exe", "observe-worker", "--source", "codex"]
     assert codex["schedule_kind"] == "minute"
 
 
@@ -203,8 +215,11 @@ def test_schtasks_specs_both_targets_include_reflect_daily(windows_env):
     config = Config(memory_dir=windows_env["local_appdata"] / "obs")
     specs = _schtasks_job_specs(config, "both", om_path="C:/tools/om.exe")
     keys = [s["key"] for s in specs]
-    assert set(keys) == {"codex", "claude-memory", "reflect"}
+    assert set(keys) == {"codex", "claude", "claude-memory", "reflect"}
 
+    claude = next(s for s in specs if s["key"] == "claude")
+    assert claude["argv"] == ["C:/tools/om.exe", "observe-worker", "--source", "claude"]
+    assert claude["schedule_kind"] == "minute"
     reflect = next(s for s in specs if s["key"] == "reflect")
     assert reflect["schedule_kind"] == "daily"
     assert reflect["schedule_time"] == "04:00"
@@ -214,8 +229,8 @@ def test_schtasks_job_keys_for_targets_match_cron_keys():
     # Matches `_cron_job_keys_for_targets` so both backends include the same
     # set of OM-managed jobs for each install target.
     assert _schtasks_job_keys_for_targets("codex") == {"codex", "claude-memory", "reflect"}
-    assert _schtasks_job_keys_for_targets("claude") == {"claude-memory", "reflect"}
-    assert _schtasks_job_keys_for_targets("both") == {"codex", "claude-memory", "reflect"}
+    assert _schtasks_job_keys_for_targets("claude") == {"claude", "claude-memory", "reflect"}
+    assert _schtasks_job_keys_for_targets("both") == {"codex", "claude", "claude-memory", "reflect"}
     assert _schtasks_job_keys_for_targets("cowork") == set()
 
 
@@ -223,6 +238,28 @@ def test_schtasks_argv_quoting_handles_spaces():
     cmd = _schtasks_argv_to_command(["C:/Program Files/om/om.exe", "observe", "--source", "codex"])
     assert '"C:/Program Files/om/om.exe"' in cmd
     assert "observe --source codex" in cmd
+
+
+def test_process_timeout_terminates_hung_child():
+    with pytest.raises(ObserverWorkerTimeout):
+        _run_with_process_timeout(_sleep_past_process_timeout, 0.1)
+
+
+def test_bounded_observer_uses_process_timeout_on_windows(windows_env, monkeypatch):
+    config = Config(memory_dir=windows_env["local_appdata"] / "observational-memory")
+    calls = []
+
+    def fake_process_timeout(fn, timeout_seconds, *args, **kwargs):
+        calls.append((fn, timeout_seconds, args, kwargs))
+        return fn(*args, **kwargs)
+
+    monkeypatch.setenv("OM_OBSERVER_WORKER_TIMEOUT_SECONDS", "17")
+    monkeypatch.setattr("observational_memory.cli._run_with_process_timeout", fake_process_timeout)
+
+    result = _run_bounded_observer_call(config, _return_observer_value, config, 42)
+
+    assert result == 42
+    assert calls == [(_return_observer_value, 17, (config, 42), {})]
 
 
 # --- Install flow on Windows ---
@@ -535,7 +572,7 @@ def test_claude_checkpoint_writes_state_and_holds_lock(windows_env, monkeypatch,
     transcript = tmp_path / "session.jsonl"
     transcript.write_text(_claude_transcript_line("a") + "\n")
 
-    monkeypatch.setattr("observational_memory.cli._spawn_detached", lambda argv, cwd=None: None)
+    monkeypatch.setattr("observational_memory.cli._spawn_detached", lambda argv, cwd=None: 5151)
 
     config = Config(memory_dir=windows_env["local_appdata"] / "observational-memory")
 
@@ -555,6 +592,7 @@ def test_claude_checkpoint_writes_state_and_holds_lock(windows_env, monkeypatch,
 
     lock_path = _checkpoint_lock_path(config.claude_checkpoint_lock_dir, transcript)
     assert lock_path.exists()
+    assert (lock_path / "owner").read_text().startswith("pid=5151\n")
 
 
 def test_claude_checkpoint_worker_runs_observer(windows_env, monkeypatch, tmp_path):
@@ -573,6 +611,10 @@ def test_claude_checkpoint_worker_runs_observer(windows_env, monkeypatch, tmp_pa
     monkeypatch.setattr(
         "observational_memory.cli._maybe_run_reflector_catchup",
         lambda config: calls.append(("catchup",)),
+    )
+    monkeypatch.setattr(
+        "observational_memory.cli._run_with_process_timeout",
+        lambda fn, timeout_seconds, *args, **kwargs: fn(*args, **kwargs),
     )
 
     runner = CliRunner()

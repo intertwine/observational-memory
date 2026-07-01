@@ -188,9 +188,36 @@ class TestEnvFile:
         assert config.auto_memory_launchd_plist_path == (
             config.launch_agents_dir / f"{config.AUTO_MEMORY_LAUNCHD_LABEL}.plist"
         )
+        assert config.claude_observe_launchd_plist_path == (
+            config.launch_agents_dir / f"{config.CLAUDE_OBSERVE_LAUNCHD_LABEL}.plist"
+        )
         assert config.reflect_launchd_plist_path == (config.launch_agents_dir / f"{config.REFLECT_LAUNCHD_LABEL}.plist")
         assert config.codex_observe_launchd_stdout_path == config.scheduler_log_dir / "codex-observe.out.log"
+        assert config.claude_observe_launchd_stdout_path == config.scheduler_log_dir / "claude-observe.out.log"
         assert config.reflect_launchd_stderr_path == config.scheduler_log_dir / "reflect.err.log"
+
+    def test_load_cursor_tolerates_corrupt_json(self, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+        config.ensure_memory_dir()
+        config.cursor_path.write_text("{not-json")
+
+        assert config.load_cursor() == {}
+
+    def test_save_cursor_uses_atomic_write(self, monkeypatch, tmp_path):
+        config = Config(memory_dir=tmp_path / "memory")
+        calls = []
+
+        def fake_atomic_write(path, text, mode=None):
+            calls.append((path, text, mode))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+        monkeypatch.setattr("observational_memory.sync.atomic.atomic_write_text", fake_atomic_write)
+
+        config.save_cursor({"transcript": 3})
+
+        assert calls == [(config.cursor_path, '{\n  "transcript": 3\n}\n', None)]
+        assert config.load_cursor() == {"transcript": 3}
 
 
 class TestDetectProvider:

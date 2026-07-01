@@ -437,6 +437,7 @@ Unknown fields are preserved.
 Default schedules:
 
 - Codex observer backstop: every 15 minutes
+- Claude observer backstop: every 15 minutes
 - Claude auto-memory scan: hourly
 - reflector: daily at 04:00 local time
 
@@ -446,12 +447,31 @@ Tune Codex polling:
 OM_CODEX_OBSERVER_INTERVAL_MINUTES=10
 ```
 
+Tune Claude polling:
+
+```bash
+OM_CLAUDE_OBSERVER_INTERVAL_MINUTES=10
+```
+
 Tune in-session checkpoints:
 
 ```bash
 OM_SESSION_OBSERVER_INTERVAL_SECONDS=900
 OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS=0
 ```
+
+Bound background observer workers:
+
+```bash
+OM_OBSERVER_WORKER_TIMEOUT_SECONDS=300
+OM_OBSERVER_WORKER_LOCK_STALE_SECONDS=360
+```
+
+Installed hook and scheduler jobs use `om observe-worker`, which allows only
+one background observer at a time and stops work that exceeds the timeout.
+POSIX workers use SIGALRM; Windows workers run observer work in a child
+process that the parent terminates when the timeout expires.
+Manual `om observe ...` commands are not forced through that background lane.
 
 ## Search Backend
 

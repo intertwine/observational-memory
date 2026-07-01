@@ -237,6 +237,23 @@ def test_cowork_target_does_not_manage_scheduler_jobs(monkeypatch, tmp_path):
     assert _desired_cron_jobs(config, "cowork") == {}
 
 
+def test_claude_target_manages_claude_scheduler_backstop(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+
+    specs = _launchd_job_specs(config, "claude", om_path="/tmp/bin/om")
+    assert {spec["key"] for spec in specs} == {"claude", "claude-memory", "reflect"}
+    claude = next(spec for spec in specs if spec["key"] == "claude")
+    assert claude["argv"] == ["/tmp/bin/om", "observe-worker", "--source", "claude"]
+    assert claude["start_interval"] == 900
+
+    assert _cron_job_keys_for_targets("claude") == {"claude", "claude-memory", "reflect"}
+    jobs = _desired_cron_jobs(config, "claude")
+    assert set(jobs) == {"claude", "claude-memory", "reflect"}
+    assert "observe-worker --source claude 2>/dev/null" in jobs["claude"]
+
+
 def test_install_codex_preserves_existing_config_and_hooks(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -517,7 +534,7 @@ def test_install_explicit_launchd_writes_plists_and_bootstraps(monkeypatch, tmp_
 
     codex_plist = plistlib.loads(config.codex_observe_launchd_plist_path.read_bytes())
     assert codex_plist["Label"] == config.CODEX_OBSERVE_LAUNCHD_LABEL
-    assert codex_plist["ProgramArguments"] == ["/tmp/bin/om", "observe", "--source", "codex"]
+    assert codex_plist["ProgramArguments"] == ["/tmp/bin/om", "observe-worker", "--source", "codex"]
     assert codex_plist["RunAtLoad"] is True
     assert codex_plist["StartInterval"] == 900
     assert codex_plist["StandardOutPath"] == str(config.codex_observe_launchd_stdout_path)
@@ -855,7 +872,8 @@ def test_install_claude_cron_preserves_existing_codex_cron_job(monkeypatch, tmp_
     assert writes
     installed = writes[-1]
     assert "/existing/om observe --source codex" in installed
-    assert "observe --source claude-memory" in installed
+    assert "observe-worker --source claude 2>/dev/null" in installed
+    assert "observe-worker --source claude-memory" in installed
     assert "om reflect" in installed
 
 
@@ -1207,7 +1225,7 @@ def test_kimi_checkpoint_appends_and_queues_observe(monkeypatch, tmp_path):
     events = (kimi_home / "observational-memory-events.jsonl").read_text().splitlines()
     assert len(events) == 1
     assert json.loads(events[0])["prompt"] == "remember this"
-    assert spawned == [(["/tmp/bin/om", "observe", "--source", "kimi"], None)]
+    assert spawned == [(["/tmp/bin/om", "observe-worker", "--source", "kimi"], None)]
 
 
 def test_kimi_checkpoint_throttles_observe_worker(monkeypatch, tmp_path):
@@ -1231,7 +1249,7 @@ def test_kimi_checkpoint_throttles_observe_worker(monkeypatch, tmp_path):
 
     events = (kimi_home / "observational-memory-events.jsonl").read_text().splitlines()
     assert len(events) == 2
-    assert spawned == [(["/tmp/bin/om", "observe", "--source", "kimi"], None)]
+    assert spawned == [(["/tmp/bin/om", "observe-worker", "--source", "kimi"], None)]
 
 
 def test_kimi_checkpoint_interval_zero_spawns_every_time(monkeypatch, tmp_path):
@@ -1255,8 +1273,8 @@ def test_kimi_checkpoint_interval_zero_spawns_every_time(monkeypatch, tmp_path):
         assert result.exit_code == 0, result.output
 
     assert spawned == [
-        (["/tmp/bin/om", "observe", "--source", "kimi"], None),
-        (["/tmp/bin/om", "observe", "--source", "kimi"], None),
+        (["/tmp/bin/om", "observe-worker", "--source", "kimi"], None),
+        (["/tmp/bin/om", "observe-worker", "--source", "kimi"], None),
     ]
 
 

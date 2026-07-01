@@ -564,13 +564,14 @@ def _backfill_from_messages(
 def _append_observations(new_observations: str, config: Config, *, skip_reindex: bool = False) -> None:
     """Append new observations to the observations file (never overwrite)."""
     from .startup_memory import refresh_startup_memory
+    from .sync.atomic import atomic_write_text
 
     config.ensure_memory_dir()
     if config.observations_path.exists():
         existing = config.observations_path.read_text()
-        config.observations_path.write_text(existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n")
+        atomic_write_text(config.observations_path, existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n")
     else:
-        config.observations_path.write_text(new_observations.rstrip() + "\n")
+        atomic_write_text(config.observations_path, new_observations.rstrip() + "\n")
     refresh_startup_memory(config)
     if not skip_reindex:
         _reindex_if_enabled(config)
@@ -676,6 +677,7 @@ def _latest_message_timestamp(messages: list[Message]) -> str | None:
 def _write_observations(new_observations: str, config: Config) -> None:
     """Write or append observations to the file."""
     from .startup_memory import refresh_startup_memory
+    from .sync.atomic import atomic_write_text
 
     config.ensure_memory_dir()
 
@@ -685,12 +687,12 @@ def _write_observations(new_observations: str, config: Config) -> None:
         existing = config.observations_path.read_text()
         # The LLM returns the full updated observations — just write it
         if existing.strip() and f"## {today}" in new_observations:
-            config.observations_path.write_text(new_observations.rstrip() + "\n")
+            atomic_write_text(config.observations_path, new_observations.rstrip() + "\n")
         else:
             # Append if the LLM only returned the new section
-            config.observations_path.write_text(existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n")
+            atomic_write_text(config.observations_path, existing.rstrip() + "\n\n" + new_observations.rstrip() + "\n")
     else:
-        config.observations_path.write_text(new_observations.rstrip() + "\n")
+        atomic_write_text(config.observations_path, new_observations.rstrip() + "\n")
     refresh_startup_memory(config)
     _reindex_if_enabled(config)
 

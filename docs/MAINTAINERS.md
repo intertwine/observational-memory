@@ -166,7 +166,14 @@ Runtime expectations:
 
 - `SessionStart` runs `om context` to inject a budgeted startup pack.
 - `Stop` queues transcript-specific Codex checkpointing through the hidden `om codex-checkpoint` path.
-- a background scheduler remains installed as a backstop for Codex transcript observation:
+- checkpoint workers and scheduler backstops run observer work through the bounded `om observe-worker` lane:
+  - only one background observer runs at a time
+  - `OM_OBSERVER_WORKER_TIMEOUT_SECONDS` bounds wall-clock runtime
+  - `OM_OBSERVER_WORKER_LOCK_STALE_SECONDS` controls stale global worker lock cleanup
+  - POSIX workers use SIGALRM; Windows workers run observer work in a child process that is terminated on timeout
+- a background scheduler remains installed as a backstop for transcript observation:
+  - Codex transcript scans run by default every 15 minutes
+  - Claude transcript scans run by default every 15 minutes
   - `launchd` on macOS by default
   - cron on other Unix-like platforms by default
 - agents can expand omitted startup sections with `om recall --handle ...`
@@ -243,7 +250,7 @@ Installer-managed user-level files:
 Runtime expectations:
 
 - `SessionStart` runs `om context` through native Grok hooks when Claude compatibility is not already providing OM context.
-- `SessionEnd`, `UserPromptSubmit`, and `PreCompact` call the hidden `om grok-checkpoint` path.
+- `SessionEnd`, `UserPromptSubmit`, and `PreCompact` call the hidden `om grok-checkpoint` path, which uses the bounded background observer lane.
 - `om observe --source grok` scans recent `~/.grok/sessions/<cwd>/<session-id>/updates.jsonl` files.
 - Grok cursors are count-based because streaming chunks can share timestamps.
 - Grok native memory is independent of OM memory. Do not present one as replacing the other.

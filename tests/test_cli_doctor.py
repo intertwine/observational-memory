@@ -348,6 +348,7 @@ def test_doctor_reports_launchd_and_legacy_cron_on_macos(monkeypatch, tmp_path):
     config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
     config.launch_agents_dir.mkdir(parents=True, exist_ok=True)
     config.codex_observe_launchd_plist_path.write_text("codex")
+    config.claude_observe_launchd_plist_path.write_text("claude")
     config.auto_memory_launchd_plist_path.write_text("auto")
     config.reflect_launchd_plist_path.write_text("reflect")
 
@@ -442,6 +443,7 @@ def test_status_reports_duplicate_backstops_on_macos(monkeypatch, tmp_path):
     config.ensure_memory_dir()
     config.codex_observe_launchd_plist_path.parent.mkdir(parents=True, exist_ok=True)
     config.codex_observe_launchd_plist_path.write_text("codex")
+    config.claude_observe_launchd_plist_path.write_text("claude")
     config.auto_memory_launchd_plist_path.write_text("auto")
     config.reflect_launchd_plist_path.write_text("reflect")
 
@@ -471,8 +473,8 @@ def test_status_reports_duplicate_backstops_on_macos(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert "Background scheduler:" in result.output
     assert "Default backend: launchd" in result.output
-    assert "LaunchAgents: 3/3 installed" in result.output
-    assert "Loaded: 3/3 loaded" in result.output
+    assert "LaunchAgents: 4/4 installed" in result.output
+    assert "Loaded: 4/4 loaded" in result.output
     assert "Cron jobs: 1 found (claude-memory)" in result.output
     assert "Duplicate backstops: launchd and cron are both present" in result.output
 

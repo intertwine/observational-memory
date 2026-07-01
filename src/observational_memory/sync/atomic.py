@@ -53,13 +53,62 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
     atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
 
 
+def write_lock_owner(lock_path: Path, *, pid: int | None = None, created: float | None = None) -> None:
+    """Atomically stamp the PID owner metadata for a mkdir-style lock."""
+    owner_pid = os.getpid() if pid is None else pid
+    created_at = time.time() if created is None else created
+    atomic_write_text(lock_path / "owner", f"pid={owner_pid}\ncreated={created_at}\n")
+
+
+def lock_owner_process_is_dead(lock_path: Path) -> bool:
+    """Return True when a lock owner file names a PID that no longer exists."""
+    owner = lock_path / "owner"
+    try:
+        text = owner.read_text()
+    except OSError:
+        return False
+
+    pid: int | None = None
+    for line in text.splitlines():
+        if not line.startswith("pid="):
+            continue
+        try:
+            pid = int(line.removeprefix("pid=").strip())
+        except ValueError:
+            return False
+        break
+
+    if pid is None or pid <= 0:
+        return False
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OSError as e:
+        if e.errno == errno.ESRCH:
+            return True
+        return False
+    return False
+
+
 class DirectoryLock:
     """Portable coarse lock implemented as atomic directory creation."""
 
-    def __init__(self, path: Path, *, timeout_seconds: float = 10.0, stale_seconds: float = 3600.0):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        timeout_seconds: float = 10.0,
+        stale_seconds: float | None = 3600.0,
+        reclaim_alive_stale: bool = True,
+    ):
         self.path = path
         self.timeout_seconds = timeout_seconds
         self.stale_seconds = stale_seconds
+        self.reclaim_alive_stale = reclaim_alive_stale
         self._held = False
 
     def acquire(self) -> None:
@@ -68,11 +117,12 @@ class DirectoryLock:
         while True:
             try:
                 self.path.mkdir()
-                atomic_write_text(self.path / "owner", f"pid={os.getpid()}\ncreated={time.time()}\n")
+                write_lock_owner(self.path)
                 self._held = True
                 return
             except FileExistsError:
-                self._cleanup_stale_lock()
+                if self._cleanup_stale_lock():
+                    continue
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"Timed out acquiring lock {self.path}")
                 time.sleep(0.05)
@@ -89,23 +139,34 @@ class DirectoryLock:
         finally:
             self._held = False
 
-    def _cleanup_stale_lock(self) -> None:
+    def _cleanup_stale_lock(self) -> bool:
         try:
             stat = self.path.stat()
         except FileNotFoundError:
-            return
+            return False
         except OSError as e:
             if e.errno != errno.ENOENT:
                 raise
-            return
+            return False
+        if lock_owner_process_is_dead(self.path):
+            return self._remove_lock_dir()
+
+        if self.stale_seconds is None:
+            return False
         if time.time() - stat.st_mtime < self.stale_seconds:
-            return
+            return False
+        if not self.reclaim_alive_stale and (self.path / "owner").exists():
+            return False
+        return self._remove_lock_dir()
+
+    def _remove_lock_dir(self) -> bool:
         try:
             for child in self.path.iterdir():
                 child.unlink()
             self.path.rmdir()
         except OSError:
-            return
+            return False
+        return True
 
     def __enter__(self) -> DirectoryLock:
         self.acquire()
