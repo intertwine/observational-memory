@@ -3,6 +3,8 @@
 ![Observational Memory header showing local agent memory shared across Claude Code, Codex, Grok, Claude Cowork, and Hermes, with reviewed export to hosted agents.](assets/observational-memory-header.png)
 
 [![PyPI version](https://img.shields.io/pypi/v/observational-memory.svg)](https://pypi.org/project/observational-memory/)
+[![Latest release](https://img.shields.io/github/v/release/intertwine/observational-memory?label=release)](https://github.com/intertwine/observational-memory/releases/latest)
+[![Python versions](https://img.shields.io/pypi/pyversions/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/observational-memory.svg)](https://pypi.org/project/observational-memory/)
 [![CI](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/intertwine/observational-memory?style=social)](https://github.com/intertwine/observational-memory/stargazers)
