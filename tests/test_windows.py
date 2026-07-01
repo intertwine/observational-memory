@@ -195,7 +195,7 @@ def test_schtasks_specs_codex_target_includes_shared_jobs(windows_env):
     keys = [s["key"] for s in specs]
     assert set(keys) == {"codex", "claude-memory", "reflect"}
     codex = next(s for s in specs if s["key"] == "codex")
-    assert codex["argv"] == ["C:/tools/om.exe", "observe", "--source", "codex"]
+    assert codex["argv"] == ["C:/tools/om.exe", "observe-worker", "--source", "codex"]
     assert codex["schedule_kind"] == "minute"
 
 

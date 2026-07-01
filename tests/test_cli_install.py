@@ -517,7 +517,7 @@ def test_install_explicit_launchd_writes_plists_and_bootstraps(monkeypatch, tmp_
 
     codex_plist = plistlib.loads(config.codex_observe_launchd_plist_path.read_bytes())
     assert codex_plist["Label"] == config.CODEX_OBSERVE_LAUNCHD_LABEL
-    assert codex_plist["ProgramArguments"] == ["/tmp/bin/om", "observe", "--source", "codex"]
+    assert codex_plist["ProgramArguments"] == ["/tmp/bin/om", "observe-worker", "--source", "codex"]
     assert codex_plist["RunAtLoad"] is True
     assert codex_plist["StartInterval"] == 900
     assert codex_plist["StandardOutPath"] == str(config.codex_observe_launchd_stdout_path)
@@ -855,7 +855,7 @@ def test_install_claude_cron_preserves_existing_codex_cron_job(monkeypatch, tmp_
     assert writes
     installed = writes[-1]
     assert "/existing/om observe --source codex" in installed
-    assert "observe --source claude-memory" in installed
+    assert "observe-worker --source claude-memory" in installed
     assert "om reflect" in installed
 
 
@@ -1207,7 +1207,7 @@ def test_kimi_checkpoint_appends_and_queues_observe(monkeypatch, tmp_path):
     events = (kimi_home / "observational-memory-events.jsonl").read_text().splitlines()
     assert len(events) == 1
     assert json.loads(events[0])["prompt"] == "remember this"
-    assert spawned == [(["/tmp/bin/om", "observe", "--source", "kimi"], None)]
+    assert spawned == [(["/tmp/bin/om", "observe-worker", "--source", "kimi"], None)]
 
 
 def test_kimi_checkpoint_throttles_observe_worker(monkeypatch, tmp_path):
@@ -1231,7 +1231,7 @@ def test_kimi_checkpoint_throttles_observe_worker(monkeypatch, tmp_path):
 
     events = (kimi_home / "observational-memory-events.jsonl").read_text().splitlines()
     assert len(events) == 2
-    assert spawned == [(["/tmp/bin/om", "observe", "--source", "kimi"], None)]
+    assert spawned == [(["/tmp/bin/om", "observe-worker", "--source", "kimi"], None)]
 
 
 def test_kimi_checkpoint_interval_zero_spawns_every_time(monkeypatch, tmp_path):
@@ -1255,8 +1255,8 @@ def test_kimi_checkpoint_interval_zero_spawns_every_time(monkeypatch, tmp_path):
         assert result.exit_code == 0, result.output
 
     assert spawned == [
-        (["/tmp/bin/om", "observe", "--source", "kimi"], None),
-        (["/tmp/bin/om", "observe", "--source", "kimi"], None),
+        (["/tmp/bin/om", "observe-worker", "--source", "kimi"], None),
+        (["/tmp/bin/om", "observe-worker", "--source", "kimi"], None),
     ]
 
 

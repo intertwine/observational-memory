@@ -8,6 +8,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from observational_memory.cli import (
+    ObserverWorkerTimeout,
     _acquire_codex_checkpoint_lock,
     _release_codex_checkpoint_lock,
     cli,
@@ -275,6 +276,78 @@ def test_codex_checkpoint_worker_updates_state_and_releases_lock(monkeypatch, tm
     assert not lock_path.exists()
 
 
+def test_codex_checkpoint_worker_skips_when_observer_slot_is_busy(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "codex" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("codex-transcript.jsonl").read_text())
+
+    def fail_observe(*args, **kwargs):
+        raise AssertionError("observer should not run while global slot is busy")
+
+    monkeypatch.setattr("observational_memory.observe.observe_codex_transcript", fail_observe)
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+    (config.memory_dir / ".observer-worker.lock").mkdir()
+    lock_path = config.codex_checkpoint_lock_dir / "test-lock"
+    lock_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("observational_memory.cli._codex_checkpoint_lock_path", lambda config, path: lock_path)
+
+    result = runner.invoke(cli, ["codex-checkpoint-worker", "--transcript", str(transcript)])
+
+    assert result.exit_code == 0, result.output
+    state = json.loads(config.codex_checkpoint_state_path.read_text())
+    assert state[str(transcript)]["status"] == "skipped_busy"
+    assert not lock_path.exists()
+
+
+def test_codex_checkpoint_worker_marks_timeout_and_releases_lock(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "codex" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("codex-transcript.jsonl").read_text())
+
+    def fake_timeout(fn, timeout_seconds):
+        raise ObserverWorkerTimeout("boom")
+
+    monkeypatch.setattr("observational_memory.cli._run_with_wall_timeout", fake_timeout)
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+    lock_path = config.codex_checkpoint_lock_dir / "test-lock"
+    lock_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("observational_memory.cli._codex_checkpoint_lock_path", lambda config, path: lock_path)
+
+    result = runner.invoke(cli, ["codex-checkpoint-worker", "--transcript", str(transcript)])
+
+    assert result.exit_code == 0, result.output
+    state = json.loads(config.codex_checkpoint_state_path.read_text())
+    assert state[str(transcript)]["status"] == "timeout"
+    assert not lock_path.exists()
+
+
+def test_observe_worker_skips_when_observer_slot_is_busy(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    def fail_scan(*args, **kwargs):
+        raise AssertionError("scan should not run while global slot is busy")
+
+    monkeypatch.setattr("observational_memory.observe.observe_all_codex", fail_scan)
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+    (config.memory_dir / ".observer-worker.lock").mkdir()
+
+    result = runner.invoke(cli, ["observe-worker", "--source", "codex"])
+
+    assert result.exit_code == 0, result.output
+    assert "already running" in result.output
+
+
 def test_codex_checkpoint_reclaims_stale_lock(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
@@ -289,5 +362,27 @@ def test_codex_checkpoint_reclaims_stale_lock(monkeypatch, tmp_path):
 
     assert _acquire_codex_checkpoint_lock(config, lock_path) is True
     assert lock_path.exists()
+
+    _release_codex_checkpoint_lock(lock_path)
+
+
+def test_codex_checkpoint_reclaims_dead_owner_lock(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+
+    lock_path = config.codex_checkpoint_lock_dir / "dead-lock"
+    lock_path.mkdir(parents=True, exist_ok=True)
+    (lock_path / "owner").write_text("pid=999999\ncreated=123\n")
+
+    def fake_kill(pid, sig):
+        assert pid == 999999
+        assert sig == 0
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, "kill", fake_kill)
+
+    assert _acquire_codex_checkpoint_lock(config, lock_path) is True
+    assert (lock_path / "owner").read_text().startswith(f"pid={os.getpid()}\n")
 
     _release_codex_checkpoint_lock(lock_path)

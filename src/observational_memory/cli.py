@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypeVar
 
 import click
 
@@ -17,6 +20,16 @@ from . import __version__
 from .config import Config
 
 _OBSERVE_SOURCES = ["claude", "codex", "opencode", "kimi", "grok", "hermes", "cowork", "claude-memory", "all"]
+_OBSERVER_WORKER_SOURCES = ["claude", "codex", "opencode", "kimi", "grok", "hermes", "cowork", "claude-memory", "all"]
+_T = TypeVar("_T")
+
+
+class ObserverWorkerBusy(RuntimeError):
+    """Raised when another background observer worker already owns the global slot."""
+
+
+class ObserverWorkerTimeout(TimeoutError):
+    """Raised when background observer work exceeds its wall-clock budget."""
 
 
 @click.group()
@@ -194,6 +207,165 @@ def _detect_transcript_source(transcript: Path, config: Config) -> str | None:
         pass
 
     return None
+
+
+def _observer_worker_timeout_seconds(default: int = 300) -> int:
+    raw_value = os.environ.get("OM_OBSERVER_WORKER_TIMEOUT_SECONDS", str(default))
+    try:
+        seconds = int(raw_value)
+    except ValueError:
+        click.echo(
+            f"Warning: invalid OM_OBSERVER_WORKER_TIMEOUT_SECONDS={raw_value!r}; using default {default}.",
+            err=True,
+        )
+        return default
+    if seconds < 0:
+        click.echo(
+            f"Warning: OM_OBSERVER_WORKER_TIMEOUT_SECONDS must be >=0; using default {default}.",
+            err=True,
+        )
+        return default
+    return seconds
+
+
+def _observer_worker_lock_stale_seconds(timeout_seconds: int | None = None) -> int:
+    timeout = _observer_worker_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    default = max(timeout + 60, 600)
+    raw_value = os.environ.get("OM_OBSERVER_WORKER_LOCK_STALE_SECONDS", str(default))
+    try:
+        seconds = int(raw_value)
+    except ValueError:
+        click.echo(
+            f"Warning: invalid OM_OBSERVER_WORKER_LOCK_STALE_SECONDS={raw_value!r}; using default {default}.",
+            err=True,
+        )
+        return default
+    if seconds < 0:
+        click.echo(
+            f"Warning: OM_OBSERVER_WORKER_LOCK_STALE_SECONDS must be >=0; using default {default}.",
+            err=True,
+        )
+        return default
+    return seconds
+
+
+def _observer_worker_lock_path(config: Config) -> Path:
+    return config.memory_dir / ".observer-worker.lock"
+
+
+@contextmanager
+def _observer_worker_slot(config: Config, *, timeout_seconds: int | None = None) -> Iterator[None]:
+    from .sync.atomic import DirectoryLock
+
+    timeout = _observer_worker_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    lock = DirectoryLock(
+        _observer_worker_lock_path(config),
+        timeout_seconds=0,
+        stale_seconds=_observer_worker_lock_stale_seconds(timeout),
+    )
+    try:
+        lock.acquire()
+    except TimeoutError as e:
+        raise ObserverWorkerBusy("another background observer worker is already running") from e
+
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _run_with_wall_timeout(fn: Callable[[], _T], timeout_seconds: int) -> _T:
+    if timeout_seconds <= 0 or sys.platform == "win32":
+        return fn()
+
+    try:
+        import signal
+    except ImportError:
+        return fn()
+
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        return fn()
+
+    def _timeout_handler(signum, frame):
+        raise ObserverWorkerTimeout(f"background observer exceeded {timeout_seconds}s")
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+    old_timer = signal.getitimer(signal.ITIMER_REAL)
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        return fn()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+        if old_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
+
+
+def _run_bounded_observer_work(config: Config, fn: Callable[[], _T]) -> _T:
+    timeout = _observer_worker_timeout_seconds()
+    with _observer_worker_slot(config, timeout_seconds=timeout):
+        return _run_with_wall_timeout(fn, timeout)
+
+
+def _run_observe_worker_source(config: Config, source: str) -> int:
+    from .observe import (
+        observe_all_claude,
+        observe_all_codex,
+        observe_all_cowork,
+        observe_all_grok,
+        observe_all_hermes,
+        observe_all_kimi,
+        observe_all_opencode,
+        observe_auto_memory,
+    )
+
+    processed = 0
+    if source in ("claude", "all"):
+        processed += len(observe_all_claude(config, dry_run=False))
+    if source in ("codex", "all"):
+        processed += len(observe_all_codex(config, dry_run=False))
+    if source in ("opencode", "all"):
+        processed += len(observe_all_opencode(config, dry_run=False))
+    if source in ("hermes", "all"):
+        processed += len(observe_all_hermes(config=config, dry_run=False))
+    if source in ("kimi", "all"):
+        processed += len(observe_all_kimi(config=config, dry_run=False))
+    if source in ("cowork", "all"):
+        processed += len(observe_all_cowork(config, dry_run=False))
+    if source in ("grok", "all"):
+        processed += len(observe_all_grok(config, dry_run=False))
+    if source in ("claude-memory", "all"):
+        changed, deleted = observe_auto_memory(config, dry_run=False)
+        processed += len(changed) + len(deleted)
+    _maybe_run_reflector_catchup(config)
+    return processed
+
+
+@cli.command(hidden=True, name="observe-worker")
+@click.option(
+    "--source",
+    type=click.Choice(_OBSERVER_WORKER_SOURCES),
+    required=True,
+    help="Agent or memory source to observe inside the bounded background worker lane.",
+)
+@click.pass_context
+def observe_worker(ctx: click.Context, source: str) -> None:
+    """Run background observation with global concurrency and wall-time guards."""
+    config = ctx.obj["config"]
+    try:
+        processed = _run_bounded_observer_work(config, lambda: _run_observe_worker_source(config, source))
+    except ObserverWorkerBusy:
+        click.echo("Observer worker skipped: another background observer is already running.")
+        return
+    except ObserverWorkerTimeout as e:
+        click.echo(f"Observer worker timed out: {e}", err=True)
+        return
+
+    if processed:
+        click.echo(f"Observer worker processed {processed} item(s).")
+    else:
+        click.echo("Observer worker found no new work.")
 
 
 @cli.command()
@@ -2859,14 +3031,34 @@ def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
     lock_path = _codex_checkpoint_lock_path(config, transcript)
 
     try:
-        observe_codex_transcript(transcript, config, dry_run=False)
-        _maybe_run_reflector_catchup(config)
+
+        def _work() -> None:
+            observe_codex_transcript(transcript, config, dry_run=False)
+            _maybe_run_reflector_catchup(config)
+
+        _run_bounded_observer_work(config, _work)
         _update_codex_checkpoint_state(
             config,
             transcript,
             message_count=_count_codex_transcript_messages(transcript),
             status="success",
         )
+    except ObserverWorkerBusy:
+        _update_codex_checkpoint_state(
+            config,
+            transcript,
+            message_count=_count_codex_transcript_messages(transcript),
+            status="skipped_busy",
+        )
+        return
+    except ObserverWorkerTimeout:
+        _update_codex_checkpoint_state(
+            config,
+            transcript,
+            message_count=_count_codex_transcript_messages(transcript),
+            status="timeout",
+        )
+        return
     except Exception:
         _update_codex_checkpoint_state(
             config,
@@ -3015,14 +3207,34 @@ def claude_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
     lock_path = _checkpoint_lock_path(config.claude_checkpoint_lock_dir, transcript)
 
     try:
-        observe_claude_transcript(transcript, config, dry_run=False)
-        _maybe_run_reflector_catchup(config)
+
+        def _work() -> None:
+            observe_claude_transcript(transcript, config, dry_run=False)
+            _maybe_run_reflector_catchup(config)
+
+        _run_bounded_observer_work(config, _work)
         _update_checkpoint_state(
             config.claude_checkpoint_state_path,
             transcript,
             message_count=_count_claude_transcript_messages(transcript),
             status="success",
         )
+    except ObserverWorkerBusy:
+        _update_checkpoint_state(
+            config.claude_checkpoint_state_path,
+            transcript,
+            message_count=_count_claude_transcript_messages(transcript),
+            status="skipped_busy",
+        )
+        return
+    except ObserverWorkerTimeout:
+        _update_checkpoint_state(
+            config.claude_checkpoint_state_path,
+            transcript,
+            message_count=_count_claude_transcript_messages(transcript),
+            status="timeout",
+        )
+        return
     except Exception:
         _update_checkpoint_state(
             config.claude_checkpoint_state_path,
@@ -5399,33 +5611,83 @@ def _checkpoint_lock_path(lock_dir: Path, transcript: Path) -> Path:
     return lock_dir / _hash_transcript_path(transcript)
 
 
+def _write_checkpoint_lock_owner(lock_path: Path) -> None:
+    try:
+        (lock_path / "owner").write_text(f"pid={os.getpid()}\ncreated={datetime.now(timezone.utc).timestamp()}\n")
+    except OSError:
+        pass
+
+
+def _checkpoint_lock_owner_is_dead(lock_path: Path) -> bool:
+    owner = lock_path / "owner"
+    try:
+        text = owner.read_text()
+    except OSError:
+        return False
+
+    pid: int | None = None
+    for line in text.splitlines():
+        if not line.startswith("pid="):
+            continue
+        try:
+            pid = int(line.removeprefix("pid=").strip())
+        except ValueError:
+            return False
+        break
+
+    if pid is None or pid <= 0:
+        return False
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OSError as e:
+        return e.errno == errno.ESRCH
+    return False
+
+
+def _checkpoint_lock_should_reclaim(lock_path: Path, stale_minutes: int) -> bool:
+    if _checkpoint_lock_owner_is_dead(lock_path):
+        return True
+    if stale_minutes <= 0:
+        return False
+    try:
+        mtime = lock_path.stat().st_mtime
+    except OSError:
+        return False
+    age_seconds = max(0.0, datetime.now(timezone.utc).timestamp() - mtime)
+    return age_seconds > stale_minutes * 60
+
+
 def _acquire_checkpoint_lock(lock_dir: Path, lock_path: Path) -> bool:
     """Acquire a best-effort mkdir lock, sweeping stale entries first."""
     stale_minutes = _checkpoint_lock_stale_minutes()
     lock_dir.mkdir(parents=True, exist_ok=True)
 
-    if stale_minutes > 0:
-        for entry in lock_dir.iterdir():
-            if not entry.is_dir():
-                continue
-            age_seconds = max(0.0, datetime.now(timezone.utc).timestamp() - entry.stat().st_mtime)
-            if age_seconds > stale_minutes * 60:
-                shutil.rmtree(entry, ignore_errors=True)
+    for entry in lock_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        if _checkpoint_lock_should_reclaim(entry, stale_minutes):
+            shutil.rmtree(entry, ignore_errors=True)
 
     try:
         lock_path.mkdir()
+        _write_checkpoint_lock_owner(lock_path)
         return True
     except FileExistsError:
-        if stale_minutes <= 0 or not lock_path.exists():
+        if not lock_path.exists():
             return False
 
-        age_seconds = max(0.0, datetime.now(timezone.utc).timestamp() - lock_path.stat().st_mtime)
-        if age_seconds <= stale_minutes * 60:
+        if not _checkpoint_lock_should_reclaim(lock_path, stale_minutes):
             return False
 
         shutil.rmtree(lock_path, ignore_errors=True)
         try:
             lock_path.mkdir()
+            _write_checkpoint_lock_owner(lock_path)
             return True
         except FileExistsError:
             return False
@@ -5593,7 +5855,7 @@ def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None)
                 "key": "codex",
                 "label": config.CODEX_OBSERVE_LAUNCHD_LABEL,
                 "plist_path": config.codex_observe_launchd_plist_path,
-                "argv": [resolved_om_path, "observe", "--source", "codex"] if resolved_om_path else [],
+                "argv": [resolved_om_path, "observe-worker", "--source", "codex"] if resolved_om_path else [],
                 "run_at_load": True,
                 "start_interval": _codex_observer_interval_minutes() * 60,
                 "stdout_path": config.codex_observe_launchd_stdout_path,
@@ -5608,7 +5870,9 @@ def _launchd_job_specs(config: Config, targets: str, om_path: str | None = None)
                     "key": "claude-memory",
                     "label": config.AUTO_MEMORY_LAUNCHD_LABEL,
                     "plist_path": config.auto_memory_launchd_plist_path,
-                    "argv": [resolved_om_path, "observe", "--source", "claude-memory"] if resolved_om_path else [],
+                    "argv": [resolved_om_path, "observe-worker", "--source", "claude-memory"]
+                    if resolved_om_path
+                    else [],
                     "run_at_load": True,
                     "start_interval": 3600,
                     "stdout_path": config.auto_memory_launchd_stdout_path,
@@ -5814,9 +6078,9 @@ def _cron_every_minutes(minutes: int) -> str:
 
 def _cron_job_key(line: str) -> str | None:
     """Return the OM cron job key for a crontab line, if any."""
-    if "om observe --source codex" in line:
+    if "om observe --source codex" in line or "om observe-worker --source codex" in line:
         return "codex"
-    if "om observe --source claude-memory" in line:
+    if "om observe --source claude-memory" in line or "om observe-worker --source claude-memory" in line:
         return "claude-memory"
     if "om reflect" in line:
         return "reflect"
@@ -5945,14 +6209,14 @@ def _desired_cron_jobs(config: Config, targets: str) -> dict[str, str]:
     if _targets_include_shared_scheduler(targets):
         jobs.update(
             {
-                "claude-memory": f"0 * * * * {prefix}{om_path} observe --source claude-memory 2>/dev/null",
+                "claude-memory": f"0 * * * * {prefix}{om_path} observe-worker --source claude-memory 2>/dev/null",
                 "reflect": f"0 4 * * * {prefix}{om_path} reflect 2>/dev/null",
             }
         )
 
     if _targets_include_codex_scheduler(targets):
         codex_interval = _cron_every_minutes(_codex_observer_interval_minutes())
-        jobs["codex"] = f"{codex_interval} * * * * {prefix}{om_path} observe --source codex 2>/dev/null"
+        jobs["codex"] = f"{codex_interval} * * * * {prefix}{om_path} observe-worker --source codex 2>/dev/null"
 
     return jobs
 
@@ -6021,7 +6285,7 @@ def _schtasks_job_specs(config: Config, targets: str, om_path: str | None = None
             {
                 "key": "codex",
                 "name": config.CODEX_OBSERVE_SCHTASKS_NAME,
-                "argv": [resolved_om_path, "observe", "--source", "codex"],
+                "argv": [resolved_om_path, "observe-worker", "--source", "codex"],
                 # Repeat every N minutes for an effectively-unbounded duration.
                 "schedule_minutes": _codex_observer_interval_minutes(),
                 "schedule_kind": "minute",
@@ -6034,7 +6298,7 @@ def _schtasks_job_specs(config: Config, targets: str, om_path: str | None = None
                 {
                     "key": "claude-memory",
                     "name": config.AUTO_MEMORY_SCHTASKS_NAME,
-                    "argv": [resolved_om_path, "observe", "--source", "claude-memory"],
+                    "argv": [resolved_om_path, "observe-worker", "--source", "claude-memory"],
                     "schedule_minutes": 60,
                     "schedule_kind": "minute",
                 },
@@ -6218,16 +6482,25 @@ def grok_checkpoint(ctx: click.Context, transcript: Path | None) -> None:
 
     config = ctx.obj["config"]
 
-    if transcript:
-        transcript = Path(transcript).expanduser()
-        result = observe_grok_transcript(transcript, config)
-        if result:
-            click.echo(f"Grok checkpoint processed: {transcript}")
+    try:
+        if transcript:
+            transcript = Path(transcript).expanduser()
+
+            def _work() -> str | None:
+                return observe_grok_transcript(transcript, config)
+
+            result = _run_bounded_observer_work(config, _work)
+            if result:
+                click.echo(f"Grok checkpoint processed: {transcript}")
+            else:
+                click.echo(f"No new Grok messages in {transcript}")
         else:
-            click.echo(f"No new Grok messages in {transcript}")
-    else:
-        results = observe_all_grok(config)
-        click.echo(f"Grok checkpoint: processed {len(results)} sessions")
+            results = _run_bounded_observer_work(config, lambda: observe_all_grok(config))
+            click.echo(f"Grok checkpoint: processed {len(results)} sessions")
+    except ObserverWorkerBusy:
+        click.echo("Grok checkpoint skipped: another background observer is already running.")
+    except ObserverWorkerTimeout as e:
+        click.echo(f"Grok checkpoint timed out: {e}", err=True)
 
 
 # --- OpenCode integration ---
@@ -6983,7 +7256,7 @@ def _build_kimi_checkpoint_command() -> str:
 
 def _build_kimi_observe_worker_command() -> list[str]:
     om_path = _find_om_path() or sys.argv[0] or "om"
-    return [om_path, "observe", "--source", "kimi"]
+    return [om_path, "observe-worker", "--source", "kimi"]
 
 
 def _kimi_observer_interval_seconds(default: int = 60) -> int:

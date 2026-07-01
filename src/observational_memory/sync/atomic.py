@@ -72,7 +72,8 @@ class DirectoryLock:
                 self._held = True
                 return
             except FileExistsError:
-                self._cleanup_stale_lock()
+                if self._cleanup_stale_lock():
+                    continue
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"Timed out acquiring lock {self.path}")
                 time.sleep(0.05)
@@ -89,23 +90,62 @@ class DirectoryLock:
         finally:
             self._held = False
 
-    def _cleanup_stale_lock(self) -> None:
+    def _cleanup_stale_lock(self) -> bool:
         try:
             stat = self.path.stat()
         except FileNotFoundError:
-            return
+            return False
         except OSError as e:
             if e.errno != errno.ENOENT:
                 raise
-            return
+            return False
+        if self._owner_process_is_dead():
+            return self._remove_lock_dir()
+
         if time.time() - stat.st_mtime < self.stale_seconds:
-            return
+            return False
+        return self._remove_lock_dir()
+
+    def _remove_lock_dir(self) -> bool:
         try:
             for child in self.path.iterdir():
                 child.unlink()
             self.path.rmdir()
         except OSError:
-            return
+            return False
+        return True
+
+    def _owner_process_is_dead(self) -> bool:
+        owner = self.path / "owner"
+        try:
+            text = owner.read_text()
+        except OSError:
+            return False
+
+        pid: int | None = None
+        for line in text.splitlines():
+            if not line.startswith("pid="):
+                continue
+            try:
+                pid = int(line.removeprefix("pid=").strip())
+            except ValueError:
+                return False
+            break
+
+        if pid is None or pid <= 0:
+            return False
+
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        except OSError as e:
+            if e.errno == errno.ESRCH:
+                return True
+            return False
+        return False
 
     def __enter__(self) -> DirectoryLock:
         self.acquire()
