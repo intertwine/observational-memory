@@ -168,9 +168,9 @@ Runtime expectations:
 - `Stop` queues transcript-specific Codex checkpointing through the hidden `om codex-checkpoint` path.
 - checkpoint workers and scheduler backstops run observer work through the bounded `om observe-worker` lane:
   - only one background observer runs at a time
-  - `OM_OBSERVER_WORKER_TIMEOUT_SECONDS` bounds POSIX wall-clock runtime
+  - `OM_OBSERVER_WORKER_TIMEOUT_SECONDS` bounds wall-clock runtime
   - `OM_OBSERVER_WORKER_LOCK_STALE_SECONDS` controls stale global worker lock cleanup
-  - Windows uses the same global slot and dead-owner cleanup, but does not have SIGALRM wall-clock interruption
+  - POSIX workers use SIGALRM; Windows workers run observer work in a child process that is terminated on timeout
 - a background scheduler remains installed as a backstop for transcript observation:
   - Codex transcript scans run by default every 15 minutes
   - Claude transcript scans run by default every 15 minutes

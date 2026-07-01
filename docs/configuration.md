@@ -468,9 +468,9 @@ OM_OBSERVER_WORKER_LOCK_STALE_SECONDS=360
 ```
 
 Installed hook and scheduler jobs use `om observe-worker`, which allows only
-one background observer at a time and stops POSIX work that exceeds the timeout.
-On Windows, the bounded lane still uses the global lock and dead-owner cleanup,
-but Python cannot interrupt in-process observer work with SIGALRM.
+one background observer at a time and stops work that exceeds the timeout.
+POSIX workers use SIGALRM; Windows workers run observer work in a child
+process that the parent terminates when the timeout expires.
 Manual `om observe ...` commands are not forced through that background lane.
 
 ## Search Backend

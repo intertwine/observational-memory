@@ -302,10 +302,60 @@ def _run_with_wall_timeout(fn: Callable[[], _T], timeout_seconds: int) -> _T:
             signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
 
 
+def _observer_process_entry(result_queue, fn: Callable[..., _T], args: tuple, kwargs: dict) -> None:
+    try:
+        result_queue.put(("ok", fn(*args, **kwargs)))
+    except BaseException as e:
+        result_queue.put(("error", f"{type(e).__name__}: {e}"))
+
+
+def _run_with_process_timeout(fn: Callable[..., _T], timeout_seconds: int, *args, **kwargs) -> _T:
+    if timeout_seconds <= 0:
+        return fn(*args, **kwargs)
+
+    import multiprocessing
+    import queue
+
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(target=_observer_process_entry, args=(result_queue, fn, args, kwargs))
+    process.start()
+    process.join(timeout_seconds)
+
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(1)
+        raise ObserverWorkerTimeout(f"background observer exceeded {timeout_seconds}s")
+
+    try:
+        status, payload = result_queue.get_nowait()
+    except queue.Empty:
+        if process.exitcode == 0:
+            return None  # type: ignore[return-value]
+        raise RuntimeError(f"background observer child exited with status {process.exitcode}")
+
+    if status == "ok":
+        return payload
+    raise RuntimeError(f"background observer child failed: {payload}")
+
+
 def _run_bounded_observer_work(config: Config, fn: Callable[[], _T]) -> _T:
     timeout = _observer_worker_timeout_seconds()
     with _observer_worker_slot(config, timeout_seconds=timeout):
+        if sys.platform == "win32":
+            raise RuntimeError("Windows bounded observer work must use a top-level callable")
         return _run_with_wall_timeout(fn, timeout)
+
+
+def _run_bounded_observer_call(config: Config, fn: Callable[..., _T], *args, **kwargs) -> _T:
+    timeout = _observer_worker_timeout_seconds()
+    with _observer_worker_slot(config, timeout_seconds=timeout):
+        if sys.platform == "win32":
+            return _run_with_process_timeout(fn, timeout, *args, **kwargs)
+        return _run_with_wall_timeout(lambda: fn(*args, **kwargs), timeout)
 
 
 def _run_observe_worker_source(config: Config, source: str) -> int:
@@ -354,7 +404,7 @@ def observe_worker(ctx: click.Context, source: str) -> None:
     """Run background observation with global concurrency and wall-time guards."""
     config = ctx.obj["config"]
     try:
-        processed = _run_bounded_observer_work(config, lambda: _run_observe_worker_source(config, source))
+        processed = _run_bounded_observer_call(config, _run_observe_worker_source, config, source)
     except ObserverWorkerBusy:
         click.echo("Observer worker skipped: another background observer is already running.")
         return
@@ -3021,25 +3071,25 @@ def codex_checkpoint(ctx: click.Context) -> None:
         raise
 
 
+def _run_codex_checkpoint_observer(config: Config, transcript: Path) -> None:
+    from .observe import observe_codex_transcript
+
+    observe_codex_transcript(transcript, config, dry_run=False)
+    _maybe_run_reflector_catchup(config)
+
+
 @cli.command(hidden=True, name="codex-checkpoint-worker")
 @click.option("--transcript", type=click.Path(path_type=Path), required=True)
 @click.pass_context
 def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
     """Observe one Codex transcript and release its checkpoint lock."""
-    from .observe import observe_codex_transcript
-
     config = ctx.obj["config"]
     transcript = transcript.expanduser()
     lock_path = _codex_checkpoint_lock_path(config, transcript)
     _write_checkpoint_lock_owner(lock_path)
 
     try:
-
-        def _work() -> None:
-            observe_codex_transcript(transcript, config, dry_run=False)
-            _maybe_run_reflector_catchup(config)
-
-        _run_bounded_observer_work(config, _work)
+        _run_bounded_observer_call(config, _run_codex_checkpoint_observer, config, transcript)
         _update_codex_checkpoint_state(
             config,
             transcript,
@@ -3201,25 +3251,25 @@ def claude_checkpoint(ctx: click.Context) -> None:
         return
 
 
+def _run_claude_checkpoint_observer(config: Config, transcript: Path) -> None:
+    from .observe import observe_claude_transcript
+
+    observe_claude_transcript(transcript, config, dry_run=False)
+    _maybe_run_reflector_catchup(config)
+
+
 @cli.command(hidden=True, name="claude-checkpoint-worker")
 @click.option("--transcript", type=click.Path(path_type=Path), required=True)
 @click.pass_context
 def claude_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
     """Observe one Claude transcript and release its checkpoint lock."""
-    from .observe import observe_claude_transcript
-
     config = ctx.obj["config"]
     transcript = transcript.expanduser()
     lock_path = _checkpoint_lock_path(config.claude_checkpoint_lock_dir, transcript)
     _write_checkpoint_lock_owner(lock_path)
 
     try:
-
-        def _work() -> None:
-            observe_claude_transcript(transcript, config, dry_run=False)
-            _maybe_run_reflector_catchup(config)
-
-        _run_bounded_observer_work(config, _work)
+        _run_bounded_observer_call(config, _run_claude_checkpoint_observer, config, transcript)
         _update_checkpoint_state(
             config.claude_checkpoint_state_path,
             transcript,
@@ -6507,30 +6557,37 @@ def _schtasks_job_statuses(config: Config, targets: str = "both") -> list[dict[s
     return jobs
 
 
+def _run_grok_checkpoint_observer(config: Config, transcript: Path) -> bool:
+    from .observe import observe_grok_transcript
+
+    return observe_grok_transcript(transcript, config) is not None
+
+
+def _run_all_grok_checkpoint_observers(config: Config) -> int:
+    from .observe import observe_all_grok
+
+    return len(observe_all_grok(config))
+
+
 @cli.command(hidden=True, name="grok-checkpoint")
 @click.option("--transcript", type=click.Path(path_type=Path), help="Specific Grok updates.jsonl to process")
 @click.pass_context
 def grok_checkpoint(ctx: click.Context, transcript: Path | None) -> None:
     """Observe Grok session transcripts (for use by SessionEnd/UserPromptSubmit/PreCompact hooks)."""
-    from .observe import observe_all_grok, observe_grok_transcript
-
     config = ctx.obj["config"]
 
     try:
         if transcript:
             transcript = Path(transcript).expanduser()
 
-            def _work() -> str | None:
-                return observe_grok_transcript(transcript, config)
-
-            result = _run_bounded_observer_work(config, _work)
-            if result:
+            processed = _run_bounded_observer_call(config, _run_grok_checkpoint_observer, config, transcript)
+            if processed:
                 click.echo(f"Grok checkpoint processed: {transcript}")
             else:
                 click.echo(f"No new Grok messages in {transcript}")
         else:
-            results = _run_bounded_observer_work(config, lambda: observe_all_grok(config))
-            click.echo(f"Grok checkpoint: processed {len(results)} sessions")
+            processed_count = _run_bounded_observer_call(config, _run_all_grok_checkpoint_observers, config)
+            click.echo(f"Grok checkpoint: processed {processed_count} sessions")
     except ObserverWorkerBusy:
         click.echo("Grok checkpoint skipped: another background observer is already running.")
     except ObserverWorkerTimeout as e:
