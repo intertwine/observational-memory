@@ -11,12 +11,23 @@ from observational_memory.cli import (
     ObserverWorkerTimeout,
     _acquire_codex_checkpoint_lock,
     _observer_worker_lock_stale_seconds,
+    _observer_worker_max_rss_bytes,
     _release_codex_checkpoint_lock,
+    _run_bounded_observer_call,
+    _run_with_process_timeout,
     cli,
 )
 from observational_memory.config import Config
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _sleep_briefly() -> None:
+    time.sleep(5)
+
+
+def _return_value(_config: Config, value: int) -> int:
+    return value
 
 
 def _set_base_env(monkeypatch, tmp_path):
@@ -177,6 +188,41 @@ def test_observer_worker_lock_stale_default_tracks_timeout(monkeypatch):
     assert _observer_worker_lock_stale_seconds(timeout_seconds=300) == 360
 
 
+def test_observer_worker_max_rss_bytes_parses_env(monkeypatch):
+    monkeypatch.setenv("OM_OBSERVER_WORKER_MAX_RSS_MB", "128")
+
+    assert _observer_worker_max_rss_bytes() == 128 * 1024 * 1024
+
+
+def test_process_timeout_terminates_child_over_memory_cap(monkeypatch):
+    monkeypatch.setattr("observational_memory.cli._process_rss_bytes", lambda pid: 2 * 1024 * 1024)
+
+    try:
+        _run_with_process_timeout(_sleep_briefly, 5, max_rss_bytes=1024 * 1024)
+    except ObserverWorkerTimeout as exc:
+        assert "exceeded 1 MiB RSS" in str(exc)
+    else:
+        raise AssertionError("expected observer worker memory cap to terminate child")
+
+
+def test_bounded_observer_passes_memory_cap_to_process_timeout(monkeypatch, tmp_path):
+    config = Config(memory_dir=tmp_path / "memory")
+    calls = []
+
+    def fake_process_timeout(fn, timeout_seconds, *args, max_rss_bytes=None, **kwargs):
+        calls.append((timeout_seconds, max_rss_bytes, args, kwargs))
+        return fn(*args, **kwargs)
+
+    monkeypatch.setenv("OM_OBSERVER_WORKER_TIMEOUT_SECONDS", "17")
+    monkeypatch.setenv("OM_OBSERVER_WORKER_MAX_RSS_MB", "64")
+    monkeypatch.setattr("observational_memory.cli._run_with_process_timeout", fake_process_timeout)
+
+    result = _run_bounded_observer_call(config, _return_value, config, 42)
+
+    assert result == 42
+    assert calls == [(17, 64 * 1024 * 1024, (config, 42), {})]
+
+
 def test_codex_checkpoint_spawns_worker_and_records_state(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     runner = CliRunner()
@@ -276,6 +322,10 @@ def test_codex_checkpoint_worker_updates_state_and_releases_lock(monkeypatch, tm
 
     monkeypatch.setattr("observational_memory.observe.observe_codex_transcript", fake_observe)
     monkeypatch.setattr("observational_memory.cli._maybe_run_reflector_catchup", fake_catchup)
+    monkeypatch.setattr(
+        "observational_memory.cli._run_with_process_timeout",
+        lambda fn, timeout_seconds, *args, max_rss_bytes=None, **kwargs: fn(*args, **kwargs),
+    )
 
     config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
     config.ensure_memory_dir()
@@ -327,10 +377,10 @@ def test_codex_checkpoint_worker_marks_timeout_and_releases_lock(monkeypatch, tm
     transcript.parent.mkdir(parents=True, exist_ok=True)
     transcript.write_text(FIXTURES.joinpath("codex-transcript.jsonl").read_text())
 
-    def fake_timeout(fn, timeout_seconds):
+    def fake_timeout(fn, timeout_seconds, *args, max_rss_bytes=None, **kwargs):
         raise ObserverWorkerTimeout("boom")
 
-    monkeypatch.setattr("observational_memory.cli._run_with_wall_timeout", fake_timeout)
+    monkeypatch.setattr("observational_memory.cli._run_with_process_timeout", fake_timeout)
 
     config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
     config.ensure_memory_dir()

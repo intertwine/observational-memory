@@ -249,17 +249,18 @@ def test_bounded_observer_uses_process_timeout_on_windows(windows_env, monkeypat
     config = Config(memory_dir=windows_env["local_appdata"] / "observational-memory")
     calls = []
 
-    def fake_process_timeout(fn, timeout_seconds, *args, **kwargs):
-        calls.append((fn, timeout_seconds, args, kwargs))
+    def fake_process_timeout(fn, timeout_seconds, *args, max_rss_bytes=None, **kwargs):
+        calls.append((fn, timeout_seconds, max_rss_bytes, args, kwargs))
         return fn(*args, **kwargs)
 
     monkeypatch.setenv("OM_OBSERVER_WORKER_TIMEOUT_SECONDS", "17")
+    monkeypatch.setenv("OM_OBSERVER_WORKER_MAX_RSS_MB", "64")
     monkeypatch.setattr("observational_memory.cli._run_with_process_timeout", fake_process_timeout)
 
     result = _run_bounded_observer_call(config, _return_observer_value, config, 42)
 
     assert result == 42
-    assert calls == [(_return_observer_value, 17, (config, 42), {})]
+    assert calls == [(_return_observer_value, 17, 64 * 1024 * 1024, (config, 42), {})]
 
 
 # --- Install flow on Windows ---
@@ -614,7 +615,7 @@ def test_claude_checkpoint_worker_runs_observer(windows_env, monkeypatch, tmp_pa
     )
     monkeypatch.setattr(
         "observational_memory.cli._run_with_process_timeout",
-        lambda fn, timeout_seconds, *args, **kwargs: fn(*args, **kwargs),
+        lambda fn, timeout_seconds, *args, max_rss_bytes=None, **kwargs: fn(*args, **kwargs),
     )
 
     runner = CliRunner()
