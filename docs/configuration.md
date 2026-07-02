@@ -465,12 +465,14 @@ Bound background observer workers:
 ```bash
 OM_OBSERVER_WORKER_TIMEOUT_SECONDS=300
 OM_OBSERVER_WORKER_LOCK_STALE_SECONDS=360
+OM_OBSERVER_WORKER_MAX_RSS_MB=4096
 ```
 
 Installed hook and scheduler jobs use `om observe-worker`, which allows only
-one background observer at a time and stops work that exceeds the timeout.
-POSIX workers use SIGALRM; Windows workers run observer work in a child
-process that the parent terminates when the timeout expires.
+one background observer at a time and stops work that exceeds the timeout or
+RSS ceiling. Workers run observer work in a child process that the parent
+terminates when the timeout or memory ceiling expires. Set
+`OM_OBSERVER_WORKER_MAX_RSS_MB=0` to disable the RSS ceiling.
 Manual `om observe ...` commands are not forced through that background lane.
 
 ## Search Backend

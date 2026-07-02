@@ -273,6 +273,35 @@ class TestCodexObserver:
         assert len(messages) == 4
         assert messages[0].content.startswith("I'm using us-west-2")
 
+    def test_codex_messages_since_cursor_accepts_legacy_cursor_at_eof(self, tmp_path):
+        transcript = tmp_path / "codex.jsonl"
+        transcript.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "turn_context", "payload": {"role": "system", "content": "ignore"}}),
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {"type": "message", "role": "user", "content": "one"},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {"type": "message", "role": "assistant", "content": "two"},
+                        }
+                    ),
+                    json.dumps({"type": "response_item", "payload": {"type": "function_call", "name": "exec"}}),
+                ]
+            )
+            + "\n"
+        )
+
+        messages, total = _codex_messages_since_cursor(transcript, {str(transcript): 4})
+
+        assert total == 2
+        assert messages == []
+
 
 class TestHermesObserver:
     @patch("observational_memory.observe.run_observer")

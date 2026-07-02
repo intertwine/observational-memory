@@ -98,7 +98,7 @@ def observe_claude_transcript(
     dry_run: bool = False,
 ) -> str | None:
     """Run observer on a specific Claude Code transcript."""
-    from .transcripts.claude import parse_transcript
+    from .transcripts.claude import last_message_uuid, parse_transcript
 
     if config is None:
         config = Config()
@@ -115,20 +115,8 @@ def observe_claude_transcript(
     result = run_observer(messages, config, dry_run, transcript_path=transcript_path, source="claude")
 
     if result and not dry_run:
-        # Update cursor to last message UUID — find it from the transcript
-        import json
-
-        last_uuid = None
-        for line in reversed(transcript_path.read_text().splitlines()):
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-                if entry.get("type") in ("user", "assistant") and entry.get("uuid"):
-                    last_uuid = entry["uuid"]
-                    break
-            except json.JSONDecodeError:
-                continue
+        # Update cursor to last message UUID without loading large transcripts.
+        last_uuid = last_message_uuid(transcript_path)
         if last_uuid:
             cursor[cursor_key] = last_uuid
             config.save_cursor(cursor)
@@ -366,30 +354,31 @@ def observe_all_codex(config: Config | None = None, dry_run: bool = False) -> li
 
 def _codex_messages_since_cursor(transcript_path: Path, cursor: dict) -> tuple[list[Message], int]:
     """Return new Codex messages for a transcript plus the total parsed count."""
-    from .transcripts.codex import line_offset_to_message_count, parse_transcript
+    from .transcripts.codex import line_offset_to_message_count, parse_transcript_with_count
 
     cursor_key = str(transcript_path)
     after_index = cursor.get(cursor_key)
     if not isinstance(after_index, int):
         after_index = 0
 
-    all_messages = parse_transcript(transcript_path)
-    if not all_messages:
+    messages, total_messages = parse_transcript_with_count(transcript_path, after_index=after_index)
+    if not messages and total_messages <= 0:
         return [], 0
 
-    if after_index and after_index > len(all_messages):
+    if after_index and after_index > total_messages:
         # Backward compatibility: older cursors tracked raw JSONL line offsets
         # rather than parsed message counts. Convert by counting how many of the
         # first N file lines are actual messages. If the converted index is still
         # out of range (common when non-message records inflate line counts),
         # fall back to 0 so we safely reprocess rather than skip messages.
         migrated_index = line_offset_to_message_count(transcript_path, after_index)
-        if 0 <= migrated_index < len(all_messages):
+        if 0 <= migrated_index <= total_messages:
             after_index = migrated_index
         else:
             after_index = 0
+        messages, total_messages = parse_transcript_with_count(transcript_path, after_index=after_index)
 
-    return all_messages[after_index:], len(all_messages)
+    return messages, total_messages
 
 
 def _chunk_messages(messages: list[Message], chunk_size: int = 200) -> list[list[Message]]:
