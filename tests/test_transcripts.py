@@ -5,12 +5,18 @@ import logging
 import time
 from pathlib import Path
 
+from observational_memory.transcripts import codex as codex_transcripts
+from observational_memory.transcripts.claude import (
+    count_messages as count_claude_messages,
+)
 from observational_memory.transcripts.claude import (
     find_all_transcripts,
+    last_message_uuid,
 )
 from observational_memory.transcripts.claude import (
     parse_transcript as parse_claude,
 )
+from observational_memory.transcripts.codex import count_messages as count_codex_messages
 from observational_memory.transcripts.codex import line_offset_to_message_count
 from observational_memory.transcripts.codex import parse_transcript as parse_codex
 from observational_memory.transcripts.hermes import parse_transcript as parse_hermes
@@ -49,6 +55,40 @@ class TestClaudeParser:
         first_uuid = "msg-001"
         partial = parse_claude(FIXTURES / "claude-transcript.jsonl", after_uuid=first_uuid)
         assert len(partial) < len(all_messages)
+
+    def test_count_and_last_uuid_match_parser_without_read_text(self, monkeypatch, tmp_path):
+        transcript = tmp_path / "claude.jsonl"
+        transcript.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "system", "uuid": "system-1", "message": {"content": "ignore"}}),
+                    json.dumps({"type": "user", "uuid": "u1", "message": {"role": "user", "content": "hello"}}),
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "uuid": "a1",
+                            "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+                        }
+                    ),
+                    json.dumps({"type": "user", "uuid": "meta", "isMeta": True, "message": {"content": "skip"}}),
+                    "{bad json",
+                ]
+            )
+            + "\n"
+        )
+
+        original_read_text = Path.read_text
+
+        def fail_read_text(path, *args, **kwargs):
+            if path == transcript:
+                raise AssertionError("Claude parser/count helpers should stream JSONL files")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+        assert len(parse_claude(transcript)) == 2
+        assert count_claude_messages(transcript) == 2
+        assert last_message_uuid(transcript) == "meta"
 
     def test_user_content_preserved(self):
         messages = parse_claude(FIXTURES / "claude-transcript.jsonl")
@@ -120,6 +160,53 @@ class TestCodexParser:
         all_messages = parse_codex(FIXTURES / "codex-transcript.jsonl")
         partial = parse_codex(FIXTURES / "codex-transcript.jsonl", after_index=3)
         assert len(partial) < len(all_messages)
+
+    def test_jsonl_parser_streams_from_message_cursor_without_read_text(self, monkeypatch, tmp_path):
+        transcript = tmp_path / "codex.jsonl"
+        transcript.write_text(
+            "\n".join(
+                [
+                    json.dumps({"type": "turn_context", "payload": {"role": "system", "content": "ignore"}}),
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {"type": "message", "role": "user", "content": "one"},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {"type": "message", "role": "assistant", "content": "two"},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {"type": "message", "role": "user", "content": "three"},
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        original_read_text = Path.read_text
+
+        def fail_read_text(path, *args, **kwargs):
+            if path == transcript:
+                raise AssertionError("Codex JSONL parsing should stream instead of read_text")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+        messages = parse_codex(transcript, after_index=1)
+        assert [message.content for message in messages] == ["two", "three"]
+
+        def fail_message_construction(*args, **kwargs):
+            raise AssertionError("Codex message counting should not retain parsed Message objects")
+
+        monkeypatch.setattr(codex_transcripts, "Message", fail_message_construction)
+        assert count_codex_messages(transcript) == 3
 
     def test_user_content_preserved(self):
         messages = parse_codex(FIXTURES / "codex-transcript.jsonl")

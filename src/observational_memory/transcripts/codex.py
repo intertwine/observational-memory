@@ -74,6 +74,27 @@ def _extract_jsonl_records(raw: str, source_path: Path) -> list[dict]:
     return records
 
 
+def _iter_jsonl_records(source_path: Path):
+    """Yield JSONL records from *source_path* without retaining the transcript."""
+    with source_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as exc:
+                _LOGGER.warning(
+                    "Skipping malformed JSON line in Codex transcript %s: %s",
+                    source_path,
+                    exc,
+                )
+                continue
+            if isinstance(entry, dict) and "type" not in entry and isinstance(entry.get("items"), list):
+                yield from _coerce_records(entry["items"])
+                continue
+            yield from _coerce_records(entry)
+
+
 def _extract_message_entry(entry: dict) -> tuple[str, str, str] | None:
     """Normalize a raw Codex record into ``(role, content, timestamp)``."""
     role = entry.get("role", "")
@@ -112,34 +133,35 @@ def line_offset_to_message_count(path: Path, line_offset: int) -> int:
     if path.suffix.lower() != ".jsonl":
         return 0
 
+    message_count = 0
     try:
-        lines = path.read_text().splitlines()[:line_offset]
+        with path.open(encoding="utf-8") as handle:
+            for index, line in enumerate(handle):
+                if index >= line_offset:
+                    break
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    _LOGGER.warning(
+                        "Skipping malformed JSON line while migrating Codex cursor for %s: %s",
+                        path,
+                        exc,
+                    )
+                    continue
+
+                for item in _coerce_records(entry):
+                    if _extract_message_entry(item) is not None:
+                        message_count += 1
     except OSError as exc:
         _LOGGER.warning("Failed to read Codex session %s for cursor migration: %s", path, exc)
         return 0
 
-    message_count = 0
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError as exc:
-            _LOGGER.warning(
-                "Skipping malformed JSON line while migrating Codex cursor for %s: %s",
-                path,
-                exc,
-            )
-            continue
-
-        for item in _coerce_records(entry):
-            if _extract_message_entry(item) is not None:
-                message_count += 1
-
     return message_count
 
 
-def parse_transcript(path: Path, after_index: int | None = None) -> list[Message]:
+def parse_transcript_with_count(path: Path, after_index: int | None = None) -> tuple[list[Message], int]:
     """Parse a Codex session transcript into Messages.
 
     Codex sessions can be JSONL or full JSON documents. The parser handles both
@@ -154,10 +176,14 @@ def parse_transcript(path: Path, after_index: int | None = None) -> list[Message
     """
     messages: list[Message] = []
     start = max(after_index or 0, 0)
+    total_messages = 0
 
-    records = _extract_records(path.read_text(), path)
+    if path.suffix.lower() == ".jsonl":
+        records = _iter_jsonl_records(path)
+    else:
+        records = _extract_records(path.read_text(), path)
 
-    for entry in records[start:]:
+    for entry in records:
         if not isinstance(entry, dict):
             continue
 
@@ -165,7 +191,10 @@ def parse_transcript(path: Path, after_index: int | None = None) -> list[Message
         if extracted is None:
             continue
         role, content, timestamp = extracted
-        if content:
+        if not content:
+            continue
+
+        if total_messages >= start:
             messages.append(
                 Message(
                     role=role,
@@ -174,8 +203,40 @@ def parse_transcript(path: Path, after_index: int | None = None) -> list[Message
                     source="codex",
                 )
             )
+        total_messages += 1
+
+    return messages, total_messages
+
+
+def parse_transcript(path: Path, after_index: int | None = None) -> list[Message]:
+    """Parse a Codex session transcript into Messages.
+
+    Codex sessions can be JSONL or full JSON documents. The parser handles both
+    formats and normalizes common message structures.
+    """
+    messages, _ = parse_transcript_with_count(path, after_index=after_index)
 
     return messages
+
+
+def count_messages(path: Path) -> int:
+    """Return the number of normalized Codex messages without retaining them."""
+    if path.suffix.lower() == ".jsonl":
+        records = _iter_jsonl_records(path)
+    else:
+        records = _extract_records(path.read_text(), path)
+
+    count = 0
+    for entry in records:
+        if not isinstance(entry, dict):
+            continue
+        extracted = _extract_message_entry(entry)
+        if extracted is None:
+            continue
+        _, content, _ = extracted
+        if content:
+            count += 1
+    return count
 
 
 def _extract_content(entry: dict) -> str:

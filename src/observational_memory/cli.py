@@ -3153,8 +3153,7 @@ def _spawn_detached(argv: list[str], cwd: str | Path | None = None) -> int | Non
 def claude_checkpoint(ctx: click.Context) -> None:
     """Queue a Claude Code session checkpoint from a hook payload.
 
-    Mirrors the POSIX ``session-end.sh`` hook: parses the JSON payload from
-    stdin, throttles in-session checkpoints by
+    Parses the JSON hook payload from stdin, throttles in-session checkpoints by
     ``OM_SESSION_OBSERVER_INTERVAL_SECONDS`` (skipping force events
     SessionEnd/Stop), holds a per-transcript filesystem lock, persists
     state to ``.session-observer-state.json``, and spawns a detached
@@ -4825,18 +4824,18 @@ def _quote_hook_executable(path: str) -> str:
 def _claude_hook_commands() -> tuple[str, str]:
     """Return (session_start_command, checkpoint_command) for Claude Code hooks.
 
-    On Windows we cannot rely on bash + jq, so we point hooks at the ``om``
-    CLI directly (``om context`` for SessionStart, ``om claude-checkpoint``
-    for the checkpoint events). On POSIX we keep the bash hook scripts that
-    have been the production behavior for some time.
+    Checkpoint hooks must go through ``om claude-checkpoint`` on every platform
+    so they share the global observer slot and timeout with background workers.
+    POSIX keeps the startup shell script because it passes Claude-specific
+    context flags; Windows uses direct CLI invocations because bash is absent.
     """
+    om_path = _find_om_path() or "om"
+    quoted = _quote_hook_executable(om_path)
     if sys.platform == "win32":
-        om_path = _find_om_path() or "om"
-        quoted = _quote_hook_executable(om_path)
         return f"{quoted} context", f"{quoted} claude-checkpoint"
 
     hooks_dir = Path(__file__).parent / "hooks" / "claude"
-    return str(hooks_dir / "session-start.sh"), str(hooks_dir / "session-end.sh")
+    return str(hooks_dir / "session-start.sh"), f"{quoted} claude-checkpoint"
 
 
 def _grok_hook_commands() -> tuple[str, str]:
@@ -5605,26 +5604,26 @@ def _uninstall_codex(config: Config) -> None:
 
 def _count_codex_transcript_messages(transcript: Path) -> int:
     """Return the number of parsed Codex messages in a transcript."""
-    from .transcripts.codex import parse_transcript
+    from .transcripts.codex import count_messages
 
     if not transcript.exists():
         return 0
 
     try:
-        return len(parse_transcript(transcript))
+        return count_messages(transcript)
     except OSError:
         return 0
 
 
 def _count_claude_transcript_messages(transcript: Path) -> int:
     """Return the number of parsed Claude (or Cowork) messages in a transcript."""
-    from .transcripts.claude import parse_transcript
+    from .transcripts.claude import count_messages
 
     if not transcript.exists():
         return 0
 
     try:
-        return len(parse_transcript(transcript))
+        return count_messages(transcript)
     except OSError:
         return 0
 
