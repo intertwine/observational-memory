@@ -20,6 +20,7 @@ from .config import Config
 
 _OBSERVE_SOURCES = ["claude", "codex", "opencode", "kimi", "grok", "hermes", "cowork", "claude-memory", "all"]
 _OBSERVER_WORKER_SOURCES = _OBSERVE_SOURCES
+_OBSERVER_RSS_CHECK_INTERVAL_SECONDS = 1.0
 _T = TypeVar("_T")
 
 
@@ -29,6 +30,10 @@ class ObserverWorkerBusy(RuntimeError):
 
 class ObserverWorkerTimeout(BaseException):
     """Raised when background observer work exceeds its wall-clock budget."""
+
+
+class ObserverWorkerMemoryExceeded(ObserverWorkerTimeout):
+    """Raised when background observer work exceeds its RSS memory cap."""
 
 
 @click.group()
@@ -293,34 +298,6 @@ def _observer_worker_slot(config: Config, *, timeout_seconds: int | None = None)
         lock.release()
 
 
-def _run_with_wall_timeout(fn: Callable[[], _T], timeout_seconds: int) -> _T:
-    if timeout_seconds <= 0 or sys.platform == "win32":
-        return fn()
-
-    try:
-        import signal
-    except ImportError:
-        return fn()
-
-    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
-        return fn()
-
-    def _timeout_handler(signum, frame):
-        raise ObserverWorkerTimeout(f"background observer exceeded {timeout_seconds}s")
-
-    old_handler = signal.getsignal(signal.SIGALRM)
-    old_timer = signal.getitimer(signal.ITIMER_REAL)
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
-    try:
-        return fn()
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old_handler)
-        if old_timer[0] > 0:
-            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
-
-
 def _observer_process_entry(result_queue, fn: Callable[..., _T], args: tuple, kwargs: dict) -> None:
     try:
         result_queue.put(("ok", fn(*args, **kwargs)))
@@ -328,8 +305,49 @@ def _observer_process_entry(result_queue, fn: Callable[..., _T], args: tuple, kw
         result_queue.put(("error", f"{type(e).__name__}: {e}"))
 
 
+def _parse_tasklist_rss_bytes(csv_output: str) -> int | None:
+    """Parse the ``Mem Usage`` column from ``tasklist /FO CSV /NH`` output.
+
+    Expects a single CSV row shaped like
+    ``"python.exe","1234","Console","1","123,456 K"`` and returns the
+    working-set size in bytes. Returns ``None`` if the output doesn't match
+    that shape (for example, no process matched the requested PID).
+    """
+    import csv
+    import io
+
+    try:
+        rows = [row for row in csv.reader(io.StringIO(csv_output.strip())) if row]
+    except Exception:
+        return None
+    if not rows:
+        return None
+
+    mem_field = rows[0][-1].strip().replace(",", "").replace(" ", "")
+    if mem_field.endswith(("K", "k")):
+        mem_field = mem_field[:-1]
+    try:
+        return int(mem_field) * 1024
+    except ValueError:
+        return None
+
+
 def _process_rss_bytes(pid: int) -> int | None:
     import subprocess
+
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        return _parse_tasklist_rss_bytes(result.stdout)
 
     try:
         result = subprocess.run(
@@ -377,6 +395,7 @@ def _run_with_process_timeout(
     process.start()
 
     deadline = time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
+    next_rss_check = time.monotonic()
     while process.is_alive():
         wait_seconds = 0.25
         if deadline is not None:
@@ -390,13 +409,14 @@ def _run_with_process_timeout(
         if not process.is_alive():
             break
 
-        if max_rss > 0 and process.pid is not None:
+        if max_rss > 0 and process.pid is not None and time.monotonic() >= next_rss_check:
             rss = _process_rss_bytes(process.pid)
+            next_rss_check = time.monotonic() + _OBSERVER_RSS_CHECK_INTERVAL_SECONDS
             if rss is not None and rss > max_rss:
                 _terminate_observer_process(process)
                 limit_mb = max_rss // (1024 * 1024)
                 actual_mb = rss // (1024 * 1024)
-                raise ObserverWorkerTimeout(
+                raise ObserverWorkerMemoryExceeded(
                     f"background observer exceeded {limit_mb} MiB RSS (observed {actual_mb} MiB)"
                 )
 
@@ -3165,6 +3185,14 @@ def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
             status="skipped_busy",
         )
         return
+    except ObserverWorkerMemoryExceeded:
+        _update_codex_checkpoint_state(
+            config,
+            transcript,
+            message_count=_count_codex_transcript_messages(transcript),
+            status="memory_exceeded",
+        )
+        return
     except ObserverWorkerTimeout:
         _update_codex_checkpoint_state(
             config,
@@ -3342,6 +3370,14 @@ def claude_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
             transcript,
             message_count=_count_claude_transcript_messages(transcript),
             status="skipped_busy",
+        )
+        return
+    except ObserverWorkerMemoryExceeded:
+        _update_checkpoint_state(
+            config.claude_checkpoint_state_path,
+            transcript,
+            message_count=_count_claude_transcript_messages(transcript),
+            status="memory_exceeded",
         )
         return
     except ObserverWorkerTimeout:

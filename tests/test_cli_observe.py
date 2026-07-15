@@ -8,6 +8,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from observational_memory.cli import (
+    ObserverWorkerMemoryExceeded,
     ObserverWorkerTimeout,
     _acquire_codex_checkpoint_lock,
     _observer_worker_lock_stale_seconds,
@@ -24,6 +25,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def _sleep_briefly() -> None:
     time.sleep(5)
+
+
+def _sleep_a_bit() -> None:
+    time.sleep(1.2)
 
 
 def _return_value(_config: Config, value: int) -> int:
@@ -194,15 +199,48 @@ def test_observer_worker_max_rss_bytes_parses_env(monkeypatch):
     assert _observer_worker_max_rss_bytes() == 128 * 1024 * 1024
 
 
+def test_observer_worker_max_rss_bytes_falls_back_on_invalid_value(monkeypatch, capsys):
+    monkeypatch.setenv("OM_OBSERVER_WORKER_MAX_RSS_MB", "abc")
+
+    assert _observer_worker_max_rss_bytes() == 4096 * 1024 * 1024
+    assert "OM_OBSERVER_WORKER_MAX_RSS_MB" in capsys.readouterr().err
+
+
+def test_observer_worker_max_rss_bytes_falls_back_on_negative_value(monkeypatch, capsys):
+    monkeypatch.setenv("OM_OBSERVER_WORKER_MAX_RSS_MB", "-5")
+
+    assert _observer_worker_max_rss_bytes() == 4096 * 1024 * 1024
+    assert "OM_OBSERVER_WORKER_MAX_RSS_MB" in capsys.readouterr().err
+
+
 def test_process_timeout_terminates_child_over_memory_cap(monkeypatch):
     monkeypatch.setattr("observational_memory.cli._process_rss_bytes", lambda pid: 2 * 1024 * 1024)
 
     try:
         _run_with_process_timeout(_sleep_briefly, 5, max_rss_bytes=1024 * 1024)
-    except ObserverWorkerTimeout as exc:
+    except ObserverWorkerMemoryExceeded as exc:
         assert "exceeded 1 MiB RSS" in str(exc)
     else:
         raise AssertionError("expected observer worker memory cap to terminate child")
+
+
+def test_process_timeout_throttles_rss_sampling(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_rss(pid):
+        calls["count"] += 1
+        return 1024  # far under the cap; child should run to completion
+
+    monkeypatch.setattr("observational_memory.cli._process_rss_bytes", fake_rss)
+
+    result = _run_with_process_timeout(_sleep_a_bit, 30, max_rss_bytes=1024 * 1024 * 1024)
+
+    assert result is None
+    # 0.25s joins over ~1.2s of child runtime would sample RSS ~5+ times with no
+    # throttle; the 1s throttle should bring that down to roughly 2-3. Use a
+    # generous upper bound to avoid CI flakiness while still catching a
+    # regression back to per-iteration sampling.
+    assert 1 <= calls["count"] <= 4
 
 
 def test_bounded_observer_passes_memory_cap_to_process_timeout(monkeypatch, tmp_path):
@@ -393,6 +431,32 @@ def test_codex_checkpoint_worker_marks_timeout_and_releases_lock(monkeypatch, tm
     assert result.exit_code == 0, result.output
     state = json.loads(config.codex_checkpoint_state_path.read_text())
     assert state[str(transcript)]["status"] == "timeout"
+    assert not lock_path.exists()
+
+
+def test_codex_checkpoint_worker_marks_memory_exceeded_and_releases_lock(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+    transcript = tmp_path / "codex" / "sessions" / "session.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(FIXTURES.joinpath("codex-transcript.jsonl").read_text())
+
+    def fake_memory_exceeded(fn, timeout_seconds, *args, max_rss_bytes=None, **kwargs):
+        raise ObserverWorkerMemoryExceeded("boom")
+
+    monkeypatch.setattr("observational_memory.cli._run_with_process_timeout", fake_memory_exceeded)
+
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    config.ensure_memory_dir()
+    lock_path = config.codex_checkpoint_lock_dir / "test-lock"
+    lock_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("observational_memory.cli._codex_checkpoint_lock_path", lambda config, path: lock_path)
+
+    result = runner.invoke(cli, ["codex-checkpoint-worker", "--transcript", str(transcript)])
+
+    assert result.exit_code == 0, result.output
+    state = json.loads(config.codex_checkpoint_state_path.read_text())
+    assert state[str(transcript)]["status"] == "memory_exceeded"
     assert not lock_path.exists()
 
 

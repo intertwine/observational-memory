@@ -306,6 +306,53 @@ class TestCodexParser:
 
         assert line_offset_to_message_count(transcript, 4) == 2
 
+    def test_line_offset_counts_bare_items_wrapper_same_as_parser(self, tmp_path):
+        transcript = tmp_path / "codex-bare-items.jsonl"
+        transcript.write_text(
+            (json.dumps({"type": "turn_context", "payload": {"role": "system", "content": "ignore"}}) + "\n")
+            + (
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "role": "user",
+                                "content": "wrapped user",
+                                "timestamp": "2026-03-11T04:08:59.000Z",
+                            },
+                            {
+                                "role": "assistant",
+                                "content": "wrapped assistant",
+                                "timestamp": "2026-03-11T04:09:00.000Z",
+                            },
+                        ]
+                    }
+                )
+                + "\n"
+            )
+            + (
+                json.dumps(
+                    {
+                        "timestamp": "2026-03-11T04:09:01.000Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "third"}],
+                        },
+                    }
+                )
+                + "\n"
+            )
+        )
+
+        messages = parse_codex(transcript)
+        assert len(messages) == 3
+
+        # Line offset 2 covers the typed non-message line plus the bare items
+        # wrapper (which unwraps to two messages), so migration counting must
+        # agree with the parser's own message numbering for that wrapper shape.
+        assert line_offset_to_message_count(transcript, 2) == 2
+
 
 class TestHermesParser:
     def test_parse_full_transcript(self):

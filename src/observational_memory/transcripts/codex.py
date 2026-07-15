@@ -74,6 +74,17 @@ def _extract_jsonl_records(raw: str, source_path: Path) -> list[dict]:
     return records
 
 
+def _expand_line_records(entry: Any) -> list[dict]:
+    """Expand one parsed JSONL line into its constituent records.
+
+    Shared by ``_iter_jsonl_records`` and ``line_offset_to_message_count`` so
+    parser message counting and cursor-migration counting stay in lockstep.
+    """
+    if isinstance(entry, dict) and "type" not in entry and isinstance(entry.get("items"), list):
+        return _coerce_records(entry["items"])
+    return _coerce_records(entry)
+
+
 def _iter_jsonl_records(source_path: Path):
     """Yield JSONL records from *source_path* without retaining the transcript."""
     with source_path.open(encoding="utf-8") as handle:
@@ -89,10 +100,7 @@ def _iter_jsonl_records(source_path: Path):
                     exc,
                 )
                 continue
-            if isinstance(entry, dict) and "type" not in entry and isinstance(entry.get("items"), list):
-                yield from _coerce_records(entry["items"])
-                continue
-            yield from _coerce_records(entry)
+            yield from _expand_line_records(entry)
 
 
 def _extract_message_entry(entry: dict) -> tuple[str, str, str] | None:
@@ -151,7 +159,7 @@ def line_offset_to_message_count(path: Path, line_offset: int) -> int:
                     )
                     continue
 
-                for item in _coerce_records(entry):
+                for item in _expand_line_records(entry):
                     if _extract_message_entry(item) is not None:
                         message_count += 1
     except OSError as exc:
