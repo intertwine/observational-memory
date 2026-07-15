@@ -17,29 +17,25 @@ Observational Memory, or `om`, watches what you do with Claude Code, Codex, Open
 - **One memory across agents.** Switch tools without losing context.
 - **Your memory is yours.** Plain Markdown files on your machine — readable, searchable, backed up, never silently uploaded.
 
-## New in v0.9.0
+## New in v0.9.1
 
-v0.8.0 made memory trustworthy. v0.9.0 makes that memory **broader and safer to leave running**:
+v0.9.0 put background observation in a bounded worker lane. v0.9.1 closes the paths that could still slip past it:
 
-- **OpenCode support** - `om install --opencode` installs a global OpenCode plugin plus an `AGENTS.md` fallback, so OpenCode sessions can receive bounded startup context and write message events back into OM-owned logs.
-- **Kimi Code CLI support** - `om install --kimi` wires Kimi lifecycle hooks for startup context and prompt/subagent/failure checkpoints without scraping private provider data.
-- **Bounded background observation** - installed hooks and scheduler backstops now use a single `om observe-worker` lane with concurrency control, timeouts, stale-lock recovery, atomic writes, and a Claude transcript backstop.
-- **Public roadmap additions** - new plans cover optional OKF import/export, signed binary and desktop installers, and a future desktop coordination layer.
+- **Claude checkpoints use the bounded lane on every platform** - `om install --claude` now wires hooks to route through `om claude-checkpoint` everywhere instead of spawning direct observe processes from a shell script.
+- **Background workers get a memory ceiling** - a once-per-second check stops any background worker found over `OM_OBSERVER_WORKER_MAX_RSS_MB` (default 4096 MiB); workers stopped for memory are reported as `memory_exceeded`, distinct from `timeout`.
+- **Transcript scanning streams** - Claude and Codex JSONL parsing and counting read line by line instead of loading whole transcripts into memory.
 
-OM Mail remains an **experimental** preview from v0.8.0: agents can exchange signed notes, encrypted context packs, and recall requests over email, but handshake tokens, live listening, digests, and team trust roots are deferred to a future 0.x release. [See how it works](docs/mail-memory.md).
-
-Aside browser support is also under active development in draft PR [#98](https://github.com/intertwine/observational-memory/pull/98); it is not part of v0.9.0.
-
-Everything is additive and defaults are unchanged. Full details: [v0.9.0 release notes](docs/RELEASE-0.9.0.md).
-
-**Upgrading from 0.6.x or 0.7.x?**
+Upgrading:
 
 ```bash
 brew upgrade observational-memory   # or: uv tool upgrade observational-memory
+om install --claude
 om doctor
 ```
 
-No config changes needed. New integrations are opt-in unless you run `om install --all`; installed background observers become more conservative and skip when another worker is already running.
+The `om install --claude` step matters this time: it switches your installed hooks to the bounded lane. Full details: [v0.9.1 release notes](docs/RELEASE-0.9.1.md).
+
+v0.9.1 builds on v0.9.0, which added OpenCode support, Kimi Code CLI support, and the bounded observer lane — see the [v0.9.0 release notes](docs/RELEASE-0.9.0.md).
 
 ## Quick Install
 
@@ -199,7 +195,7 @@ Out-of-tree integrations have first-class seams: mail providers and CLI add-ons 
 
 ## Version
 
-Current release: **v0.9.0** — [release notes](docs/RELEASE-0.9.0.md). Built on v0.8.0's trustworthy-memory release, v0.7.0's section-targeted reflection, and the v0.6.x usage/budget and async-Batch subsystems. Maintainers: the release workflow lives in [docs/MAINTAINERS.md](docs/MAINTAINERS.md).
+Current release: **v0.9.1** — [release notes](docs/RELEASE-0.9.1.md). Built on v0.9.0's broader bounded agent memory, v0.8.0's trustworthy-memory release, and v0.7.0's section-targeted reflection. Maintainers: the release workflow lives in [docs/MAINTAINERS.md](docs/MAINTAINERS.md).
 
 ## Contributing
 
