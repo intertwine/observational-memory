@@ -129,6 +129,25 @@ def _extract_message_entry(entry: dict) -> tuple[str, str, str] | None:
     return None
 
 
+def _extract_counted_message(entry: Any) -> tuple[str, str, str] | None:
+    """Extract ``(role, content, timestamp)`` only when *entry* counts as a message.
+
+    Single source of truth for the parser, ``count_messages``, and
+    ``line_offset_to_message_count`` so message numbering and legacy cursor
+    migration cannot drift: entries with empty extracted content are excluded
+    everywhere.
+    """
+    if not isinstance(entry, dict):
+        return None
+    extracted = _extract_message_entry(entry)
+    if extracted is None:
+        return None
+    _, content, _ = extracted
+    if not content:
+        return None
+    return extracted
+
+
 def line_offset_to_message_count(path: Path, line_offset: int) -> int:
     """Translate a legacy raw line cursor into a message index.
 
@@ -160,7 +179,7 @@ def line_offset_to_message_count(path: Path, line_offset: int) -> int:
                     continue
 
                 for item in _expand_line_records(entry):
-                    if _extract_message_entry(item) is not None:
+                    if _extract_counted_message(item) is not None:
                         message_count += 1
     except OSError as exc:
         _LOGGER.warning("Failed to read Codex session %s for cursor migration: %s", path, exc)
@@ -192,15 +211,10 @@ def parse_transcript_with_count(path: Path, after_index: int | None = None) -> t
         records = _extract_records(path.read_text(), path)
 
     for entry in records:
-        if not isinstance(entry, dict):
-            continue
-
-        extracted = _extract_message_entry(entry)
+        extracted = _extract_counted_message(entry)
         if extracted is None:
             continue
         role, content, timestamp = extracted
-        if not content:
-            continue
 
         if total_messages >= start:
             messages.append(
@@ -236,13 +250,7 @@ def count_messages(path: Path) -> int:
 
     count = 0
     for entry in records:
-        if not isinstance(entry, dict):
-            continue
-        extracted = _extract_message_entry(entry)
-        if extracted is None:
-            continue
-        _, content, _ = extracted
-        if content:
+        if _extract_counted_message(entry) is not None:
             count += 1
     return count
 
