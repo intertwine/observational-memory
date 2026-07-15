@@ -4,10 +4,11 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.9.0`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.9.1`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
 
 Current important features:
 
+- v0.9.1 theme — hardened background observation: Claude checkpoints in the bounded lane on every platform, streaming transcript scans, and a worker memory ceiling (`OM_OBSERVER_WORKER_MAX_RSS_MB`) with distinct `memory_exceeded` status (see `docs/RELEASE-0.9.1.md`)
 - v0.9.0 theme — broader, bounded agent memory: OpenCode and Kimi support plus bounded background observers (see `docs/RELEASE-0.9.0.md`)
 - v0.8.0 theme — trustworthy memory: durable, provable, conversational (see `docs/RELEASE-0.8.0.md`)
 - `om backup` / `om restore`: host-local snapshots, automatic pre-reflect safety snapshot, rotating retention, byte-faithful restore
@@ -149,4 +150,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-`v0.9.0` has release notes in `docs/RELEASE-0.9.0.md`. Future release steps require explicit user approval.
+`v0.9.1` has release notes in `docs/RELEASE-0.9.1.md`. Future release steps require explicit user approval.
