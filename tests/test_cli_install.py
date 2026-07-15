@@ -11,6 +11,7 @@ import click
 from click.testing import CliRunner
 
 from observational_memory.cli import (
+    _claude_hook_commands,
     _codex_hooks_feature_enabled,
     _cron_job_keys_for_targets,
     _desired_cron_jobs,
@@ -225,6 +226,23 @@ def test_install_cowork_copies_valid_plugin(monkeypatch, tmp_path):
     assert json.loads((plugin_dir / "version.json").read_text()) == {"version": om_version}
     assert os.access(plugin_dir / "hooks" / "scripts" / "session-start.sh", os.X_OK)
     assert os.access(plugin_dir / "hooks" / "scripts" / "session-end.sh", os.X_OK)
+
+
+def test_claude_posix_checkpoint_hook_uses_bounded_cli(monkeypatch):
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+
+    session_start_cmd, checkpoint_cmd = _claude_hook_commands()
+
+    assert session_start_cmd.endswith("session-start.sh")
+    assert checkpoint_cmd == "/tmp/bin/om claude-checkpoint"
+    assert "session-end.sh" not in checkpoint_cmd
+
+
+def test_claude_session_end_script_delegates_to_checkpoint_without_direct_observe():
+    script = (Path(__file__).resolve().parents[1] / "src/observational_memory/hooks/claude/session-end.sh").read_text()
+
+    assert "claude-checkpoint" in script
+    assert " observe --transcript " not in script
 
 
 def test_cowork_target_does_not_manage_scheduler_jobs(monkeypatch, tmp_path):

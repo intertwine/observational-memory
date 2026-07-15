@@ -13,8 +13,12 @@ om install --claude
 What gets installed:
 
 - `SessionStart` hook: calls `om context`
-- `SessionEnd` hook: observes the transcript
-- `UserPromptSubmit` and `PreCompact` hooks: run throttled checkpoints
+- `SessionEnd` hook: queues a bounded observe pass through `om claude-checkpoint`
+- `UserPromptSubmit` and `PreCompact` hooks: run throttled checkpoints through the same bounded path
+
+All checkpoint events share one background observer slot, a time limit, and a memory ceiling (see [Configuration](configuration.md)).
+
+Upgrading from v0.9.0 or earlier? Run `om install --claude` again so your hooks switch from the old shell script to `om claude-checkpoint` directly. The old script now hands off to the same bounded lane, and keeps working as long as the path your hooks point to still exists after the upgrade — if it does not (Homebrew cleans up old versioned paths), rerun `om install --claude`.
 
 Useful settings:
 

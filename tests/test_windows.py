@@ -18,6 +18,7 @@ from observational_memory import config as config_module
 from observational_memory.cli import (
     ObserverWorkerTimeout,
     _claude_hook_commands,
+    _process_rss_bytes,
     _resolve_scheduler_mode,
     _run_bounded_observer_call,
     _run_with_process_timeout,
@@ -249,17 +250,85 @@ def test_bounded_observer_uses_process_timeout_on_windows(windows_env, monkeypat
     config = Config(memory_dir=windows_env["local_appdata"] / "observational-memory")
     calls = []
 
-    def fake_process_timeout(fn, timeout_seconds, *args, **kwargs):
-        calls.append((fn, timeout_seconds, args, kwargs))
+    def fake_process_timeout(fn, timeout_seconds, *args, max_rss_bytes=None, **kwargs):
+        calls.append((fn, timeout_seconds, max_rss_bytes, args, kwargs))
         return fn(*args, **kwargs)
 
     monkeypatch.setenv("OM_OBSERVER_WORKER_TIMEOUT_SECONDS", "17")
+    monkeypatch.setenv("OM_OBSERVER_WORKER_MAX_RSS_MB", "64")
     monkeypatch.setattr("observational_memory.cli._run_with_process_timeout", fake_process_timeout)
 
     result = _run_bounded_observer_call(config, _return_observer_value, config, 42)
 
     assert result == 42
-    assert calls == [(_return_observer_value, 17, (config, 42), {})]
+    assert calls == [(_return_observer_value, 17, 64 * 1024 * 1024, (config, 42), {})]
+
+
+# --- RSS sampling for the observer memory ceiling ---
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_process_rss_bytes_parses_tasklist_csv_on_windows(windows_env, monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return _FakeCompletedProcess(stdout='"python.exe","1234","Console","1","123,456 K"\r\n')
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = _process_rss_bytes(1234)
+
+    assert result == 123456 * 1024
+    assert calls == [["tasklist", "/FI", "PID eq 1234", "/FO", "CSV", "/NH"]]
+
+
+def test_process_rss_bytes_returns_none_for_malformed_tasklist_output(windows_env, monkeypatch):
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda argv, **kwargs: _FakeCompletedProcess(
+            stdout="INFO: No tasks are running which match the specified criteria.\r\n"
+        ),
+    )
+
+    assert _process_rss_bytes(9999) is None
+
+
+def test_process_rss_bytes_returns_none_for_empty_tasklist_output(windows_env, monkeypatch):
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _FakeCompletedProcess(stdout=""))
+
+    assert _process_rss_bytes(9999) is None
+
+
+def test_process_rss_bytes_returns_none_when_tasklist_exits_nonzero(windows_env, monkeypatch):
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda argv, **kwargs: _FakeCompletedProcess(returncode=1, stdout=""),
+    )
+
+    assert _process_rss_bytes(9999) is None
+
+
+def test_process_rss_bytes_uses_ps_on_posix(monkeypatch):
+    """Without the Windows platform patch, the POSIX ``ps`` path still runs."""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return _FakeCompletedProcess(stdout="123456\n")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = _process_rss_bytes(4321)
+
+    assert result == 123456 * 1024
+    assert calls == [["ps", "-o", "rss=", "-p", "4321"]]
 
 
 # --- Install flow on Windows ---
@@ -614,7 +683,7 @@ def test_claude_checkpoint_worker_runs_observer(windows_env, monkeypatch, tmp_pa
     )
     monkeypatch.setattr(
         "observational_memory.cli._run_with_process_timeout",
-        lambda fn, timeout_seconds, *args, **kwargs: fn(*args, **kwargs),
+        lambda fn, timeout_seconds, *args, max_rss_bytes=None, **kwargs: fn(*args, **kwargs),
     )
 
     runner = CliRunner()

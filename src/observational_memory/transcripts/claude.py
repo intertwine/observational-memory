@@ -22,7 +22,7 @@ def parse_transcript(path: Path, after_uuid: str | None = None, source: str = "c
     messages: list[Message] = []
     seen_after = after_uuid is None  # if no cursor, include everything
 
-    for line in path.read_text().splitlines():
+    for line in path.open(encoding="utf-8"):
         if not line.strip():
             continue
         try:
@@ -62,6 +62,48 @@ def parse_transcript(path: Path, after_uuid: str | None = None, source: str = "c
             )
 
     return messages
+
+
+def count_messages(path: Path) -> int:
+    """Return the number of normalized Claude Code messages without retaining them."""
+    count = 0
+
+    for line in path.open(encoding="utf-8"):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if entry.get("type") not in ("user", "assistant"):
+            continue
+        if entry.get("isMeta"):
+            continue
+
+        msg = entry.get("message", {})
+        if isinstance(msg, dict) and _extract_content(msg):
+            count += 1
+
+    return count
+
+
+def last_message_uuid(path: Path) -> str | None:
+    """Return the last Claude user/assistant UUID without loading the full file."""
+    last_uuid = None
+
+    for line in path.open(encoding="utf-8"):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if entry.get("type") in ("user", "assistant") and entry.get("uuid"):
+            last_uuid = entry["uuid"]
+
+    return last_uuid
 
 
 def _extract_content(msg: dict) -> str:

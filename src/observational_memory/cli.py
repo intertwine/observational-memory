@@ -20,6 +20,7 @@ from .config import Config
 
 _OBSERVE_SOURCES = ["claude", "codex", "opencode", "kimi", "grok", "hermes", "cowork", "claude-memory", "all"]
 _OBSERVER_WORKER_SOURCES = _OBSERVE_SOURCES
+_OBSERVER_RSS_CHECK_INTERVAL_SECONDS = 1.0
 _T = TypeVar("_T")
 
 
@@ -29,6 +30,10 @@ class ObserverWorkerBusy(RuntimeError):
 
 class ObserverWorkerTimeout(BaseException):
     """Raised when background observer work exceeds its wall-clock budget."""
+
+
+class ObserverWorkerMemoryExceeded(ObserverWorkerTimeout):
+    """Raised when background observer work exceeds its RSS memory cap."""
 
 
 @click.group()
@@ -227,6 +232,25 @@ def _observer_worker_timeout_seconds(default: int = 300) -> int:
     return seconds
 
 
+def _observer_worker_max_rss_bytes(default_mb: int = 4096) -> int:
+    raw_value = os.environ.get("OM_OBSERVER_WORKER_MAX_RSS_MB", str(default_mb))
+    try:
+        megabytes = int(raw_value)
+    except ValueError:
+        click.echo(
+            f"Warning: invalid OM_OBSERVER_WORKER_MAX_RSS_MB={raw_value!r}; using default {default_mb}.",
+            err=True,
+        )
+        return default_mb * 1024 * 1024
+    if megabytes < 0:
+        click.echo(
+            f"Warning: OM_OBSERVER_WORKER_MAX_RSS_MB must be >=0; using default {default_mb}.",
+            err=True,
+        )
+        return default_mb * 1024 * 1024
+    return megabytes * 1024 * 1024
+
+
 def _observer_worker_lock_stale_seconds(timeout_seconds: int | None = None) -> int:
     timeout = _observer_worker_timeout_seconds() if timeout_seconds is None else timeout_seconds
     default = max(timeout + 60, 60) if timeout > 0 else 600
@@ -274,34 +298,6 @@ def _observer_worker_slot(config: Config, *, timeout_seconds: int | None = None)
         lock.release()
 
 
-def _run_with_wall_timeout(fn: Callable[[], _T], timeout_seconds: int) -> _T:
-    if timeout_seconds <= 0 or sys.platform == "win32":
-        return fn()
-
-    try:
-        import signal
-    except ImportError:
-        return fn()
-
-    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
-        return fn()
-
-    def _timeout_handler(signum, frame):
-        raise ObserverWorkerTimeout(f"background observer exceeded {timeout_seconds}s")
-
-    old_handler = signal.getsignal(signal.SIGALRM)
-    old_timer = signal.getitimer(signal.ITIMER_REAL)
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
-    try:
-        return fn()
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old_handler)
-        if old_timer[0] > 0:
-            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
-
-
 def _observer_process_entry(result_queue, fn: Callable[..., _T], args: tuple, kwargs: dict) -> None:
     try:
         result_queue.put(("ok", fn(*args, **kwargs)))
@@ -309,26 +305,120 @@ def _observer_process_entry(result_queue, fn: Callable[..., _T], args: tuple, kw
         result_queue.put(("error", f"{type(e).__name__}: {e}"))
 
 
-def _run_with_process_timeout(fn: Callable[..., _T], timeout_seconds: int, *args, **kwargs) -> _T:
-    if timeout_seconds <= 0:
+def _parse_tasklist_rss_bytes(csv_output: str) -> int | None:
+    """Parse the ``Mem Usage`` column from ``tasklist /FO CSV /NH`` output.
+
+    Expects a single CSV row shaped like
+    ``"python.exe","1234","Console","1","123,456 K"`` and returns the
+    working-set size in bytes. Returns ``None`` if the output doesn't match
+    that shape (for example, no process matched the requested PID).
+    """
+    import csv
+    import io
+
+    try:
+        rows = [row for row in csv.reader(io.StringIO(csv_output.strip())) if row]
+    except Exception:
+        return None
+    if not rows:
+        return None
+
+    mem_field = rows[0][-1].strip().replace(",", "").replace(" ", "")
+    if mem_field.endswith(("K", "k")):
+        mem_field = mem_field[:-1]
+    try:
+        return int(mem_field) * 1024
+    except ValueError:
+        return None
+
+
+def _process_rss_bytes(pid: int) -> int | None:
+    import subprocess
+
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        return _parse_tasklist_rss_bytes(result.stdout)
+
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip()) * 1024
+    except ValueError:
+        return None
+
+
+def _terminate_observer_process(process) -> None:
+    process.terminate()
+    process.join(5)
+    if process.is_alive() and hasattr(process, "kill"):
+        process.kill()
+        process.join(1)
+
+
+def _run_with_process_timeout(
+    fn: Callable[..., _T],
+    timeout_seconds: int,
+    *args,
+    max_rss_bytes: int | None = None,
+    **kwargs,
+) -> _T:
+    max_rss = max_rss_bytes or 0
+    if timeout_seconds <= 0 and max_rss <= 0:
         return fn(*args, **kwargs)
 
     import multiprocessing
     import queue
+    import time
 
     context = multiprocessing.get_context("spawn")
     result_queue = context.Queue(maxsize=1)
     process = context.Process(target=_observer_process_entry, args=(result_queue, fn, args, kwargs))
     process.start()
-    process.join(timeout_seconds)
 
-    if process.is_alive():
-        process.terminate()
-        process.join(5)
-        if process.is_alive() and hasattr(process, "kill"):
-            process.kill()
-            process.join(1)
-        raise ObserverWorkerTimeout(f"background observer exceeded {timeout_seconds}s")
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
+    next_rss_check = time.monotonic()
+    while process.is_alive():
+        wait_seconds = 0.25
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_observer_process(process)
+                raise ObserverWorkerTimeout(f"background observer exceeded {timeout_seconds}s")
+            wait_seconds = min(wait_seconds, remaining)
+
+        process.join(wait_seconds)
+        if not process.is_alive():
+            break
+
+        if max_rss > 0 and process.pid is not None and time.monotonic() >= next_rss_check:
+            rss = _process_rss_bytes(process.pid)
+            next_rss_check = time.monotonic() + _OBSERVER_RSS_CHECK_INTERVAL_SECONDS
+            if rss is not None and rss > max_rss:
+                _terminate_observer_process(process)
+                limit_mb = max_rss // (1024 * 1024)
+                actual_mb = rss // (1024 * 1024)
+                raise ObserverWorkerMemoryExceeded(
+                    f"background observer exceeded {limit_mb} MiB RSS (observed {actual_mb} MiB)"
+                )
 
     try:
         status, payload = result_queue.get_nowait()
@@ -344,10 +434,9 @@ def _run_with_process_timeout(fn: Callable[..., _T], timeout_seconds: int, *args
 
 def _run_bounded_observer_call(config: Config, fn: Callable[..., _T], *args, **kwargs) -> _T:
     timeout = _observer_worker_timeout_seconds()
+    max_rss = _observer_worker_max_rss_bytes()
     with _observer_worker_slot(config, timeout_seconds=timeout):
-        if sys.platform == "win32":
-            return _run_with_process_timeout(fn, timeout, *args, **kwargs)
-        return _run_with_wall_timeout(lambda: fn(*args, **kwargs), timeout)
+        return _run_with_process_timeout(fn, timeout, *args, max_rss_bytes=max_rss, **kwargs)
 
 
 def _run_observe_worker_source(config: Config, source: str) -> int:
@@ -3096,6 +3185,14 @@ def codex_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
             status="skipped_busy",
         )
         return
+    except ObserverWorkerMemoryExceeded:
+        _update_codex_checkpoint_state(
+            config,
+            transcript,
+            message_count=_count_codex_transcript_messages(transcript),
+            status="memory_exceeded",
+        )
+        return
     except ObserverWorkerTimeout:
         _update_codex_checkpoint_state(
             config,
@@ -3153,8 +3250,7 @@ def _spawn_detached(argv: list[str], cwd: str | Path | None = None) -> int | Non
 def claude_checkpoint(ctx: click.Context) -> None:
     """Queue a Claude Code session checkpoint from a hook payload.
 
-    Mirrors the POSIX ``session-end.sh`` hook: parses the JSON payload from
-    stdin, throttles in-session checkpoints by
+    Parses the JSON hook payload from stdin, throttles in-session checkpoints by
     ``OM_SESSION_OBSERVER_INTERVAL_SECONDS`` (skipping force events
     SessionEnd/Stop), holds a per-transcript filesystem lock, persists
     state to ``.session-observer-state.json``, and spawns a detached
@@ -3274,6 +3370,14 @@ def claude_checkpoint_worker(ctx: click.Context, transcript: Path) -> None:
             transcript,
             message_count=_count_claude_transcript_messages(transcript),
             status="skipped_busy",
+        )
+        return
+    except ObserverWorkerMemoryExceeded:
+        _update_checkpoint_state(
+            config.claude_checkpoint_state_path,
+            transcript,
+            message_count=_count_claude_transcript_messages(transcript),
+            status="memory_exceeded",
         )
         return
     except ObserverWorkerTimeout:
@@ -4825,18 +4929,18 @@ def _quote_hook_executable(path: str) -> str:
 def _claude_hook_commands() -> tuple[str, str]:
     """Return (session_start_command, checkpoint_command) for Claude Code hooks.
 
-    On Windows we cannot rely on bash + jq, so we point hooks at the ``om``
-    CLI directly (``om context`` for SessionStart, ``om claude-checkpoint``
-    for the checkpoint events). On POSIX we keep the bash hook scripts that
-    have been the production behavior for some time.
+    Checkpoint hooks must go through ``om claude-checkpoint`` on every platform
+    so they share the global observer slot and timeout with background workers.
+    POSIX keeps the startup shell script because it passes Claude-specific
+    context flags; Windows uses direct CLI invocations because bash is absent.
     """
+    om_path = _find_om_path() or "om"
+    quoted = _quote_hook_executable(om_path)
     if sys.platform == "win32":
-        om_path = _find_om_path() or "om"
-        quoted = _quote_hook_executable(om_path)
         return f"{quoted} context", f"{quoted} claude-checkpoint"
 
     hooks_dir = Path(__file__).parent / "hooks" / "claude"
-    return str(hooks_dir / "session-start.sh"), str(hooks_dir / "session-end.sh")
+    return str(hooks_dir / "session-start.sh"), f"{quoted} claude-checkpoint"
 
 
 def _grok_hook_commands() -> tuple[str, str]:
@@ -5605,26 +5709,26 @@ def _uninstall_codex(config: Config) -> None:
 
 def _count_codex_transcript_messages(transcript: Path) -> int:
     """Return the number of parsed Codex messages in a transcript."""
-    from .transcripts.codex import parse_transcript
+    from .transcripts.codex import count_messages
 
     if not transcript.exists():
         return 0
 
     try:
-        return len(parse_transcript(transcript))
+        return count_messages(transcript)
     except OSError:
         return 0
 
 
 def _count_claude_transcript_messages(transcript: Path) -> int:
     """Return the number of parsed Claude (or Cowork) messages in a transcript."""
-    from .transcripts.claude import parse_transcript
+    from .transcripts.claude import count_messages
 
     if not transcript.exists():
         return 0
 
     try:
-        return len(parse_transcript(transcript))
+        return count_messages(transcript)
     except OSError:
         return 0
 
