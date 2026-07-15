@@ -300,7 +300,7 @@ If `intertwine/tap` is not tapped locally, `make brew-check` exits with instruct
 
 ## Current Release Process
 
-`v0.9.0` is the current release (OpenCode and Kimi support plus bounded background observer workers; see `docs/RELEASE-0.9.0.md`). The release process below should be followed for future releases.
+`v0.9.1` is the current release (bounded Claude checkpoints, streaming transcript scans, and a worker memory ceiling; see `docs/RELEASE-0.9.1.md`). The release process below should be followed for future releases.
 
 Before cutting a patch release:
 
