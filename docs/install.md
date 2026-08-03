@@ -5,7 +5,7 @@ This guide is for people installing Observational Memory for day-to-day use. Mai
 ## What You Need
 
 - Homebrew or `uv`
-- For the v0.10.0 native-memory bridge: macOS plus Claude Code and Codex native memory
+- For the v0.10.0 native-memory bridge: macOS and at least one eligible Claude project memory directory. Fixed Codex memory files are included when present.
 - For the full OM observation and reflection workflow: Python 3.11 or newer, a supported agent, and one LLM provider:
   - Anthropic API key
   - OpenAI API key
@@ -28,6 +28,7 @@ brew install intertwine/tap/observational-memory
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
 om bridge-native-memory
+om search --native-bridge "current project status"
 om doctor
 ```
 
@@ -38,10 +39,21 @@ uv tool install observational-memory
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
 om bridge-native-memory
+om search --native-bridge "current project status"
 om doctor
 ```
 
-`om native-bridge sources` lists eligible Claude project directory names with Markdown-file counts and reports whether the two fixed Codex source files are present. It does not show memory text or enroll anything. The first install requires at least one exact Claude project directory name from that list. Repeat `--claude-project` for more projects. OM saves the sorted selection in private config, so later installs and one-shot runs can omit it.
+`om native-bridge sources` lists eligible Claude project directory names with Markdown-file counts and reports whether the two fixed Codex source files are present. It does not show memory text or enroll anything. The first install requires at least one exact Claude project directory name from that list. Repeat `--claude-project` for more projects.
+
+Flags on `om install --native-bridge` replace the complete saved Claude selection. To add or remove a project, repeat every project you want to keep:
+
+```bash
+om install --native-bridge \
+  --claude-project "<first-project>" \
+  --claude-project "<second-project>"
+```
+
+Flags on `om bridge-native-memory` apply only to that one refresh. They do not change the saved selection, so the next scheduled run returns to the projects saved by `om install --native-bridge`.
 
 The bridge service checks for changed Claude Code and Codex memory summaries every 15 minutes. The one-shot command runs the same bounded path immediately. It does not read raw transcripts, call an LLM, or run reflection. Search its isolated index explicitly:
 
@@ -55,12 +67,22 @@ See [Native Claude and Codex memory](native-memory-bridge.md) for source scope, 
 
 ## Full OM Install
 
-Use the full installer when you want OM to observe supported agent sessions and maintain its own Markdown memory:
+Use the full installer when you want OM to observe supported agent sessions and maintain its own Markdown memory. On a fresh install:
 
 ```bash
 om install
 om doctor
 ```
+
+If the native bridge is already enabled, switch modes first so both schedulers are not left active:
+
+```bash
+om uninstall --native-bridge
+om install --both
+om doctor
+```
+
+If you previously used Cowork writers, also run `om install --cowork`. `--both` restores Claude Code and Codex only.
 
 Enterprise auth extras:
 
@@ -174,13 +196,14 @@ brew upgrade observational-memory   # or: uv tool upgrade observational-memory
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
 om bridge-native-memory
+om search --native-bridge "current project status"
 om status
 om doctor
 ```
 
 On an existing full install, `om install --native-bridge` boots out the four older macOS writer jobs: the Claude observer, Codex observer, Claude auto-memory scan, and reflector. Their plist files stay in place, but the bridge installer does not enable them.
 
-It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks. It preserves OM's read-only SessionStart context hooks and fallback, along with unrelated hook groups. If bridge setup fails, the installer restores the exact service and file state it found before it started.
+It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks. It preserves OM's read-only SessionStart context hooks and fallback, along with unrelated hook groups. If bridge setup fails, the installer attempts to restore prior service and managed-file state and reports `rollback incomplete` if any restoration step fails.
 
 Grok, Kimi, and OpenCode are outside this Claude↔Codex migration. If you installed their writer integrations earlier, they are unchanged and may still feed the full OM workflow.
 
@@ -224,13 +247,24 @@ om uninstall --native-bridge
 
 Both paths leave Claude Code and Codex native memory untouched. Private bridge config, derived index data, and receipts are also preserved for diagnosis or re-enabling. Uninstall is the feature-level rollback path if you want to keep OM v0.10.0 but remove the scheduled service.
 
+Remove the service and all bridge-derived local state while keeping the source memories untouched:
+
+```bash
+om uninstall --native-bridge --purge
+```
+
+This command first boots out the exact bridge service and verifies that it is absent. It then removes only the private bridge selection, derived generations, receipts, and bridge log files. It does not delete Claude Code or Codex native memory.
+
 Removing the bridge does not restart older writer jobs. To leave the bridge and explicitly return to the full Claude Code and Codex workflow:
 
 ```bash
 om uninstall --native-bridge
 om install --both
+om install --cowork   # only if you want to restore Cowork writers too
 om doctor
 ```
+
+`--both` restores Claude Code and Codex only.
 
 Remove hooks and scheduled jobs:
 
@@ -244,4 +278,4 @@ Remove memory files too:
 om uninstall --purge
 ```
 
-Use `--purge` carefully. It deletes local OM data.
+Use `--purge` carefully. `om uninstall --purge` deletes the full OM memory directory, but it is not a substitute for removing the separate bridge service and config. Run `om uninstall --native-bridge --purge` first when the bridge is installed.

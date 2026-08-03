@@ -12,6 +12,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -527,6 +528,51 @@ def uninstall_bridge_launchd(
     loaded, error = launchd_loaded(config.NATIVE_BRIDGE_LAUNCHD_LABEL, run_launchctl=run_launchctl)
     if loaded or error:
         raise NativeBridgeLifecycleError("native bridge uninstall could not be verified")
+
+
+def purge_bridge_state(config: Config) -> tuple[Path, ...]:
+    """Remove only private bridge config, derived data, receipts, and exact logs."""
+
+    roots = (config.native_bridge_config_dir, config.native_bridge_data_dir)
+    logs = (config.native_bridge_launchd_stdout_path, config.native_bridge_launchd_stderr_path)
+    existing_roots: list[Path] = []
+    existing_logs: list[Path] = []
+
+    # Validate every target before deleting the first byte. These directories
+    # are created private by the bridge, so a changed owner, type, or mode is a
+    # reason to stop and let the operator inspect the path.
+    for path in roots:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise NativeBridgeLifecycleError(f"unsafe native bridge purge root: {path}")
+        existing_roots.append(path)
+
+    for path in logs:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise NativeBridgeLifecycleError(f"unsafe native bridge purge file: {path}")
+        existing_logs.append(path)
+
+    removed: list[Path] = []
+    for path in existing_roots:
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            raise NativeBridgeLifecycleError(f"native bridge purge incomplete at {path}: {exc}") from exc
+        removed.append(path)
+    for path in existing_logs:
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise NativeBridgeLifecycleError(f"native bridge purge incomplete at {path}: {exc}") from exc
+        removed.append(path)
+    return tuple(removed)
 
 
 def quiesce_legacy_launchd(

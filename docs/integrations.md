@@ -153,7 +153,7 @@ hermes memory setup
 
 Choose `observational_memory` in the memory setup flow. Hermes memory providers are exclusive plugins, so activation happens through `memory.provider` instead of `plugins.enabled`.
 
-The plugin pins its own supported `observational-memory` version range. Its current release accepts OM 0.9.x and does not yet declare v0.10 support, so keep that host on its accepted line until a compatible plugin release passes validation. Check [the plugin repo](https://github.com/intertwine/hermes-observational-memory) before upgrading. Supported recent Hermes builds discover the plugin from `$HERMES_HOME/plugins/observational_memory`; no source-tree symlink is needed.
+The plugin pins its own supported `observational-memory` version range. For OM v0.10, use Hermes memory-provider plugin v1.5.1 or newer. Check [the plugin repo](https://github.com/intertwine/hermes-observational-memory) before upgrading. Supported recent Hermes builds discover the plugin from `$HERMES_HOME/plugins/observational_memory`; no source-tree symlink is needed.
 
 The plugin adds:
 
@@ -227,7 +227,7 @@ Notes:
 
 Grok has excellent native hook support and also reads `~/.claude/settings.json` for compatibility.
 
-The core integration below is installed by `om` and is separate from the independently released Grok marketplace plugin. The current marketplace plugin accepts OM 0.9.x and does not yet declare v0.10 support; check its release before upgrading a host that depends on it.
+The core integration below is installed by `om` and is separate from the independently released Grok marketplace plugin. For OM v0.10, use Grok marketplace plugin v0.1.2 or newer.
 
 Install:
 

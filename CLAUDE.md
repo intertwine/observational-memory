@@ -95,7 +95,7 @@ Important modules:
 - Cowork: macOS local plugin with hooks and `/recall`.
 - Hermes: core `om` supports manual transcript ingestion; live startup context, search, explicit writes, and OM Cluster participation come from the external `intertwine/hermes-observational-memory` Hermes memory-provider plugin.
 
-The v0.10 native bridge is macOS-only and covers Claude Code and Codex native memory. Bridge activation removes OM-managed Claude/Codex/Cowork writer hooks while preserving read-only SessionStart context; Grok, Kimi, and OpenCode are outside that migration scope. The separately released Hermes and Grok plugins currently cap OM below v0.10 and need independent compatibility releases before docs can claim support.
+The v0.10 native bridge is macOS-only and covers Claude Code and Codex native memory. Bridge activation removes OM-managed Claude/Codex/Cowork writer hooks while preserving read-only SessionStart context; Grok, Kimi, and OpenCode are outside that migration scope. OM v0.10 requires Hermes memory-provider plugin v1.5.1+ and Grok marketplace plugin v0.1.2+ on hosts that use those separately released plugins.
 
 Do not document Hermes as `om install` hook-installed. The Hermes plugin is installed and selected through Hermes itself.
 

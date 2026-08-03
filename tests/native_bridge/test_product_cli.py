@@ -121,6 +121,27 @@ def test_failed_activation_restores_config_hooks_and_legacy_state(monkeypatch, t
     assert restored == [legacy_state]
 
 
+def test_native_bridge_purge_uninstalls_and_verifies_service_first(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    _patch_cli_config(monkeypatch, config)
+    calls: list[str] = []
+    monkeypatch.setattr(lifecycle, "uninstall_bridge_launchd", lambda _config: calls.append("uninstall"))
+
+    def purge(_config):
+        assert calls == ["uninstall"]
+        calls.append("purge")
+        return (config.native_bridge_data_dir,)
+
+    monkeypatch.setattr(lifecycle, "purge_bridge_state", purge)
+
+    result = CliRunner().invoke(cli, ["uninstall", "--native-bridge", "--purge"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["uninstall", "purge"]
+    assert "absence verified" in result.output
+    assert "derived generations" in result.output
+
+
 def test_hook_quiescence_removes_only_om_writer_groups(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
     config.claude_settings_path.parent.mkdir(parents=True)

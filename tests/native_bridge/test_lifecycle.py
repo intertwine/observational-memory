@@ -24,6 +24,7 @@ from observational_memory.native_bridge.lifecycle import (
     launchd_override,
     launchd_plist_bytes,
     load_settings,
+    purge_bridge_state,
     quiesce_legacy_launchd,
     uninstall_bridge_launchd,
     write_settings,
@@ -258,6 +259,46 @@ def test_uninstall_removes_only_bridge_plist_and_preserves_private_state(monkeyp
     assert config.native_bridge_config_path.exists()
     assert config.native_bridge_data_dir.exists()
     assert fake.disabled[config.NATIVE_BRIDGE_LAUNCHD_LABEL] is False
+
+
+def test_purge_removes_only_private_bridge_state_and_exact_logs(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    write_settings(config, NativeBridgeSettings(("project-a",)))
+    config.native_bridge_data_dir.mkdir(parents=True, mode=0o700)
+    config.native_bridge_data_dir.chmod(0o700)
+    (config.native_bridge_data_dir / "receipt.json").write_text("private")
+    config.scheduler_log_dir.mkdir(parents=True)
+    config.native_bridge_launchd_stdout_path.write_text("stdout")
+    config.native_bridge_launchd_stderr_path.write_text("stderr")
+    unrelated = config.scheduler_log_dir / "reflect.out.log"
+    unrelated.write_text("keep")
+
+    removed = purge_bridge_state(config)
+
+    assert set(removed) == {
+        config.native_bridge_config_dir,
+        config.native_bridge_data_dir,
+        config.native_bridge_launchd_stdout_path,
+        config.native_bridge_launchd_stderr_path,
+    }
+    assert not config.native_bridge_config_dir.exists()
+    assert not config.native_bridge_data_dir.exists()
+    assert not config.native_bridge_launchd_stdout_path.exists()
+    assert not config.native_bridge_launchd_stderr_path.exists()
+    assert unrelated.read_text() == "keep"
+
+
+def test_purge_refuses_unsafe_root_before_removing_any_state(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    write_settings(config, NativeBridgeSettings(("project-a",)))
+    config.native_bridge_data_dir.mkdir(parents=True, mode=0o700)
+    config.native_bridge_data_dir.chmod(0o755)
+
+    with pytest.raises(NativeBridgeLifecycleError, match="unsafe native bridge purge root"):
+        purge_bridge_state(config)
+
+    assert config.native_bridge_config_path.exists()
+    assert config.native_bridge_data_dir.exists()
 
 
 def test_bridge_activation_quiesces_exactly_four_legacy_launchagents(monkeypatch, tmp_path):

@@ -24,21 +24,16 @@ brew install intertwine/tap/observational-memory   # use `brew upgrade observati
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
 om bridge-native-memory
+om search --native-bridge "what were we doing in this project?"
 om status
 om doctor
 ```
 
-Repeat `--claude-project` to include more than one Claude project. Later installs and one-shot runs reuse this private selection when you omit the flag.
-
-Retrieve the bridge's shared context:
-
-```bash
-om search --native-bridge "what were we doing in this project?"
-```
+The first install needs macOS and at least one eligible Claude project memory directory. Repeat `--claude-project` to include more than one. Codex memory joins the index when either fixed Codex memory file is present. Later installs and one-shot runs reuse the saved private Claude selection when you omit the flag.
 
 Bridge search is explicit. Ordinary `om search` and `om recall` keep using the full OM memory store and do not merge bridge results.
 
-The scheduled bridge checks for changes every 15 minutes. Resource admission and fixed time, memory, and input limits keep each run bounded. Bridge activation removes OM-managed Claude, Codex, and Cowork writer hooks and leaves their transcript observers and reflection jobs off, while preserving read-only startup context. Grok, Kimi, and OpenCode integrations are outside this migration scope.
+The bridge refreshes every 15 minutes and skips runs when the Mac is under pressure. Enabling it keeps OM's older Claude, Codex, and Cowork transcript writers off while preserving read-only startup context. It does not change Grok, Kimi, or OpenCode.
 
 See [Native Claude and Codex memory](docs/native-memory-bridge.md) for upgrade, disable, rollback, source scope, and troubleshooting steps.
 
@@ -47,13 +42,13 @@ See [Native Claude and Codex memory](docs/native-memory-bridge.md) for upgrade, 
 - **A native-first bridge.** Share Claude Code and Codex memory summaries without turning on transcript observation or reflection.
 - **A private local index.** The bridge accepts only its fixed source allowlist and writes to an isolated BM25 store on your machine.
 - **Bounded background refresh.** The macOS service runs every 15 minutes and skips work when the machine does not pass its resource checks.
-- **Visible lifecycle state.** `om status` and `om doctor` show bridge configuration, service state, verified-index readiness, and whether the older writers remain off.
+- **Visible lifecycle state.** `om status` shows bridge configuration, service state, and verified-index readiness. `om doctor` also verifies that the older writer services and hooks remain off.
 
 Full details: [v0.10.0 release notes](docs/RELEASE-0.10.0.md).
 
 ## Full OM Install
 
-The native bridge is the shortest Claude↔Codex path. If you also want OM to turn supported agent sessions into its own Markdown observations and reflections, use the full installer.
+The native bridge and the full transcript-based workflow are separate operating modes. If you want OM to build its own Markdown observations and reflections instead of using the bridge, use the full installer.
 
 macOS with Homebrew:
 
@@ -73,6 +68,16 @@ om doctor
 
 `om install` sets up Claude Code and Codex by default and asks which LLM provider to use. `--all` also adds OpenCode, Kimi, Grok, and Cowork. If you use Anthropic through Vertex AI or Bedrock, install with `uv tool install "observational-memory[enterprise]"` instead of Homebrew, then run `om install`.
 
+If the bridge is already enabled, switch modes explicitly:
+
+```bash
+om uninstall --native-bridge
+om install --both
+om doctor
+```
+
+If bridge activation removed a Cowork writer you still want, also run `om install --cowork`. `--both` covers Claude Code and Codex only.
+
 ## How Memory Flows
 
 ```mermaid
@@ -91,15 +96,15 @@ flowchart LR
 
 1. Install `om` on macOS.
 2. Run `om native-bridge sources`, then install with an exact Claude project name from that list.
-3. Run `om doctor`.
-4. Use Claude Code and Codex normally. Their native memory summaries remain the source of truth; the bridge refreshes its private index when they change.
-5. Retrieve bridge memory when you need it:
+3. Use Claude Code and Codex normally. Their native memory summaries remain the source of truth; the bridge refreshes its private index when they change.
+4. Retrieve bridge memory when you need it:
 
 ```bash
 om search --native-bridge "current project status"
 ```
 
-6. If you enable the full OM workflow later, you can also talk to OM's Markdown memory (experimental — flags may change) or inspect the startup pack:
+5. Run `om doctor` to verify the bridge and confirm that older OM writer services and hooks remain off.
+6. If you switch to the full OM workflow later, you can talk to OM's Markdown memory (experimental — flags may change) or inspect the startup pack:
 
 ```bash
 om talk --query "what was I working on last week?"
@@ -122,7 +127,17 @@ The full OM workflow keeps four plain-Markdown files you can read, search, and b
 | macOS / Linux | `~/.local/share/observational-memory/` | `~/.config/observational-memory/` |
 | Windows | `%LOCALAPPDATA%\observational-memory\` | `%APPDATA%\observational-memory\` |
 
+On macOS, bridge-only state is private and separate by default:
+
+| Bridge state | Default location |
+| --- | --- |
+| Source selection | `~/.config/observational-memory/native-bridge/config.json` |
+| Derived index and receipts | `~/.local/share/observational-memory/.native-memory-bridge/` |
+| Scheduled service | `~/Library/LaunchAgents/com.intertwine.observational-memory.native-bridge.plist` |
+
 ## Common Commands
+
+### Native Bridge
 
 ```bash
 om native-bridge sources        # list eligible projects without memory text
@@ -133,7 +148,14 @@ om native-bridge disable        # pause scheduled refresh
 om uninstall --native-bridge    # remove bridge service; keep sources/data
 om native-bridge status         # focused bridge state; add --json if needed
 om status
-om doctor                       # health check, including native-bridge state
+om doctor                       # also verifies older writers remain off
+```
+
+### Full OM Workflow
+
+These commands require the full installer and do not belong to the provider-free bridge mode:
+
+```bash
 om observe --source codex
 om reflect
 om reflect --check-conflicts    # reflect + flag silently-changed high-stakes facts
@@ -180,7 +202,7 @@ Do not sync `~/.local/share/observational-memory/` directly with Dropbox, iCloud
 | Hermes | External memory-provider plugin through [intertwine/hermes-observational-memory](https://github.com/intertwine/hermes-observational-memory), plus manual session-log ingestion. |
 | ChatGPT / Claude Managed Agents | Reviewed export bundles through `om export` — not live sync; `om` never silently writes hosted memory. |
 
-The separately released Hermes memory-provider and Grok marketplace plugins have their own OM version ranges. Check their current releases before upgrading OM on those hosts; their existing releases do not yet declare v0.10 compatibility.
+For OM v0.10, use Hermes memory-provider plugin v1.5.1 or newer and Grok marketplace plugin v0.1.2 or newer. Their compatibility is validated and released separately from the core package.
 
 Out-of-tree integrations have first-class seams: mail providers and CLI add-ons plug in through public entry points ([CONTRIBUTING.md](CONTRIBUTING.md)).
 

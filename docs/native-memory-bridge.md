@@ -13,17 +13,12 @@ brew install intertwine/tap/observational-memory   # use `brew upgrade observati
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
 om bridge-native-memory
+om search --native-bridge "what were we doing in this project?"
 om status
 om doctor
 ```
 
-`om native-bridge sources` lists eligible Claude project directory names with Markdown-file counts. It also reports whether the fixed Codex allowlist files are present. It never prints memory text or enrolls a source. The first install needs at least one exact Claude project name from that list. Repeat `--claude-project` to include more than one. OM saves the sorted selection in private config, so later installs and one-shot runs can omit it.
-
-Search the bridge index:
-
-```bash
-om search --native-bridge "what were we doing in this project?"
-```
+`om native-bridge sources` lists eligible Claude project directory names with Markdown-file counts. It also reports whether the fixed Codex allowlist files are present. It never prints memory text or enrolls a source. The first install needs macOS and at least one exact Claude project name from that list. Repeat `--claude-project` to include more than one. Codex memory is added whenever either fixed Codex file is present.
 
 Bridge retrieval is explicit. Ordinary `om search` and `om recall` continue to use the full OM memory store and do not merge bridge results.
 
@@ -62,6 +57,16 @@ om install --native-bridge --claude-project "<exact-directory-name-from-the-list
 
 No provider login or API key is needed.
 
+`--claude-project` on `om install --native-bridge` replaces the complete saved selection. To change it, repeat every project you want scheduled runs to keep:
+
+```bash
+om install --native-bridge \
+  --claude-project "<first-project>" \
+  --claude-project "<second-project>"
+```
+
+The same flag on `om bridge-native-memory` changes only that one refresh. The next scheduled run uses the selection saved by the installer.
+
 On a v0.9.1 full install, bridge activation:
 
 - boots out the OM Claude observer, Codex observer, Claude auto-memory, and reflector services;
@@ -72,7 +77,7 @@ On a v0.9.1 full install, bridge activation:
 
 Grok, Kimi, and OpenCode integrations are outside this Claude↔Codex migration. If you installed their writer integrations, they are unchanged.
 
-Activation is all-or-nothing. If setup fails, OM restores the service and file state it found before the attempt.
+If setup fails, OM attempts to restore prior service and managed-file state. It reports `rollback incomplete` if any restoration step fails so you know the install needs manual inspection.
 
 ## Run A Refresh Now
 
@@ -138,13 +143,9 @@ om status
 om doctor
 ```
 
-Check that they agree about:
+`om native-bridge status` and `om status` report bridge configuration, service state, and verified-index readiness. `om doctor` also verifies that the older Claude, Codex, auto-memory, and reflector services and OM-managed writer hooks remain off.
 
-- whether the native bridge is installed and loaded;
-- whether a verified bridge index exists;
-- whether older Claude, Codex, auto-memory, and reflector services remain disabled.
-
-Neither command prints indexed memory text.
+None of these commands prints indexed memory text.
 
 ## Disable, Uninstall, Or Roll Back
 
@@ -167,6 +168,14 @@ om doctor
 
 This is the preferred feature-level rollback. Disable and uninstall both leave Claude Code and Codex native memory untouched. They also preserve the private bridge config, derived index data, and receipts. Removing the bridge does not restart the older OM writer jobs.
 
+Remove the service and all bridge-derived local state while keeping source memory untouched:
+
+```bash
+om uninstall --native-bridge --purge
+```
+
+OM first boots out the exact bridge service and verifies that it is absent. It then removes only the saved selection, derived generations, receipts, and bridge logs.
+
 Re-enable the bridge later:
 
 ```bash
@@ -179,10 +188,11 @@ Or return explicitly to the full Claude Code and Codex workflow:
 ```bash
 om uninstall --native-bridge
 om install --both
+om install --cowork   # only if you want Cowork writers restored too
 om doctor
 ```
 
-The full installer may ask for an LLM provider because observation and reflection use one.
+`--both` restores Claude Code and Codex only. The full installer may ask for an LLM provider because observation and reflection use one.
 
 If you installed OM with `uv` and need to roll back the package itself after disabling the bridge:
 
@@ -235,7 +245,7 @@ om status
 om doctor
 ```
 
-If activation fails, OM restores the pre-attempt service and file state and reports the failure rather than leaving a half-installed bridge.
+If activation fails, OM attempts to restore the pre-attempt service and managed-file state. It reports `rollback incomplete` if any restoration step fails.
 
 ### Native files are rejected
 
@@ -247,4 +257,4 @@ Run `om install --native-bridge` again. A successful activation removes OM-manag
 
 ### An external Hermes or Grok plugin blocks the upgrade
 
-Those plugins have their own OM dependency ranges. Their existing releases do not yet declare OM v0.10 compatibility. Keep that host on its accepted OM line until the plugin publishes and validates a compatible release.
+Use Hermes memory-provider plugin v1.5.1 or newer and Grok marketplace plugin v0.1.2 or newer with OM v0.10. Their compatibility releases are validated separately from the core package.

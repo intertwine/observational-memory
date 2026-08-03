@@ -724,8 +724,7 @@ Sync touches persistence, CLI behavior, reflection, startup context, and search.
 1. Add a feature flag helper:
 
    ```python
-   def cluster_feature_enabled(config: Config) -> bool:
-       ...
+   def cluster_feature_enabled(config: Config) -> bool: ...
    ```
 
    This should return false unless a valid cluster config exists and either config or env enables it.
@@ -736,8 +735,10 @@ Sync touches persistence, CLI behavior, reflection, startup context, and search.
    @property
    def cluster_config_path(self) -> Path: ...
 
+
    @property
    def cluster_keys_dir(self) -> Path: ...
+
 
    @property
    def clusters_dir(self) -> Path: ...
@@ -804,6 +805,8 @@ Functions:
 ```python
 def atomic_write_bytes(path: Path, data: bytes, mode: int | None = None) -> None: ...
 def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None: ...
+
+
 class DirectoryLock: ...
 ```
 
@@ -839,10 +842,12 @@ class NodeKeypair:
     signing_private_key_b64: str
     signing_public_key_b64: str
 
+
 @dataclass(frozen=True)
 class ClusterSecret:
     cluster_id: str
     data_key_b64: str
+
 
 def generate_node_keypair(alias: str | None = None) -> NodeKeypair: ...
 def generate_cluster_secret() -> ClusterSecret: ...
@@ -1240,8 +1245,7 @@ Filesystem transport gives the most value with the least network complexity. Use
 `sync/transports/__init__.py`:
 
 ```python
-class SyncTransport(Protocol):
-    ...
+class SyncTransport(Protocol): ...
 ```
 
 `sync/transports/filesystem.py`:
@@ -1284,6 +1288,7 @@ class SyncSummary:
     rejected: int
     materialized: bool
     transports: list[TransportSummary]
+
 
 def sync_cluster(config: Config, deadline_ms: int | None = None) -> SyncSummary: ...
 ```

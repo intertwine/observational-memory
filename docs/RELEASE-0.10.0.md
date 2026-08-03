@@ -17,17 +17,12 @@ brew install intertwine/tap/observational-memory   # use `brew upgrade observati
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
 om bridge-native-memory
+om search --native-bridge "what were we doing in this project?"
 om status
 om doctor
 ```
 
 `om native-bridge sources` lists eligible Claude project names and counts without showing memory text or enrolling them. Repeat `--claude-project` to include more than one. Later installs and one-shot runs reuse the saved private selection when you omit the flag.
-
-Retrieve bridge memory explicitly:
-
-```bash
-om search --native-bridge "what were we doing in this project?"
-```
 
 Ordinary `om search` and `om recall` keep using the full OM memory store. They do not merge bridge results. Before the first verified bridge index exists, `om search --native-bridge` exits with guidance to install or run the bridge.
 
@@ -47,7 +42,7 @@ See [Native Claude and Codex memory](native-memory-bridge.md#source-and-privacy-
 
 Each run requires normal macOS memory pressure and at most 80% swap use. It is limited to 15 seconds, 128 MiB process-tree RSS, 2 MiB per file, and 16 MiB total input. If admission fails or a limit is reached, the bridge keeps the last verified index. `om native-bridge status`, `om status`, and `om doctor` report configuration, service, and verified-index state.
 
-The explicit bridge install boots out the older Claude observer, Codex observer, Claude auto-memory, and reflector services, and never enables them. It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks while preserving read-only SessionStart context and unrelated hook groups. It keeps the older service plist files so you can make a deliberate return to the full workflow later. If bridge setup fails, the installer restores the exact service and file state it found before it started.
+The explicit bridge install boots out the older Claude observer, Codex observer, Claude auto-memory, and reflector services, and never enables them. It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks while preserving read-only SessionStart context and unrelated hook groups. It keeps the older service plist files so you can make a deliberate return to the full workflow later. If setup fails, OM attempts to restore prior service and managed-file state and reports `rollback incomplete` if any restoration step fails.
 
 Grok, Kimi, and OpenCode integrations are outside this Claude↔Codex migration scope. Existing writer integrations for those hosts are unchanged.
 
@@ -66,7 +61,7 @@ om doctor
 
 No source-memory migration is required. Claude Code and Codex continue to own their native memory files; the bridge builds a separate index.
 
-The standalone Hermes memory-provider and Grok marketplace plugins are released separately and their existing releases do not yet declare OM v0.10 compatibility. Check those plugin releases before upgrading OM on a host that depends on them.
+OM v0.10 is compatible with Hermes memory-provider plugin v1.5.1 or newer and Grok marketplace plugin v0.1.2 or newer. Those plugin releases are validated and published separately from the core package.
 
 ## Disable Or Roll Back The Bridge
 
@@ -91,8 +86,15 @@ Removing the bridge does not silently restart the older writer jobs. To return t
 ```bash
 om uninstall --native-bridge
 om install --both
+om install --cowork   # only if you want Cowork writers restored too
 om doctor
 ```
+
+`--both` restores Claude Code and Codex only. To remove the bridge service plus its private config, derived index, receipts, and logs, run `om uninstall --native-bridge --purge`; source memory is untouched.
+
+## Other Fixes
+
+- Codex legacy cursor migration now counts only the same non-empty messages that the transcript parser counts. Empty-content records can no longer advance a migrated cursor and cause later messages to be skipped.
 
 ## Current Limits
 

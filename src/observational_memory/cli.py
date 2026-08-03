@@ -4002,24 +4002,32 @@ def install(
 )
 @click.option("--both", "targets", flag_value="both", default=True)
 @click.option("--all", "targets", flag_value="all")
-@click.option("--purge", is_flag=True, help="Also remove memory files")
+@click.option(
+    "--purge",
+    is_flag=True,
+    help="Also remove selected local data (native bridge: private derived state only)",
+)
 @click.pass_context
 def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
     """Remove OM hooks/scheduler jobs for selected targets (claude/codex/opencode/kimi/grok/cowork)."""
     config = ctx.obj["config"]
 
     if targets == "native-bridge":
-        from .native_bridge.lifecycle import NativeBridgeLifecycleError, uninstall_bridge_launchd
+        from .native_bridge.lifecycle import NativeBridgeLifecycleError, purge_bridge_state, uninstall_bridge_launchd
 
-        if purge:
-            raise click.UsageError(
-                "--purge is not accepted with --native-bridge; bridge config and generations are preserved"
-            )
         try:
             uninstall_bridge_launchd(config)
+            removed = purge_bridge_state(config) if purge else ()
         except NativeBridgeLifecycleError as exc:
             raise click.ClickException(str(exc)) from exc
-        click.echo("Native-memory bridge LaunchAgent removed; config and generations preserved.")
+        if purge:
+            click.echo("Native-memory bridge LaunchAgent removed and absence verified.")
+            if removed:
+                click.echo("Removed private bridge config, derived generations, receipts, and logs.")
+            else:
+                click.echo("No private bridge state remained to remove.")
+        else:
+            click.echo("Native-memory bridge LaunchAgent removed; config and generations preserved.")
         return
 
     if targets in ("claude", "both", "all"):
