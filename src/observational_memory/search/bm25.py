@@ -1,12 +1,94 @@
-"""BM25 search backend using rank-bm25."""
+"""Fixed BM25 authority backed by immutable canonical-JSON generations."""
 
 from __future__ import annotations
 
+import errno
+import json
+import os
 import pickle
 import re
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import Document, SearchResult
+from .generation import (
+    DOCUMENT_SCHEMA_VERSION,
+    INDEX_SCHEMA_VERSION,
+    MATERIALIZATION_SCHEMA_VERSION,
+    DocumentBatch,
+    canonical_json_bytes,
+    document_from_payload,
+    document_payload,
+    sha256_hex,
+)
+from .generation_store import (
+    GenerationStoreError,
+    StoreReadRoot,
+    StoreTransaction,
+    _duplicate_root_fd,
+    _open_dir,
+    _PointerChanged,
+    _read_file,
+    _require_store_transaction,
+    _secure_open_root,
+    _validate_canonical_read_root,
+    _write_file,
+    validate_canonical_root,
+)
+
+CURRENT_POINTER_SCHEMA = "om.search.current-generation.v1"
+GENERATION_MANIFEST_SCHEMA = "om.search.generation-manifest.v1"
+BM25_INDEX_SCHEMA = "om.search.bm25-index.v3"
+BM25_BACKEND_CONFIG = {
+    "name": "bm25",
+    "rank_bm25": "BM25Okapi",
+    "tokenizer": "om-bm25-v1",
+}
+BM25_BACKEND_CONFIG_DIGEST = sha256_hex(canonical_json_bytes(BM25_BACKEND_CONFIG))
+BRIDGE_GENERATION_SCHEMA = "om.native-memory-bridge.generation.v2"
+
+_GENERATION_ID = re.compile(r"^[0-9a-f]{64}$")
+_BRIDGE_METADATA_KEYS = {
+    "schema",
+    "desired_state_digest",
+    "policy_digest",
+    "document_bytes_sha256",
+    "sources",
+}
+_INDEX_KEYS = {
+    "schema",
+    "generation_id",
+    "backend_name",
+    "backend_config_digest",
+    "document_schema_version",
+    "materialization_schema_version",
+    "index_schema_version",
+    "content_digest",
+    "documents",
+    "tokenized_corpus",
+}
+_MANIFEST_BASE_KEYS = {
+    "schema",
+    "generation_id",
+    "backend_name",
+    "backend_config_digest",
+    "document_schema_version",
+    "materialization_schema_version",
+    "index_schema_version",
+    "document_count",
+    "content_digest",
+    "canonical_corpus_sha256",
+    "index_sha256",
+}
+_MANIFEST_BRIDGE_KEYS = {
+    "bridge_schema",
+    "desired_state_digest",
+    "policy_digest",
+    "document_bytes_sha256",
+    "sources",
+}
 
 _STOPWORDS = frozenset(
     {
@@ -34,97 +116,574 @@ _STOPWORDS = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class VerifiedBM25Generation:
+    generation_id: str
+    index_bytes: bytes
+    manifest_bytes: bytes
+    index: dict[str, Any]
+    manifest: dict[str, Any]
+
+
 def _tokenize(text: str) -> list[str]:
     """Lowercase, strip markdown/emoji, remove stopwords."""
     text = text.lower()
     text = re.sub(r"[^\w\s]", " ", text)
-    return [w for w in text.split() if w and w not in _STOPWORDS]
+    return [word for word in text.split() if word and word not in _STOPWORDS]
+
+
+def _parse_canonical_object(raw: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GenerationStoreError(f"BM25 {label} is malformed") from exc
+    if not isinstance(value, dict) or canonical_json_bytes(value) + b"\n" != raw:
+        raise GenerationStoreError(f"BM25 {label} is not canonical JSON")
+    return value
+
+
+def _validate_batch(batch: DocumentBatch) -> None:
+    if not isinstance(batch, DocumentBatch):
+        raise TypeError("BM25 publication requires one immutable DocumentBatch")
+    if batch.backend_name != "bm25":
+        raise ValueError("BM25 store cannot publish a different backend")
+    if batch.backend_config_digest != BM25_BACKEND_CONFIG_DIGEST:
+        raise ValueError("BM25 batch has an unsupported backend configuration")
+    if batch.document_schema_version != DOCUMENT_SCHEMA_VERSION:
+        raise ValueError("BM25 batch has an unsupported document schema")
+    if batch.materialization_schema_version != MATERIALIZATION_SCHEMA_VERSION:
+        raise ValueError("BM25 batch has an unsupported materialization schema")
+    if batch.index_schema_version != INDEX_SCHEMA_VERSION:
+        raise ValueError("BM25 batch has an unsupported index schema")
+    if _GENERATION_ID.fullmatch(batch.generation_id) is None:
+        raise ValueError("BM25 batch generation ID is not content-addressed")
+
+
+def _validated_bridge_metadata(bridge_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if bridge_metadata is None:
+        return {}
+    if not isinstance(bridge_metadata, dict) or set(bridge_metadata) != _BRIDGE_METADATA_KEYS:
+        raise ValueError("BM25 bridge metadata has an unsupported shape")
+    if bridge_metadata.get("schema") != BRIDGE_GENERATION_SCHEMA:
+        raise ValueError("BM25 bridge metadata schema is invalid")
+    for key in ("desired_state_digest", "policy_digest", "document_bytes_sha256"):
+        value = bridge_metadata.get(key)
+        if not isinstance(value, str) or _GENERATION_ID.fullmatch(value) is None:
+            raise ValueError(f"BM25 bridge metadata {key} is invalid")
+    sources = bridge_metadata.get("sources")
+    if not isinstance(sources, list):
+        raise ValueError("BM25 bridge metadata sources are invalid")
+    normalized_sources: list[dict[str, str]] = []
+    for source in sources:
+        if not isinstance(source, dict) or set(source) != {"source_id", "content_hash"}:
+            raise ValueError("BM25 bridge source metadata is invalid")
+        source_id = source.get("source_id")
+        content_hash = source.get("content_hash")
+        if (
+            not isinstance(source_id, str)
+            or not source_id
+            or not isinstance(content_hash, str)
+            or _GENERATION_ID.fullmatch(content_hash) is None
+        ):
+            raise ValueError("BM25 bridge source metadata is invalid")
+        normalized_sources.append({"source_id": source_id, "content_hash": content_hash})
+    return {
+        "bridge_schema": BRIDGE_GENERATION_SCHEMA,
+        "desired_state_digest": bridge_metadata["desired_state_digest"],
+        "policy_digest": bridge_metadata["policy_digest"],
+        "document_bytes_sha256": bridge_metadata["document_bytes_sha256"],
+        "sources": normalized_sources,
+    }
+
+
+def _verify_bm25_generation(index_bytes: bytes, manifest_bytes: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply the one non-substitutable BM25 persisted-byte verification policy."""
+    index = _parse_canonical_object(index_bytes, "index")
+    manifest = _parse_canonical_object(manifest_bytes, "manifest")
+    if set(index) != _INDEX_KEYS:
+        raise GenerationStoreError("BM25 index has unsupported or incomplete claims")
+    if index.get("schema") != BM25_INDEX_SCHEMA:
+        raise GenerationStoreError("BM25 index schema is invalid")
+    if manifest.get("schema") != GENERATION_MANIFEST_SCHEMA:
+        raise GenerationStoreError("BM25 generation manifest schema is invalid")
+    generation_id = index.get("generation_id")
+    if not isinstance(generation_id, str) or manifest.get("generation_id") != generation_id:
+        raise GenerationStoreError("BM25 index and manifest generation IDs disagree")
+    for key in (
+        "backend_name",
+        "backend_config_digest",
+        "document_schema_version",
+        "materialization_schema_version",
+        "index_schema_version",
+        "content_digest",
+    ):
+        if index.get(key) != manifest.get(key):
+            raise GenerationStoreError(f"BM25 index and manifest disagree on {key}")
+    if index.get("backend_name") != "bm25":
+        raise GenerationStoreError("generation is not a local BM25 index")
+    if index.get("backend_config_digest") != BM25_BACKEND_CONFIG_DIGEST:
+        raise GenerationStoreError("BM25 backend configuration digest is invalid")
+    if index.get("document_schema_version") != DOCUMENT_SCHEMA_VERSION:
+        raise GenerationStoreError("BM25 document schema is invalid")
+    if index.get("materialization_schema_version") != MATERIALIZATION_SCHEMA_VERSION:
+        raise GenerationStoreError("BM25 materialization schema is invalid")
+    if index.get("index_schema_version") != INDEX_SCHEMA_VERSION:
+        raise GenerationStoreError("BM25 logical index schema is invalid")
+    document_values = index.get("documents")
+    tokenized = index.get("tokenized_corpus")
+    if not isinstance(document_values, list) or not isinstance(tokenized, list):
+        raise GenerationStoreError("BM25 index corpus is invalid")
+    try:
+        documents = tuple(document_from_payload(value) for value in document_values)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GenerationStoreError("BM25 index document payload is invalid") from exc
+    if tokenized != [_tokenize(document.content) for document in documents]:
+        raise GenerationStoreError("BM25 persisted tokens do not match its documents")
+    try:
+        batch = DocumentBatch.create(
+            documents,
+            backend_name="bm25",
+            backend_config_digest=BM25_BACKEND_CONFIG_DIGEST,
+            generation_id=generation_id,
+            document_schema_version=DOCUMENT_SCHEMA_VERSION,
+            materialization_schema_version=MATERIALIZATION_SCHEMA_VERSION,
+            index_schema_version=INDEX_SCHEMA_VERSION,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GenerationStoreError("BM25 persisted corpus cannot form one immutable batch") from exc
+    if batch.content_digest != index.get("content_digest"):
+        raise GenerationStoreError("BM25 canonical corpus digest is invalid")
+    if sha256_hex(batch.canonical_corpus_bytes) != manifest.get("canonical_corpus_sha256"):
+        raise GenerationStoreError("BM25 manifest corpus-byte digest is invalid")
+    if len(documents) != manifest.get("document_count"):
+        raise GenerationStoreError("BM25 document count is invalid")
+    if sha256_hex(index_bytes) != manifest.get("index_sha256"):
+        raise GenerationStoreError("BM25 persisted index-byte digest is invalid")
+    identity_documents = []
+    for value in document_values:
+        if not isinstance(value, dict):
+            raise GenerationStoreError("BM25 index document payload is invalid")
+        identity_value = dict(value)
+        metadata = dict(identity_value.get("metadata") or {})
+        metadata.pop("generation_id", None)
+        identity_value["metadata"] = metadata
+        identity_documents.append(identity_value)
+    if manifest.get("bridge_schema") == BRIDGE_GENERATION_SCHEMA:
+        if set(manifest) != _MANIFEST_BASE_KEYS | _MANIFEST_BRIDGE_KEYS:
+            raise GenerationStoreError("BM25 bridge generation manifest has unsupported claims")
+        sources = manifest.get("sources")
+        if not isinstance(sources, list) or any(
+            not isinstance(source, dict)
+            or set(source) != {"source_id", "content_hash"}
+            or not isinstance(source.get("source_id"), str)
+            or not isinstance(source.get("content_hash"), str)
+            or _GENERATION_ID.fullmatch(source["content_hash"]) is None
+            for source in sources
+        ):
+            raise GenerationStoreError("bridge generation source manifest is invalid")
+        document_bytes = canonical_json_bytes(identity_documents)
+        if sha256_hex(document_bytes) != manifest.get("document_bytes_sha256"):
+            raise GenerationStoreError("bridge generation document-byte digest is invalid")
+        identity = {
+            "schema": BRIDGE_GENERATION_SCHEMA,
+            "desired_state_digest": manifest.get("desired_state_digest"),
+            "policy_digest": manifest.get("policy_digest"),
+            "sources": [(source["source_id"], source["content_hash"]) for source in sources],
+            "document_schema_version": DOCUMENT_SCHEMA_VERSION,
+            "materialization_schema_version": MATERIALIZATION_SCHEMA_VERSION,
+            "index_schema_version": INDEX_SCHEMA_VERSION,
+            "backend_name": "bm25",
+            "backend_config_digest": BM25_BACKEND_CONFIG_DIGEST,
+            "document_bytes_sha256": manifest.get("document_bytes_sha256"),
+        }
+    elif any(
+        key in manifest
+        for key in (
+            "bridge_schema",
+            "desired_state_digest",
+            "policy_digest",
+            "document_bytes_sha256",
+            "sources",
+        )
+    ):
+        raise GenerationStoreError("BM25 manifest contains partial bridge metadata")
+    else:
+        if set(manifest) != _MANIFEST_BASE_KEYS:
+            raise GenerationStoreError("BM25 generation manifest has unsupported or incomplete claims")
+        identity = {
+            "document_schema_version": DOCUMENT_SCHEMA_VERSION,
+            "materialization_schema_version": MATERIALIZATION_SCHEMA_VERSION,
+            "index_schema_version": INDEX_SCHEMA_VERSION,
+            "backend_name": "bm25",
+            "backend_config_digest": BM25_BACKEND_CONFIG_DIGEST,
+            "identity": {},
+            "documents": identity_documents,
+        }
+    if sha256_hex(canonical_json_bytes(identity)) != generation_id:
+        raise GenerationStoreError("generation ID is not the content address of persisted claims")
+    return index, manifest
+
+
+def _build_bm25_generation(
+    batch: DocumentBatch,
+    *,
+    bridge_metadata: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    _validate_batch(batch)
+    documents = tuple(batch.documents)
+    index = {
+        "schema": BM25_INDEX_SCHEMA,
+        "generation_id": batch.generation_id,
+        "backend_name": "bm25",
+        "backend_config_digest": BM25_BACKEND_CONFIG_DIGEST,
+        "document_schema_version": DOCUMENT_SCHEMA_VERSION,
+        "materialization_schema_version": MATERIALIZATION_SCHEMA_VERSION,
+        "index_schema_version": INDEX_SCHEMA_VERSION,
+        "content_digest": batch.content_digest,
+        "documents": [document_payload(document) for document in documents],
+        "tokenized_corpus": [_tokenize(document.content) for document in documents],
+    }
+    index_bytes = canonical_json_bytes(index) + b"\n"
+    manifest = {
+        "schema": GENERATION_MANIFEST_SCHEMA,
+        "generation_id": batch.generation_id,
+        "backend_name": "bm25",
+        "backend_config_digest": BM25_BACKEND_CONFIG_DIGEST,
+        "document_schema_version": DOCUMENT_SCHEMA_VERSION,
+        "materialization_schema_version": MATERIALIZATION_SCHEMA_VERSION,
+        "index_schema_version": INDEX_SCHEMA_VERSION,
+        "document_count": len(batch.document_bytes),
+        "content_digest": batch.content_digest,
+        "canonical_corpus_sha256": sha256_hex(batch.canonical_corpus_bytes),
+        "index_sha256": sha256_hex(index_bytes),
+        **_validated_bridge_metadata(bridge_metadata),
+    }
+    return index, manifest
+
+
+def _publication_phase(phase: str) -> None:
+    """Deterministic crash/barrier seam; production behavior is intentionally empty."""
+    del phase
+
+
+class BM25GenerationStore:
+    """The sole schema, digest, publication, and persisted-byte BM25 authority."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(os.path.abspath(root))
+
+    def has_generation_state(self) -> bool:
+        try:
+            root = _secure_open_root(
+                self.root,
+                create=False,
+                writable=False,
+                require_mode=False,
+            )
+        except FileNotFoundError:
+            return False
+        try:
+            names = set(os.listdir(root))
+            has_state = bool(names.intersection({"current-generation.json", "generations", "staging"}))
+            if has_state and (os.fstat(root).st_uid != os.getuid() or (os.fstat(root).st_mode & 0o777) != 0o700):
+                raise GenerationStoreError("generation store root is unsafe")
+            return has_state
+        finally:
+            os.close(root)
+
+    @staticmethod
+    def _parse_pointer(raw: bytes) -> dict[str, Any]:
+        pointer = _parse_canonical_object(raw, "pointer")
+        if set(pointer) != {
+            "schema",
+            "generation_id",
+            "index_sha256",
+            "manifest_sha256",
+        }:
+            raise GenerationStoreError("generation pointer has unsupported claims")
+        if pointer.get("schema") != CURRENT_POINTER_SCHEMA:
+            raise GenerationStoreError("generation pointer schema is invalid")
+        generation_id = pointer.get("generation_id")
+        if not isinstance(generation_id, str) or _GENERATION_ID.fullmatch(generation_id) is None:
+            raise GenerationStoreError("current generation ID is not content-addressed")
+        return pointer
+
+    def _read_generation(self, root: int, generation_id: str) -> VerifiedBM25Generation:
+        if _GENERATION_ID.fullmatch(generation_id) is None:
+            raise GenerationStoreError("current generation ID is not content-addressed")
+        generations = _open_dir(root, "generations", create=False, writable=False)
+        generation = None
+        try:
+            generation = _open_dir(generations, generation_id, create=False, writable=False)
+            index_bytes = _read_file(generation, "index.json")
+            manifest_bytes = _read_file(generation, "manifest.json")
+        finally:
+            if generation is not None:
+                os.close(generation)
+            os.close(generations)
+        index, manifest = _verify_bm25_generation(index_bytes, manifest_bytes)
+        if manifest.get("generation_id") != generation_id:
+            raise GenerationStoreError("generation directory and manifest disagree")
+        return VerifiedBM25Generation(
+            generation_id,
+            index_bytes,
+            manifest_bytes,
+            index,
+            manifest,
+        )
+
+    def read_current(
+        self,
+        transaction_or_read_root: StoreTransaction | StoreReadRoot,
+    ) -> VerifiedBM25Generation:
+        root = _duplicate_root_fd(transaction_or_read_root, expected_root=self.root)
+        try:
+            for attempt in range(3):
+                try:
+                    pointer_bytes = _read_file(
+                        root,
+                        "current-generation.json",
+                        max_bytes=1024 * 1024,
+                        retry_atomic_replacement=True,
+                    )
+                except _PointerChanged:
+                    if attempt == 2:
+                        raise GenerationStoreError("generation pointer did not stabilize") from None
+                    continue
+                pointer = self._parse_pointer(pointer_bytes)
+                verified = self._read_generation(root, pointer["generation_id"])
+                if pointer["index_sha256"] != sha256_hex(verified.index_bytes):
+                    raise GenerationStoreError("generation pointer index digest is invalid")
+                if pointer["manifest_sha256"] != sha256_hex(verified.manifest_bytes):
+                    raise GenerationStoreError("generation pointer manifest digest is invalid")
+                if isinstance(transaction_or_read_root, StoreTransaction):
+                    validate_canonical_root(transaction_or_read_root)
+                else:
+                    _validate_canonical_read_root(transaction_or_read_root)
+                return verified
+            raise AssertionError("bounded pointer loop did not return or raise")
+        finally:
+            os.close(root)
+
+    def publish(
+        self,
+        transaction: StoreTransaction,
+        immutable_batch: DocumentBatch,
+        bridge_metadata: dict[str, Any] | None = None,
+    ) -> VerifiedBM25Generation:
+        """Publish and freshly verify one generation with fixed BM25 authority."""
+        _require_store_transaction(transaction, self.root)
+        _validate_batch(immutable_batch)
+        index, manifest = _build_bm25_generation(
+            immutable_batch,
+            bridge_metadata=bridge_metadata,
+        )
+        generation_id = immutable_batch.generation_id
+        index_bytes = canonical_json_bytes(index) + b"\n"
+        manifest_bytes = canonical_json_bytes(manifest) + b"\n"
+        root = _duplicate_root_fd(transaction, expected_root=self.root)
+        generations = staging = stage = None
+        stage_name = f".{generation_id}.{uuid.uuid4().hex}"
+        pointer_temp: str | None = None
+        try:
+            generations = _open_dir(root, "generations", create=True, writable=True)
+            staging = _open_dir(root, "staging", create=True, writable=True)
+            stage = _open_dir(staging, stage_name, create=True, writable=True)
+            _write_file(stage, "index.json", index_bytes)
+            _publication_phase("after:index_write")
+            _write_file(stage, "manifest.json", manifest_bytes)
+            _publication_phase("after:manifest_write")
+            _publication_phase("after:file_flush")
+            os.fsync(stage)
+            _publication_phase("after:staging_flush")
+            reopened_index = _read_file(stage, "index.json")
+            reopened_manifest = _read_file(stage, "manifest.json")
+            _verify_bm25_generation(reopened_index, reopened_manifest)
+            _publication_phase("after:staged_verify")
+
+            _require_store_transaction(transaction, self.root)
+            try:
+                os.rename(stage_name, generation_id, src_dir_fd=staging, dst_dir_fd=generations)
+                os.close(stage)
+                stage = None
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise
+                existing = self._read_generation(root, generation_id)
+                if existing.index_bytes != index_bytes or existing.manifest_bytes != manifest_bytes:
+                    raise GenerationStoreError("immutable generation already exists with different bytes")
+                for name in ("index.json", "manifest.json"):
+                    try:
+                        os.unlink(name, dir_fd=stage)
+                    except FileNotFoundError:
+                        pass
+                os.close(stage)
+                stage = None
+                os.rmdir(stage_name, dir_fd=staging)
+            _publication_phase("after:generation_rename")
+            os.fsync(generations)
+            _publication_phase("after:generations_flush")
+
+            pointer = {
+                "schema": CURRENT_POINTER_SCHEMA,
+                "generation_id": generation_id,
+                "index_sha256": sha256_hex(index_bytes),
+                "manifest_sha256": sha256_hex(manifest_bytes),
+            }
+            pointer_bytes = canonical_json_bytes(pointer) + b"\n"
+            pointer_temp = f".current-generation.{uuid.uuid4().hex}.tmp"
+            _write_file(root, pointer_temp, pointer_bytes)
+            _publication_phase("after:pointer_temp_write")
+            _require_store_transaction(transaction, self.root)
+            validate_canonical_root(transaction)
+            _publication_phase("after:root_identity")
+            os.rename(
+                pointer_temp,
+                "current-generation.json",
+                src_dir_fd=root,
+                dst_dir_fd=root,
+            )
+            pointer_temp = None
+            _publication_phase("after:pointer_replace")
+            os.fsync(root)
+            _publication_phase("after:root_flush")
+
+            verified = self.read_current(transaction)
+            if verified.generation_id != generation_id:
+                raise GenerationStoreError("fresh reader resolved a different generation")
+            if verified.manifest.get("content_digest") != immutable_batch.content_digest:
+                raise GenerationStoreError("fresh reader resolved different canonical corpus bytes")
+            validate_canonical_root(transaction)
+            _publication_phase("after:final_verify")
+            return verified
+        finally:
+            if pointer_temp is not None:
+                try:
+                    os.unlink(pointer_temp, dir_fd=root)
+                except FileNotFoundError:
+                    pass
+            if stage is not None:
+                for name in ("index.json", "manifest.json"):
+                    try:
+                        os.unlink(name, dir_fd=stage)
+                    except FileNotFoundError:
+                        pass
+                os.close(stage)
+                if staging is not None:
+                    try:
+                        os.rmdir(stage_name, dir_fd=staging)
+                    except OSError:
+                        pass
+            if staging is not None:
+                os.close(staging)
+            if generations is not None:
+                os.close(generations)
+            os.close(root)
 
 
 class BM25Backend:
-    """BM25 search backend. Zero external service dependencies."""
+    """Read-only production BM25 backend; publication uses BM25GenerationStore."""
 
-    def __init__(self, index_path: Path) -> None:
-        self._index_path = index_path
+    def __init__(self, legacy_index_path: Path, *, store_root: Path | None = None) -> None:
+        self._legacy_index_path = legacy_index_path
+        self._store_root = store_root or legacy_index_path.parent
         self._bm25 = None
         self._documents: list[Document] = []
         self._tokenized_corpus: list[list[str]] = []
+        self._generation_id: str | None = None
+        self._generation_manifest: dict[str, Any] | None = None
         self._load()
 
-    def index(self, documents: list[Document]) -> None:
-        from rank_bm25 import BM25Okapi
+    @classmethod
+    def from_documents(cls, documents: list[Document]) -> BM25Backend:
+        """Build a process-local index for deterministic ranking tests only."""
+        instance = cls.__new__(cls)
+        instance._legacy_index_path = Path("<in-memory>")
+        instance._store_root = Path("<in-memory>")
+        instance._bm25 = None
+        instance._documents = list(documents)
+        instance._tokenized_corpus = [_tokenize(document.content) for document in documents]
+        instance._generation_id = None
+        instance._generation_manifest = None
+        instance._build_ranker()
+        return instance
 
-        self._documents = documents
-        self._tokenized_corpus = [_tokenize(doc.content) for doc in documents]
+    def index(self, documents: list[Document]) -> None:
+        del documents
+        raise RuntimeError("BM25 publication requires the search generation transaction owner")
+
+    def _build_ranker(self) -> None:
         if self._tokenized_corpus:
+            from rank_bm25 import BM25Okapi
+
             self._bm25 = BM25Okapi(self._tokenized_corpus)
         else:
             self._bm25 = None
-        self._save()
 
     def search(self, query: str, limit: int = 10) -> list[SearchResult]:
         if not self.is_ready():
             return []
-
         tokenized_query = _tokenize(query)
         if not tokenized_query:
             return []
-
         scores = self._bm25.get_scores(tokenized_query)
-
-        scored = sorted(
-            zip(scores, self._documents),
-            key=lambda x: x[0],
-            reverse=True,
-        )
-
-        positive_scored = [(score, doc) for score, doc in scored if score > 0]
+        scored = sorted(zip(scores, self._documents), key=lambda item: item[0], reverse=True)
+        positive_scored = [(score, document) for score, document in scored if score > 0]
         if positive_scored:
             return [
-                SearchResult(document=doc, score=float(score), rank=rank)
-                for rank, (score, doc) in enumerate(positive_scored[:limit], start=1)
+                SearchResult(document=document, score=float(score), rank=rank)
+                for rank, (score, document) in enumerate(positive_scored[:limit], start=1)
             ]
-
-        # rank-bm25 can assign zero IDF to terms that appear in half the corpus,
-        # which makes obviously matching docs score 0. Fall back to token overlap
-        # only when BM25 produced no positive results at all.
-        overlap_scored = []
+        overlap_scored: list[tuple[float, Document]] = []
         query_terms = set(tokenized_query)
-        for doc, doc_tokens in zip(self._documents, self._tokenized_corpus):
-            overlap = sum(1 for token in doc_tokens if token in query_terms)
+        for document, tokens in zip(self._documents, self._tokenized_corpus):
+            overlap = sum(1 for token in tokens if token in query_terms)
             if overlap > 0:
-                overlap_scored.append((float(overlap), doc))
-
-        overlap_scored.sort(key=lambda x: x[0], reverse=True)
-        results = []
-        for rank, (score, doc) in enumerate(overlap_scored[:limit], start=1):
-            results.append(SearchResult(document=doc, score=float(score), rank=rank))
-        return results
+                overlap_scored.append((float(overlap), document))
+        overlap_scored.sort(key=lambda item: item[0], reverse=True)
+        return [
+            SearchResult(document=document, score=score, rank=rank)
+            for rank, (score, document) in enumerate(overlap_scored[:limit], start=1)
+        ]
 
     def is_ready(self) -> bool:
-        return self._bm25 is not None and len(self._documents) > 0
+        return self._bm25 is not None and bool(self._documents)
 
-    def _save(self) -> None:
-        self._index_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "documents": self._documents,
-            "tokenized_corpus": self._tokenized_corpus,
-        }
-        with open(self._index_path, "wb") as f:
-            pickle.dump(data, f)
+    @property
+    def committed_generation_id(self) -> str | None:
+        return self._generation_id
+
+    @property
+    def committed_generation_digest(self) -> str | None:
+        if self._generation_manifest is None:
+            return None
+        value = self._generation_manifest.get("content_digest")
+        return value if isinstance(value, str) else None
 
     def _load(self) -> None:
-        if not self._index_path.exists():
+        store = BM25GenerationStore(self._store_root)
+        if store.has_generation_state():
+            with StoreReadRoot.open(self._store_root) as read_root:
+                verified = store.read_current(read_root)
+            self._documents = [document_from_payload(value) for value in verified.index["documents"]]
+            self._tokenized_corpus = [list(tokens) for tokens in verified.index["tokenized_corpus"]]
+            self._generation_id = verified.generation_id
+            self._generation_manifest = verified.manifest
+            self._build_ranker()
+            return
+        if not self._legacy_index_path.exists():
             return
         try:
-            with open(self._index_path, "rb") as f:
-                data = pickle.load(f)
-            self._documents = data["documents"]
-            self._tokenized_corpus = data["tokenized_corpus"]
-            if self._tokenized_corpus:
-                from rank_bm25 import BM25Okapi
-
-                self._bm25 = BM25Okapi(self._tokenized_corpus)
+            with self._legacy_index_path.open("rb") as stream:
+                data = pickle.load(stream)
+            documents = data["documents"]
+            tokenized = data["tokenized_corpus"]
+            if not isinstance(documents, list) or not isinstance(tokenized, list):
+                return
+            self._documents = documents
+            self._tokenized_corpus = tokenized
+            self._build_ranker()
         except Exception:
             self._bm25 = None
             self._documents = []
+            self._tokenized_corpus = []

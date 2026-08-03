@@ -264,9 +264,7 @@ class TestBM25Backend:
         ]
 
     def test_index_and_search(self, tmp_path):
-        index_path = tmp_path / "bm25.pkl"
-        backend = BM25Backend(index_path)
-        backend.index(self._make_docs())
+        backend = BM25Backend.from_documents(self._make_docs())
 
         results = backend.search("PostgreSQL")
         assert len(results) >= 1
@@ -275,36 +273,34 @@ class TestBM25Backend:
         assert "obs:2026-02-10" in doc_ids
 
     def test_is_ready_after_index(self, tmp_path):
-        index_path = tmp_path / "bm25.pkl"
-        backend = BM25Backend(index_path)
+        backend = BM25Backend(tmp_path / "bm25.pkl")
         assert not backend.is_ready()
 
-        backend.index(self._make_docs())
+        backend = BM25Backend.from_documents(self._make_docs())
         assert backend.is_ready()
 
     def test_persistence(self, tmp_path):
-        index_path = tmp_path / "bm25.pkl"
-        backend1 = BM25Backend(index_path)
-        backend1.index(self._make_docs())
+        projects = tmp_path / "projects"
+        projects.mkdir()
+        config = Config(memory_dir=tmp_path, search_backend="bm25", claude_projects_dir=projects)
+        config.observations_path.write_text(SAMPLE_OBSERVATIONS)
+        config.reflections_path.write_text(SAMPLE_REFLECTIONS)
+        reindex(config)
 
-        # Create a new instance — should load from pickle
-        backend2 = BM25Backend(index_path)
+        # A fresh instance resolves and verifies the immutable generation.
+        backend2 = BM25Backend(config.search_index_dir / "bm25.pkl", store_root=config.search_index_dir)
         assert backend2.is_ready()
         results = backend2.search("PostgreSQL")
         assert len(results) >= 1
 
     def test_zero_score_filtering(self, tmp_path):
-        index_path = tmp_path / "bm25.pkl"
-        backend = BM25Backend(index_path)
-        backend.index(self._make_docs())
+        backend = BM25Backend.from_documents(self._make_docs())
 
         results = backend.search("xyznonexistent")
         assert len(results) == 0
 
     def test_search_ranking(self, tmp_path):
-        index_path = tmp_path / "bm25.pkl"
-        backend = BM25Backend(index_path)
-        backend.index(self._make_docs())
+        backend = BM25Backend.from_documents(self._make_docs())
 
         results = backend.search("PostgreSQL database")
         assert len(results) >= 1
@@ -313,9 +309,7 @@ class TestBM25Backend:
         assert results[0].rank == 1
 
     def test_search_falls_back_for_zero_idf_common_terms(self, tmp_path):
-        index_path = tmp_path / "bm25.pkl"
-        backend = BM25Backend(index_path)
-        backend.index(
+        backend = BM25Backend.from_documents(
             [
                 Document(
                     doc_id="obs:2026-04-06",
@@ -353,9 +347,7 @@ class TestBM25Backend:
         assert all(r.score > 0 for r in results)
 
     def test_empty_query(self, tmp_path):
-        index_path = tmp_path / "bm25.pkl"
-        backend = BM25Backend(index_path)
-        backend.index(self._make_docs())
+        backend = BM25Backend.from_documents(self._make_docs())
 
         results = backend.search("")
         assert results == []

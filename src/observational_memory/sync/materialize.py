@@ -43,31 +43,53 @@ class MaterializeSummary:
 def materialize_cluster_memory(config: Config, store: ClusterStore, *, reindex: bool = True) -> MaterializeSummary:
     store.ensure_layout()
     with DirectoryLock(store.cluster_dir / ".locks" / "materialize.lock"):
-        observations = _render_observations(config, store)
-        observations_written = _write_if_changed(config.observations_path, observations)
+        if reindex and config.search_backend == "bm25":
+            from observational_memory.search import _generation_transaction
 
-        reflections, catchup_needed = _render_reflections(store)
-        reflections_written = False
-        if reflections is not None:
-            reflections_written = _write_if_changed(config.reflections_path, reflections)
+            with _generation_transaction(config) as transaction:
+                return _materialize_locked(config, store, reindex=True, transaction=transaction)
+        return _materialize_locked(config, store, reindex=reindex)
 
-        refresh_startup_memory(config)
-        profile_written = _prepend_generated_header(config.profile_path)
-        active_written = _prepend_generated_header(config.active_path)
-        profile_written = _apply_overrides(config.profile_path, store, "profile") or profile_written
-        active_written = _apply_overrides(config.active_path, store, "active") or active_written
-        conflicts_written = _write_conflict_artifacts(store)
 
-        summary = MaterializeSummary(
-            observations_written=observations_written,
-            reflections_written=reflections_written,
-            profile_written=profile_written or conflicts_written,
-            active_written=active_written,
-            catchup_needed=catchup_needed,
-        )
-        if reindex and summary.any_written:
-            _reindex_if_enabled(config)
+def _materialize_locked(config: Config, store: ClusterStore, *, reindex: bool, transaction=None) -> MaterializeSummary:
+    """Materialize under the cluster lock; only BM25 receives a generation lease."""
+    observations = _render_observations(config, store)
+    observations_written = _write_if_changed(config.observations_path, observations)
+
+    reflections, catchup_needed = _render_reflections(store)
+    reflections_written = False
+    if reflections is not None:
+        reflections_written = _write_if_changed(config.reflections_path, reflections)
+
+    refresh_startup_memory(config)
+    profile_written = _prepend_generated_header(config.profile_path)
+    active_written = _prepend_generated_header(config.active_path)
+    profile_written = _apply_overrides(config.profile_path, store, "profile") or profile_written
+    active_written = _apply_overrides(config.active_path, store, "active") or active_written
+    conflicts_written = _write_conflict_artifacts(store)
+
+    summary = MaterializeSummary(
+        observations_written=observations_written,
+        reflections_written=reflections_written,
+        profile_written=profile_written or conflicts_written,
+        active_written=active_written,
+        catchup_needed=catchup_needed,
+    )
+    if not reindex or not summary.any_written:
         return summary
+    if config.search_backend == "bm25":
+        from observational_memory.search import (
+            _capture_document_batch_owned,
+            _commit_document_batch_owned,
+        )
+
+        if transaction is None:
+            raise RuntimeError("BM25 materialization requires the generation transaction owner")
+        batch = _capture_document_batch_owned(config, transaction)
+        _commit_document_batch_owned(config, batch, transaction)
+    else:
+        _reindex_if_enabled(config)
+    return summary
 
 
 def choose_reflection_snapshot(store: ClusterStore) -> tuple[RecordEnvelope | None, bool]:

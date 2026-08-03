@@ -342,6 +342,7 @@ class Config:
     CLAUDE_OBSERVE_LAUNCHD_LABEL = "com.intertwine.observational-memory.claude-observe"
     AUTO_MEMORY_LAUNCHD_LABEL = "com.intertwine.observational-memory.auto-memory"
     REFLECT_LAUNCHD_LABEL = "com.intertwine.observational-memory.reflect"
+    NATIVE_BRIDGE_LAUNCHD_LABEL = "com.intertwine.observational-memory.native-bridge"
 
     # Windows Task Scheduler task names mirror the launchd labels for parity
     # across platforms — the stable identifier is the bare label.
@@ -732,6 +733,32 @@ class Config:
     @property
     def scheduler_log_dir(self) -> Path:
         return self.memory_dir / ".scheduler-logs"
+
+    @property
+    def native_bridge_data_dir(self) -> Path:
+        """Private data and receipt root for the isolated native bridge."""
+        return self.memory_dir / ".native-memory-bridge"
+
+    @property
+    def native_bridge_config_dir(self) -> Path:
+        """Private, provider-independent native bridge configuration root."""
+        return self.env_file.parent / "native-bridge"
+
+    @property
+    def native_bridge_config_path(self) -> Path:
+        return self.native_bridge_config_dir / "config.json"
+
+    @property
+    def native_bridge_launchd_plist_path(self) -> Path:
+        return self.launch_agents_dir / f"{self.NATIVE_BRIDGE_LAUNCHD_LABEL}.plist"
+
+    @property
+    def native_bridge_launchd_stdout_path(self) -> Path:
+        return self.scheduler_log_dir / "native-bridge.out.log"
+
+    @property
+    def native_bridge_launchd_stderr_path(self) -> Path:
+        return self.scheduler_log_dir / "native-bridge.err.log"
 
     @property
     def codex_observe_launchd_plist_path(self) -> Path:
