@@ -45,6 +45,8 @@ om doctor
 
 `om native-bridge sources` lists eligible Claude project directory names with Markdown-file counts and reports whether the two fixed Codex source files are present. It does not show memory text or enroll anything. The first install requires at least one exact Claude project directory name from that list. Repeat `--claude-project` for more projects.
 
+If Claude Code or Codex was open during activation, finish or save active work and fully restart that host once. Managed hooks change on disk immediately, but an already-running host can retain its old hook table until restart. Run `om doctor` after the restart before relying on the older-writer hold.
+
 Flags on `om install --native-bridge` replace the complete saved Claude selection. To add or remove a project, repeat every project you want to keep:
 
 ```bash
@@ -254,6 +256,14 @@ om uninstall --native-bridge --purge
 ```
 
 This command first boots out the exact bridge service and verifies that it is absent. It then removes only the private bridge selection, derived generations, receipts, and bridge log files. It does not delete Claude Code or Codex native memory.
+
+Because purge removes the saved selection, re-enable the bridge with a new explicit selection:
+
+```bash
+om native-bridge sources
+om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+om bridge-native-memory
+```
 
 Removing the bridge does not restart older writer jobs. To leave the bridge and explicitly return to the full Claude Code and Codex workflow:
 

@@ -31,6 +31,8 @@ om doctor
 
 The first install needs macOS and at least one eligible Claude project memory directory. Repeat `--claude-project` to include more than one. Codex memory joins the index when either fixed Codex memory file is present. Later installs and one-shot runs reuse the saved private Claude selection when you omit the flag.
 
+If Claude Code or Codex was open during activation, finish or save active work and fully restart that host once. The installer updates managed hooks on disk, but an already-running host can keep its old hook table until restart. Run `om doctor` after the restart before relying on the older-writer hold.
+
 Bridge search is explicit. Ordinary `om search` and `om recall` keep using the full OM memory store and do not merge bridge results.
 
 The bridge refreshes every 15 minutes and skips runs when the Mac is under pressure. Enabling it keeps OM's older Claude, Codex, and Cowork transcript writers off while preserving read-only startup context. It does not change Grok, Kimi, or OpenCode.
@@ -96,15 +98,16 @@ flowchart LR
 
 1. Install `om` on macOS.
 2. Run `om native-bridge sources`, then install with an exact Claude project name from that list.
-3. Use Claude Code and Codex normally. Their native memory summaries remain the source of truth; the bridge refreshes its private index when they change.
-4. Retrieve bridge memory when you need it:
+3. Fully restart any Claude Code or Codex host that was open during activation, then run `om doctor`.
+4. Use Claude Code and Codex normally. Their native memory summaries remain the source of truth; the bridge refreshes its private index when they change.
+5. Retrieve bridge memory when you need it:
 
 ```bash
 om search --native-bridge "current project status"
 ```
 
-5. Run `om doctor` to verify the bridge and confirm that older OM writer services and hooks remain off.
-6. If you switch to the full OM workflow later, you can talk to OM's Markdown memory (experimental — flags may change) or inspect the startup pack:
+6. Run `om doctor` to verify the bridge and confirm that older OM writer services and hooks remain off.
+7. If you switch to the full OM workflow later, you can talk to OM's Markdown memory (experimental — flags may change) or inspect the startup pack:
 
 ```bash
 om talk --query "what was I working on last week?"

@@ -145,6 +145,8 @@ om doctor
 
 `om native-bridge status` and `om status` report bridge configuration, service state, and verified-index readiness. `om doctor` also verifies that the older Claude, Codex, auto-memory, and reflector services and OM-managed writer hooks remain off.
 
+If Claude Code or Codex was open during activation, finish or save active work and fully restart that host once before relying on this result. The installer changes managed hooks on disk, but an already-running host can retain its old hook table until restart. Run `om doctor` after the restart.
+
 None of these commands prints indexed memory text.
 
 ## Disable, Uninstall, Or Roll Back
@@ -179,7 +181,8 @@ OM first boots out the exact bridge service and verifies that it is absent. It t
 Re-enable the bridge later:
 
 ```bash
-om install --native-bridge
+om native-bridge sources
+om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
 om bridge-native-memory
 ```
 

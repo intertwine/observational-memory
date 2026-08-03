@@ -369,13 +369,18 @@ It is the authoritative way to prove "the om session start issue is fixed and wi
 
 Release flow:
 
-1. Confirm the docs and release notes in the latest [RELEASE-*.md](RELEASE-0.10.0.md) file (or create a new one for the next version).
+1. Confirm the README, documentation index, operating guide, and latest [RELEASE-*.md](RELEASE-0.10.0.md) file. Review public copy for factual accuracy, a clear reader path, and support-safe commands.
 2. Bump the version with the appropriate `make bump-version BUMP=...` command.
-3. Run `make check`.
-4. Build with `make build`.
-5. Publish to PyPI.
-6. Push the tag.
-7. Watch the Homebrew release workflow.
+3. Validate companion integrations against a wheel built from the candidate. Publish any companion versions named by the core docs before those docs become public.
+4. Run `make check`, the relevant integration suites, the documentation link check, and an installed-wheel smoke test.
+5. Open and merge the release pull request. Record the exact merged commit with `git rev-parse HEAD`.
+6. Wait for CI and dependency review to pass on that exact merged commit. A green candidate branch or an earlier main commit is not sufficient.
+7. Build the wheel and source archive once from a clean checkout of the accepted merged commit. Run `twine check`, record both SHA-256 hashes, and use this same artifact set for publication and verification.
+8. Publish those artifacts to PyPI and verify the public version and a clean isolated install.
+9. Tag that same accepted commit as `vX.Y.Z`, push the tag, and create the GitHub release with the plain title `vX.Y.Z` and the reviewed release notes.
+10. Watch the Homebrew release workflow, then verify the tap formula points to the released artifact and that a clean install or upgrade reports the expected version.
+
+Do not publish from an unmerged branch, rebuild artifacts between validation and upload, or move the release tag to a different commit.
 
 ## File Structure
 

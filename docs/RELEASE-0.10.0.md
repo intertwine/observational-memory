@@ -46,6 +46,8 @@ The explicit bridge install boots out the older Claude observer, Codex observer,
 
 Grok, Kimi, and OpenCode integrations are outside this Claude↔Codex migration scope. Existing writer integrations for those hosts are unchanged.
 
+After activation, fully restart any Claude Code or Codex host that was already running. Managed hooks change on disk immediately, but a running host can retain its old hook table until restart. Run `om doctor` after that restart before relying on the older-writer hold.
+
 ## Upgrade From v0.9.1
 
 After upgrading the package, install the bridge and check the result:
@@ -91,6 +93,8 @@ om doctor
 ```
 
 `--both` restores Claude Code and Codex only. To remove the bridge service plus its private config, derived index, receipts, and logs, run `om uninstall --native-bridge --purge`; source memory is untouched.
+
+After purge, run `om native-bridge sources` and pass at least one exact project name with `--claude-project` when you enable the bridge again. Purge intentionally removes the saved selection.
 
 ## Other Fixes
 
