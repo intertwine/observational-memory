@@ -373,10 +373,10 @@ Release flow:
 2. Bump the version with the appropriate `make bump-version BUMP=...` command.
 3. Validate companion integrations against a wheel built from the candidate. Publish any companion versions named by the core docs before those docs become public.
 4. Run `make check`, the relevant integration suites, the documentation link check, and an installed-wheel smoke test.
-5. Open and merge the release pull request. Record the exact merged commit with `git rev-parse HEAD`.
-6. Wait for CI and dependency review to pass on that exact merged commit. A green candidate branch or an earlier main commit is not sufficient.
+5. Open the release pull request and wait for both CI and dependency review to pass on its final merge ref. Merge only after those checks are green, then record the exact merged commit with `git rev-parse HEAD`.
+6. Wait for CI to pass again on that exact merged `main` commit. Dependency review runs on pull requests, so its accepted evidence is the final pre-merge check; a green earlier candidate or earlier `main` commit is not sufficient.
 7. Build the wheel and source archive once from a clean checkout of the accepted merged commit. Run `twine check`, record both SHA-256 hashes, and use this same artifact set for publication and verification.
-8. Publish those artifacts to PyPI and verify the public version and a clean isolated install.
+8. Upload those accepted artifacts directly with `uv run twine upload dist/*`, then verify the public version and a clean isolated install. Do not use a publish target that rebuilds them.
 9. Tag that same accepted commit as `vX.Y.Z`, push the tag, and create the GitHub release with the plain title `vX.Y.Z` and the reviewed release notes.
 10. Watch the Homebrew release workflow, then verify the tap formula points to the released artifact and that a clean install or upgrade reports the expected version.
 
