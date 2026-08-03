@@ -4,6 +4,7 @@ This folder holds the longer guides for Observational Memory. The main README is
 
 ## Start Here
 
+- [Native Claude and Codex memory](native-memory-bridge.md): the v0.10.0 macOS bridge, its privacy boundary, the shortest setup, upgrade, rollback, and troubleshooting.
 - [Install and setup](install.md): install paths, first run, and platform notes.
 - [Platform integrations](integrations.md): Claude Code, Codex, OpenCode, Kimi, Grok, Cowork, Hermes, ChatGPT, and Claude Managed Agents.
 - [Hermes plugin](hermes-plugin.md): standalone Hermes memory-provider setup and OM Cluster validation.
@@ -22,7 +23,8 @@ This folder holds the longer guides for Observational Memory. The main README is
 ## Maintainers
 
 - [Maintainer guide](MAINTAINERS.md): development, CI, QMD validation, release, and Homebrew work.
-- [v0.9.1 release notes](RELEASE-0.9.1.md): current release - Claude checkpoints in the bounded lane, streaming transcript scans, and a worker memory ceiling.
+- [v0.10.0 release notes](RELEASE-0.10.0.md): current release - a native-first, LLM-free Claude Code and Codex memory bridge for macOS.
+- [v0.9.1 release notes](RELEASE-0.9.1.md): bounded Claude checkpoints, streaming transcript scans, and a worker memory ceiling.
 - [v0.9.0 release notes](RELEASE-0.9.0.md): OpenCode and Kimi support plus bounded background observers.
 - [v0.8.0 release notes](RELEASE-0.8.0.md): durable, provable, conversational memory plus the OM Mail preview.
 - [v0.7.0 release notes](RELEASE-0.7.0.md): section-targeted reflection at scale.
@@ -35,6 +37,7 @@ Completed implementation plans and old status reports live under [archive/](arch
 ```mermaid
 flowchart TD
     R["README.md"] --> I["install.md"]
+    R --> N["native-memory-bridge.md"]
     R --> P["integrations.md"]
     P --> H["hermes-plugin.md"]
     R --> S["search-and-recall.md"]

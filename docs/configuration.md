@@ -356,6 +356,38 @@ Important files:
 - `.search-index/`: local search index
 - `backups/`: host-local memory snapshots (never synced)
 
+## Native-Memory Bridge
+
+The v0.10.0 native-memory bridge is a separate, fixed local lane for Claude Code and Codex memory summaries on macOS:
+
+```bash
+om native-bridge sources
+om install --native-bridge --claude-project "<exact-directory-name>"
+om bridge-native-memory
+om native-bridge status
+om status
+om doctor
+```
+
+It is intentionally not configured like the full observation and reflection workflow:
+
+- no LLM provider, login, or API key;
+- Codex `MEMORY.md` and `memory_summary.md`, plus Markdown in the exact Claude project memory directories selected with repeated `--claude-project` flags;
+- an isolated local BM25 generation rather than QMD, Moss, or a remote backend;
+- one fixed 15-minute launchd cadence;
+- normal macOS memory pressure, at most 80% swap use, a 15-second deadline, 128 MiB process-tree RSS, 2 MiB per file, and 16 MiB total input;
+- no Claude, Codex, or Cowork writer hooks, observer services, auto-memory service, or reflector service enabled for this path.
+
+`om native-bridge sources [--json]` lists eligible Claude project directory names with counts only and reports whether the fixed Codex allowlist files are present. It does not enroll a source. On first install, at least one `--claude-project <exact-directory-name>` is required. The sorted selection is saved in private `0600` bridge config. A later install or one-shot run can omit the flag and reuse that selection.
+
+The bridge does not load provider settings for a run. `OM_SEARCH_BACKEND`, the observer interval settings, and the reflector settings below do not widen or change its behavior.
+
+Bridge activation keeps read-only SessionStart context in place and preserves unrelated hook groups. Grok, Kimi, and OpenCode integrations are outside its migration scope.
+
+Use `om native-bridge disable` to unload the bridge while keeping its service definition. Use `om uninstall --native-bridge` to remove the service definition too. Both preserve native source memory, the private project selection, derived index data, and receipts; neither restarts older writer jobs. To return explicitly to the full Claude Code and Codex workflow, run `om install --both` afterward.
+
+For source scope, retrieval, upgrade, rollback, and failure handling, see [Native Claude and Codex memory](native-memory-bridge.md).
+
 ## Memory Backup
 
 OM keeps host-local, versioned snapshots of your memory so a bad reflect or an accidental delete can be rolled back. Before every reflect write, OM takes an automatic `pre-reflect` snapshot of the current (last-good) Markdown. The snapshot step is fail-closed: if it cannot run, reflect still writes and only logs a one-line note.

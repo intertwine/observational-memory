@@ -58,6 +58,21 @@ om context --for codex --cwd "$PWD" --task "review current work"
 om recall --query "current work" --for codex --cwd "$PWD"
 ```
 
+## Native Claude Code And Codex Bridge
+
+On macOS, v0.10.0 can index approved native memory summaries from Claude Code and Codex without using their transcripts or an LLM:
+
+```bash
+om native-bridge sources
+om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+om bridge-native-memory
+om search --native-bridge "current project status"
+```
+
+This is a separate mode from the writer-hook integrations above. Activation removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks, keeps read-only SessionStart context, and leaves the older observer and reflector services disabled. Grok, Kimi, and OpenCode integrations are not changed.
+
+See [Native Claude and Codex memory](native-memory-bridge.md) for the source boundary, lifecycle, rollback, and troubleshooting.
+
 ## Kimi Code CLI
 
 Kimi Code CLI supports lifecycle hooks in `~/.kimi/config.toml`. Install OM hooks with:
@@ -138,7 +153,7 @@ hermes memory setup
 
 Choose `observational_memory` in the memory setup flow. Hermes memory providers are exclusive plugins, so activation happens through `memory.provider` instead of `plugins.enabled`.
 
-The plugin pins its own supported `observational-memory` version range — check [the plugin repo](https://github.com/intertwine/hermes-observational-memory) for the current line before upgrading `om` on a Hermes host. Supported recent Hermes builds discover the plugin from `$HERMES_HOME/plugins/observational_memory`; no source-tree symlink is needed.
+The plugin pins its own supported `observational-memory` version range. Its current release accepts OM 0.9.x and does not yet declare v0.10 support, so keep that host on its accepted line until a compatible plugin release passes validation. Check [the plugin repo](https://github.com/intertwine/hermes-observational-memory) before upgrading. Supported recent Hermes builds discover the plugin from `$HERMES_HOME/plugins/observational_memory`; no source-tree symlink is needed.
 
 The plugin adds:
 
@@ -211,6 +226,8 @@ Notes:
 ## Grok Build TUI (xAI)
 
 Grok has excellent native hook support and also reads `~/.claude/settings.json` for compatibility.
+
+The core integration below is installed by `om` and is separate from the independently released Grok marketplace plugin. The current marketplace plugin accepts OM 0.9.x and does not yet declare v0.10 support; check its release before upgrading a host that depends on it.
 
 Install:
 

@@ -8,10 +8,12 @@ https://github.com/intertwine/hermes-observational-memory
 
 Use it when you want Hermes to read the same local-first memory as Claude Code, Codex, Grok Build TUI, and Cowork during live sessions. Core `om` still supports Hermes transcript ingestion directly; the plugin adds live context and tools inside Hermes.
 
+> **v0.10 compatibility:** the current Hermes plugin release requires `observational-memory>=0.9.0,<0.10` and does not yet declare v0.10 support. Keep that Hermes host on its accepted OM line until a compatible plugin release passes its own validation.
+
 ## Requirements
 
 - Hermes with user-installed memory provider discovery. Recent Hermes releases discover providers from `$HERMES_HOME/plugins/<name>`.
-- `observational-memory>=0.6.6,<0.7`.
+- `observational-memory>=0.9.0,<0.10` for the current plugin release.
 - Optional: an initialized OM Cluster when you want shared memory across machines.
 
 ## Install
@@ -35,7 +37,7 @@ The `--no-enable` flag is intentional. Hermes memory providers are exclusive plu
 If Hermes does not install the Python dependency automatically, install it in the Hermes runtime:
 
 ```bash
-uv pip install "observational-memory>=0.6.6,<0.7"
+uv pip install "observational-memory>=0.9.0,<0.10"
 ```
 
 ## What Hermes Gets

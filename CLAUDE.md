@@ -4,10 +4,11 @@ This file guides Claude Code when working in this repository.
 
 ## Current Release Context
 
-The current release line is `v0.9.1`. Do not tag, publish, bump the version, or update Homebrew again unless Bryan explicitly asks for another release.
+The current release line is `v0.10.0`. Do not tag, publish, bump the version, or update Homebrew unless Bryan explicitly asks for another release action.
 
 Current important features:
 
+- v0.10.0 theme — native-first Claude Code↔Codex memory on macOS: fixed allowlist, private local BM25, explicit `om search --native-bridge`, 15-minute bounded service, and no transcript/LLM/reflection path (see `docs/RELEASE-0.10.0.md` and `docs/native-memory-bridge.md`)
 - v0.9.1 theme — hardened background observation: Claude checkpoints in the bounded lane on every platform, streaming transcript scans, and a worker memory ceiling (`OM_OBSERVER_WORKER_MAX_RSS_MB`) with distinct `memory_exceeded` status (see `docs/RELEASE-0.9.1.md`)
 - v0.9.0 theme — broader, bounded agent memory: OpenCode and Kimi support plus bounded background observers (see `docs/RELEASE-0.9.0.md`)
 - v0.8.0 theme — trustworthy memory: durable, provable, conversational (see `docs/RELEASE-0.8.0.md`)
@@ -65,6 +66,7 @@ observations.md + auto-memory -> om reflect -> reflections.md
 reflections.md -> profile.md + active.md -> om context
 reflections/search index -> om recall / om search
 cluster records -> materialized Markdown views
+Claude/Codex native summaries -> native bridge -> private BM25 -> om search --native-bridge
 ```
 
 Important modules:
@@ -74,6 +76,7 @@ Important modules:
 - `src/observational_memory/observe.py`: transcript observation.
 - `src/observational_memory/reflect.py`: durable reflection.
 - `src/observational_memory/startup_memory.py`: budgeted startup packs and recall handles.
+- `src/observational_memory/native_bridge/`: read-only native source capture, admission, bounded worker, private generations, and macOS lifecycle.
 - `src/observational_memory/reflection_metadata.py`: inline metadata, local scope, and conflict detection.
 - `src/observational_memory/usage/`: host-local LLM usage tracking, cost estimation, and budget enforcement (`usage.sqlite`, never synced).
 - `src/observational_memory/jobs/`: async provider jobs — API-key OpenAI Batch backend for `om reflect --async` (host-local job store under `.provider-jobs/`, never synced; never used for `openai-chatgpt`).
@@ -92,6 +95,8 @@ Important modules:
 - Cowork: macOS local plugin with hooks and `/recall`.
 - Hermes: core `om` supports manual transcript ingestion; live startup context, search, explicit writes, and OM Cluster participation come from the external `intertwine/hermes-observational-memory` Hermes memory-provider plugin.
 
+The v0.10 native bridge is macOS-only and covers Claude Code and Codex native memory. Bridge activation removes OM-managed Claude/Codex/Cowork writer hooks while preserving read-only SessionStart context; Grok, Kimi, and OpenCode are outside that migration scope. The separately released Hermes and Grok plugins currently cap OM below v0.10 and need independent compatibility releases before docs can claim support.
+
 Do not document Hermes as `om install` hook-installed. The Hermes plugin is installed and selected through Hermes itself.
 
 ## Documentation Rules
@@ -101,6 +106,7 @@ Keep the README short. Put deeper material in `docs/`.
 Current docs:
 
 - `README.md`: short user doorway.
+- `docs/native-memory-bridge.md`: native bridge setup, source/privacy boundary, lifecycle, rollback, and troubleshooting.
 - `docs/install.md`: user install guide.
 - `docs/integrations.md`: platform integrations.
 - `docs/search-and-recall.md`: startup, recall, search, and QMD basics.
@@ -110,6 +116,7 @@ Current docs:
 - `docs/mail-memory.md`: OM Mail — email inboxes as a memory substrate (experimental).
 - `docs/om-cluster-validation.md`: public-safe cluster validation.
 - `docs/MAINTAINERS.md`: maintainer workflows.
+- `docs/RELEASE-0.10.0.md`: current release notes.
 
 Use plain English. Aim for a 10th grade reading level. Prefer short sections and tested CLI snippets.
 
@@ -150,4 +157,4 @@ uv run om recall --query "current work" --limit 3
 
 ## Release Boundary
 
-`v0.9.1` has release notes in `docs/RELEASE-0.9.1.md`. Future release steps require explicit user approval.
+`v0.10.0` has release notes in `docs/RELEASE-0.10.0.md`. Tagging, publishing, version changes, and Homebrew updates require explicit user approval.

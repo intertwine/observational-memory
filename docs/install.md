@@ -4,10 +4,9 @@ This guide is for people installing Observational Memory for day-to-day use. Mai
 
 ## What You Need
 
-- Python 3.11 or newer
-- `uv` or Homebrew
-- Claude Code, Codex, OpenCode, Kimi Code CLI, and/or Grok Build TUI if you want automatic hooks
-- One LLM provider:
+- Homebrew or `uv`
+- For the v0.10.0 native-memory bridge: macOS plus Claude Code and Codex native memory
+- For the full OM observation and reflection workflow: Python 3.11 or newer, a supported agent, and one LLM provider:
   - Anthropic API key
   - OpenAI API key
   - **OpenAI ChatGPT subscription** (`om login openai-chatgpt`)
@@ -16,22 +15,49 @@ This guide is for people installing Observational Memory for day-to-day use. Mai
   - Anthropic on Vertex AI
   - Anthropic on Bedrock
 
-If you already pay for ChatGPT Plus / Pro / Team or SuperGrok, prefer `om login` over an API key — it routes calls through your subscription instead of charging per token. See [configuration.md](configuration.md) for the cost comparison and how the auth flows work.
+The native-memory bridge does not need a provider or login. It reads only approved native memory summaries and builds a local BM25 index.
 
-## Fast Install
+If you enable the full workflow and already pay for ChatGPT Plus / Pro / Team or SuperGrok, prefer `om login` over an API key — it routes calls through your subscription instead of charging per token. See [configuration.md](configuration.md) for the cost comparison and how the auth flows work.
+
+## Fast Native-Bridge Install
 
 macOS with Homebrew:
 
 ```bash
 brew install intertwine/tap/observational-memory
-om install
+om native-bridge sources
+om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+om bridge-native-memory
 om doctor
 ```
 
-Any platform with `uv`:
+macOS with `uv`:
 
 ```bash
 uv tool install observational-memory
+om native-bridge sources
+om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+om bridge-native-memory
+om doctor
+```
+
+`om native-bridge sources` lists eligible Claude project directory names with Markdown-file counts and reports whether the two fixed Codex source files are present. It does not show memory text or enroll anything. The first install requires at least one exact Claude project directory name from that list. Repeat `--claude-project` for more projects. OM saves the sorted selection in private config, so later installs and one-shot runs can omit it.
+
+The bridge service checks for changed Claude Code and Codex memory summaries every 15 minutes. The one-shot command runs the same bounded path immediately. It does not read raw transcripts, call an LLM, or run reflection. Search its isolated index explicitly:
+
+```bash
+om search --native-bridge "current project status"
+```
+
+Ordinary `om search` and `om recall` keep using the full OM memory store. They do not merge bridge results.
+
+See [Native Claude and Codex memory](native-memory-bridge.md) for source scope, retrieval, upgrade, rollback, and troubleshooting.
+
+## Full OM Install
+
+Use the full installer when you want OM to observe supported agent sessions and maintain its own Markdown memory:
+
+```bash
 om install
 om doctor
 ```
@@ -42,7 +68,7 @@ Enterprise auth extras:
 uv tool install "observational-memory[enterprise]"
 ```
 
-## First Run
+## First Full-Workflow Run
 
 Run the installer:
 
@@ -67,6 +93,8 @@ om doctor
 ```
 
 Use `om doctor --validate-key` when you want to confirm the configured LLM provider can make a live call.
+
+`--validate-key` is not needed for a bridge-only install because the bridge does not use an LLM provider.
 
 ## Non-Interactive Install
 
@@ -135,6 +163,29 @@ Defaults:
 
 Use `--scheduler none` if you want to run `om observe` and `om reflect` yourself.
 
+These scheduler flags apply to the full transcript-based workflow. The native bridge has its own fixed 15-minute macOS service; `om install --native-bridge` manages it directly.
+
+## Upgrade From v0.9.1
+
+Upgrade the package, then choose the bridge explicitly:
+
+```bash
+brew upgrade observational-memory   # or: uv tool upgrade observational-memory
+om native-bridge sources
+om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+om bridge-native-memory
+om status
+om doctor
+```
+
+On an existing full install, `om install --native-bridge` boots out the four older macOS writer jobs: the Claude observer, Codex observer, Claude auto-memory scan, and reflector. Their plist files stay in place, but the bridge installer does not enable them.
+
+It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks. It preserves OM's read-only SessionStart context hooks and fallback, along with unrelated hook groups. If bridge setup fails, the installer restores the exact service and file state it found before it started.
+
+Grok, Kimi, and OpenCode are outside this Claude↔Codex migration. If you installed their writer integrations earlier, they are unchanged and may still feed the full OM workflow.
+
+This switch does not delete OM Markdown memory or the native Claude Code and Codex source files.
+
 ## Windows Notes
 
 On Windows:
@@ -145,6 +196,7 @@ On Windows:
 - Claude hooks call `om` directly, so `bash` and `jq` are not required
 - Grok hooks call `om` directly, so `bash` and `jq` are not required
 - Cowork install is skipped because Cowork is macOS-only
+- the v0.10.0 native-memory bridge is unavailable; `om install --native-bridge` fails without changing the install
 
 PowerShell examples:
 
@@ -155,6 +207,30 @@ om doctor
 ```
 
 ## Uninstall
+
+Temporarily disable scheduled refresh while keeping the service definition:
+
+```bash
+om native-bridge disable
+```
+
+Re-enable it with `om install --native-bridge`; the installer reuses the saved Claude project selection.
+
+Disable and remove only the native-memory bridge service:
+
+```bash
+om uninstall --native-bridge
+```
+
+Both paths leave Claude Code and Codex native memory untouched. Private bridge config, derived index data, and receipts are also preserved for diagnosis or re-enabling. Uninstall is the feature-level rollback path if you want to keep OM v0.10.0 but remove the scheduled service.
+
+Removing the bridge does not restart older writer jobs. To leave the bridge and explicitly return to the full Claude Code and Codex workflow:
+
+```bash
+om uninstall --native-bridge
+om install --both
+om doctor
+```
 
 Remove hooks and scheduled jobs:
 

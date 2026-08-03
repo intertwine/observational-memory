@@ -39,6 +39,7 @@ CI runs the lint step on Python 3.11, 3.12, and 3.13. A local `ruff check` pass 
 Current docs should follow this layout:
 
 - `README.md`: short user doorway, install snippet, architecture picture, and links.
+- `docs/native-memory-bridge.md`: reader-facing bridge setup, privacy boundary, lifecycle, rollback, and troubleshooting.
 - `docs/install.md`: user install and setup.
 - `docs/integrations.md`: host-specific behavior.
 - `docs/search-and-recall.md`: `om context`, `om recall`, `om search`, and QMD basics.
@@ -48,6 +49,32 @@ Current docs should follow this layout:
 - `docs/MAINTAINERS.md`: maintainer and release workflows.
 
 Use plain English. Aim for a 10th grade reading level. Prefer short sections, tables, and working CLI snippets. Archive completed implementation plans under `docs/archive/` instead of linking them as current guidance.
+
+## Native-Memory Bridge Release Gate
+
+The v0.10 native-memory bridge has a narrower contract than the full OM workflow. Documentation and CLI review must preserve these points:
+
+- macOS-only availability for both scheduled and one-shot use;
+- read-only Claude Code and Codex native source roots;
+- Codex `MEMORY.md` and `memory_summary.md` only, plus Markdown below explicitly selected Claude `projects/<name>/memory/` directories, with raw memory, transcripts, and session logs excluded;
+- local BM25 only, with no provider environment, LLM, reflection, QMD, Moss, or remote-backend path;
+- a fixed 15-minute service interval; normal-pressure and at-most-80%-swap admission; and fixed 15-second, 128 MiB RSS, 2 MiB per-file, and 16 MiB total-input ceilings;
+- `om status` and `om doctor` visibility;
+- `om native-bridge disable` unloads the service but retains its plist, while `om uninstall --native-bridge` removes only the bridge service; both preserve private config, derived data, and receipts, and neither restarts older writer jobs;
+- return to the full workflow requires an explicit install target such as `om install --both`.
+
+Before release, use isolated test roots for lifecycle tests; do not exercise an unreviewed build against a maintainer's live native-memory directories. Verify the exact release head with:
+
+```bash
+uv run pytest tests/native_bridge tests/test_cli_install.py tests/test_cli_doctor.py
+uv run ruff check .
+uv run ruff format --check .
+git diff --check
+```
+
+Also compare `om install --help`, `om uninstall --help`, `om native-bridge --help`, `om bridge-native-memory --help`, `om search --help`, `om status`, and `om doctor` with the public examples. `om native-bridge sources [--json]` must expose eligible project names and counts without memory text or implicit enrollment. The first install must require an explicit Claude project selection, while re-install and one-shot paths may reuse the saved private config. Do not expose internal resource profiles in public help or publish test totals or performance figures that were not captured from the exact release head.
+
+The external Hermes memory-provider and Grok marketplace plugins have independent OM dependency ranges. A core v0.10 release does not prove those plugins compatible; each plugin needs its own compatibility pass before OM docs can claim support for that release line.
 
 ## QMD Benchmarking
 
@@ -202,7 +229,7 @@ Runtime expectations:
 - It intentionally drops `session_meta`, raw tool output, and other machine-oriented records before the observer LLM sees them.
 - `om install` does not manage Hermes hooks, install the Hermes plugin, or set `memory.provider`; keep docs and status output truthful about that scope.
 - The Hermes plugin is installed with `hermes plugins install intertwine/hermes-observational-memory --no-enable` and activated with `hermes memory setup`.
-- Keep the plugin dependency line aligned with the current OM release line; for `v0.9.0`, the plugin should require `observational-memory>=0.9.0,<0.10` after the plugin repo passes its compatibility validation.
+- The current plugin requires `observational-memory>=0.9.0,<0.10`. Do not widen it or claim v0.10 support until the plugin repo passes its own compatibility validation.
 
 Tests that should protect Hermes behavior:
 
@@ -300,7 +327,7 @@ If `intertwine/tap` is not tapped locally, `make brew-check` exits with instruct
 
 ## Current Release Process
 
-`v0.9.1` is the current release (bounded Claude checkpoints, streaming transcript scans, and a worker memory ceiling; see `docs/RELEASE-0.9.1.md`). The release process below should be followed for future releases.
+`v0.10.0` is the current release (native Claude Code and Codex memory bridge for macOS; see `docs/RELEASE-0.10.0.md`). The release process below should be followed for future releases.
 
 Before cutting a patch release:
 
@@ -342,7 +369,7 @@ It is the authoritative way to prove "the om session start issue is fixed and wi
 
 Release flow:
 
-1. Confirm the docs and release notes in the latest [RELEASE-*.md](RELEASE-0.9.0.md) file (or create a new one for the next version).
+1. Confirm the docs and release notes in the latest [RELEASE-*.md](RELEASE-0.10.0.md) file (or create a new one for the next version).
 2. Bump the version with the appropriate `make bump-version BUMP=...` command.
 3. Run `make check`.
 4. Build with `make build`.
@@ -356,6 +383,7 @@ Release flow:
 observational-memory/
 ├── README.md                         # Short user doorway
 ├── docs/MAINTAINERS.md               # This file
+├── docs/native-memory-bridge.md       # Native Claude and Codex bridge guide
 ├── docs/install.md                   # User install guide
 ├── docs/integrations.md              # Agent/platform integrations
 ├── docs/search-and-recall.md         # Startup, recall, search, QMD basics
