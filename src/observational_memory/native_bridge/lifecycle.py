@@ -91,7 +91,12 @@ def validate_claude_projects(projects: Sequence[str]) -> tuple[str, ...]:
     """Validate explicit one-component Claude project directory names."""
     normalized: set[str] = set()
     for raw in projects:
-        if not isinstance(raw, str) or not raw or len(raw.encode("utf-8")) > 255 or "\x00" in raw:
+        if (
+            not isinstance(raw, str)
+            or not raw
+            or len(raw.encode("utf-8")) > 255
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw)
+        ):
             raise NativeBridgeLifecycleError("Claude project names must be non-empty directory names")
         path = PurePosixPath(raw)
         if len(path.parts) != 1 or path.name in {"", ".", ".."} or raw != path.name:
@@ -115,9 +120,15 @@ def discover_claude_projects(config: Config) -> tuple[dict[str, object], ...]:
                     names = root.list_directory(f"{project}/memory")
                 except (FileNotFoundError, SecureAccessError, NativeBridgeLifecycleError):
                     continue
-                eligible = sorted(
-                    name for name in names if name.lower() != "raw_memories.md" and name.lower().endswith(".md")
-                )
+                eligible = []
+                for name in names:
+                    if name.lower() == "raw_memories.md" or not name.lower().endswith(".md"):
+                        continue
+                    try:
+                        root.inspect_regular_file(f"{project}/memory/{name}")
+                    except (FileNotFoundError, SecureAccessError):
+                        continue
+                    eligible.append(name)
                 if eligible:
                     candidates.append({"project": project, "eligible_markdown_files": len(eligible)})
             return tuple(candidates)
@@ -135,7 +146,9 @@ def discover_codex_sources(config: Config) -> tuple[dict[str, object], ...]:
     else:
         try:
             with SecureRoot(codex_root, writable=False) as root:
-                names = set(root.list_entries())
+                names = {
+                    filename for filename in NATIVE_BRIDGE_CODEX_ALLOWLIST if root.has_secure_regular_file(filename)
+                }
         except SecureAccessError as exc:
             raise NativeBridgeLifecycleError(f"Codex memories root failed secure validation: {exc}") from exc
     return tuple({"filename": filename, "present": filename in names} for filename in NATIVE_BRIDGE_CODEX_ALLOWLIST)
@@ -202,16 +215,25 @@ def load_settings(config: Config, *, required: bool = True) -> NativeBridgeSetti
     return _parse_settings(raw)
 
 
-def write_settings(config: Config, settings: NativeBridgeSettings) -> None:
+def write_settings(
+    config: Config,
+    settings: NativeBridgeSettings,
+    *,
+    expected_snapshot: OwnedFileSnapshot | None = None,
+) -> str:
     """Atomically publish canonical 0600 settings below a 0700 root."""
+    payload = settings_bytes(settings)
     try:
         config.native_bridge_config_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
         with SecureRoot(config.native_bridge_config_dir, writable=True, create=True) as storage:
             with storage.acquire_store_transaction() as transaction:
+                if expected_snapshot is not None:
+                    _require_owned_file_snapshot(config.native_bridge_config_path, expected_snapshot)
                 storage.establish_boundary(("config.json",), transaction=transaction)
-                storage.atomic_write_bytes("config.json", settings_bytes(settings), transaction=transaction)
+                storage.atomic_write_bytes("config.json", payload, transaction=transaction)
     except (SecureAccessError, OSError) as exc:
         raise NativeBridgeLifecycleError(f"could not write private native bridge config: {exc}") from exc
+    return hashlib.sha256(payload).hexdigest()
 
 
 def snapshot_owned_file(path: Path, *, max_bytes: int = NATIVE_BRIDGE_CONFIG_MAX_BYTES) -> OwnedFileSnapshot:
@@ -257,11 +279,25 @@ def snapshot_owned_file(path: Path, *, max_bytes: int = NATIVE_BRIDGE_CONFIG_MAX
         os.close(descriptor)
 
 
-def atomic_write_owned_file(path: Path, data: bytes, *, mode: int = 0o600) -> str:
+def _require_owned_file_snapshot(path: Path, expected: OwnedFileSnapshot) -> OwnedFileSnapshot:
+    """Prove one managed leaf still matches the snapshot used to render its update."""
+    current = snapshot_owned_file(path, max_bytes=4 * 1024 * 1024)
+    if current != expected:
+        raise NativeBridgeLifecycleError(f"refusing to overwrite a concurrently changed managed file: {path}")
+    return current
+
+
+def atomic_write_owned_file(
+    path: Path,
+    data: bytes,
+    *,
+    mode: int = 0o600,
+    expected_snapshot: OwnedFileSnapshot | None = None,
+) -> str:
     """Atomically replace one managed leaf and return the installed digest."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing = snapshot_owned_file(path, max_bytes=max(len(data), NATIVE_BRIDGE_CONFIG_MAX_BYTES))
-    del existing
+    if expected_snapshot is None:
+        snapshot_owned_file(path, max_bytes=max(len(data), NATIVE_BRIDGE_CONFIG_MAX_BYTES))
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     descriptor: int | None = None
     try:
@@ -276,6 +312,8 @@ def atomic_write_owned_file(path: Path, data: bytes, *, mode: int = 0o600) -> st
         os.fchmod(descriptor, mode)
         os.close(descriptor)
         descriptor = None
+        if expected_snapshot is not None:
+            _require_owned_file_snapshot(path, expected_snapshot)
         os.replace(temporary, path)
         parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
@@ -297,13 +335,21 @@ def atomic_write_owned_file(path: Path, data: bytes, *, mode: int = 0o600) -> st
 def restore_owned_file(path: Path, snapshot: OwnedFileSnapshot, *, expected_digest: str | None = None) -> None:
     """Restore a snapshot, refusing to overwrite a concurrent replacement."""
     current = snapshot_owned_file(path, max_bytes=4 * 1024 * 1024)
+    if current == snapshot:
+        return
     if expected_digest is not None:
         current_digest = hashlib.sha256(current.data or b"").hexdigest() if current.exists else None
         if current_digest != expected_digest:
             raise NativeBridgeLifecycleError(f"refusing to overwrite a concurrently changed managed file: {path}")
     if snapshot.exists:
-        atomic_write_owned_file(path, snapshot.data or b"", mode=snapshot.mode or 0o600)
+        atomic_write_owned_file(
+            path,
+            snapshot.data or b"",
+            mode=snapshot.mode or 0o600,
+            expected_snapshot=current,
+        )
     elif current.exists:
+        _require_owned_file_snapshot(path, current)
         path.unlink()
 
 
@@ -456,9 +502,14 @@ def install_bridge_launchd(
         raise NativeBridgeLifecycleError(
             f"cannot snapshot native bridge LaunchAgent state: {prior_state.error or 'unknown'}"
         )
-    installed_digest: str | None = None
+    installed_digest = hashlib.sha256(payload).hexdigest()
     try:
-        installed_digest = atomic_write_owned_file(config.native_bridge_launchd_plist_path, payload, mode=0o600)
+        atomic_write_owned_file(
+            config.native_bridge_launchd_plist_path,
+            payload,
+            mode=0o600,
+            expected_snapshot=prior_file,
+        )
         set_launchd_enabled(config.NATIVE_BRIDGE_LAUNCHD_LABEL, True, run_launchctl=run_launchctl)
         bootout_launchd(config.NATIVE_BRIDGE_LAUNCHD_LABEL, run_launchctl=run_launchctl)
         bootstrap_launchd(config.native_bridge_launchd_plist_path, run_launchctl=run_launchctl)
@@ -480,12 +531,12 @@ def install_bridge_launchd(
         except Exception as exc:
             rollback_errors.append(str(exc))
         try:
-            set_launchd_enabled(
+            _restore_launchd_override(
                 config.NATIVE_BRIDGE_LAUNCHD_LABEL,
-                prior_state.override != "disabled",
+                prior_state.override,
                 run_launchctl=run_launchctl,
             )
-            if prior_state.loaded and prior_file.exists:
+            if prior_state.loaded and prior_file.exists and prior_state.override == "enabled":
                 bootstrap_launchd(config.native_bridge_launchd_plist_path, run_launchctl=run_launchctl)
         except Exception as exc:
             rollback_errors.append(str(exc))
@@ -600,20 +651,35 @@ def quiesce_legacy_launchd(
     return snapshots
 
 
+def _restore_launchd_override(
+    label: str,
+    override: str,
+    *,
+    run_launchctl: RunLaunchctl,
+) -> None:
+    """Restore only explicit enablement; unknown/default states fall back to safe hold."""
+    if override == "enabled":
+        set_launchd_enabled(label, True, run_launchctl=run_launchctl)
+    elif override in {"disabled", "default", "unknown"}:
+        set_launchd_enabled(label, False, run_launchctl=run_launchctl)
+    else:
+        raise NativeBridgeLifecycleError(f"unsupported LaunchAgent override state for {label}: {override}")
+
+
 def restore_launchd_states(
     config: Config,
     states: dict[str, LaunchdState],
     *,
     run_launchctl: RunLaunchctl = _default_run_launchctl,
 ) -> None:
-    """Restore effective enablement/load state for captured LaunchAgents."""
+    """Restore explicit enablement; keep default/unknown states safely disabled."""
     errors: list[str] = []
     for label, state in states.items():
         try:
             bootout_launchd(label, run_launchctl=run_launchctl)
-            set_launchd_enabled(label, state.override != "disabled", run_launchctl=run_launchctl)
+            _restore_launchd_override(label, state.override, run_launchctl=run_launchctl)
             plist_path = config.launch_agents_dir / f"{label}.plist"
-            if state.loaded and state.installed and plist_path.exists():
+            if state.loaded and state.installed and state.override == "enabled" and plist_path.exists():
                 bootstrap_launchd(plist_path, run_launchctl=run_launchctl)
         except Exception as exc:
             errors.append(f"{label}: {exc}")

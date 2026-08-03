@@ -88,7 +88,11 @@ def capture_claude(
     with SecureRoot(projects_root, writable=False) as root:
         for project in sorted(set(projects)):
             project_path = PurePosixPath(project)
-            if len(project_path.parts) != 1 or project_path.name in {"", ".", ".."}:
+            if (
+                len(project_path.parts) != 1
+                or project_path.name in {"", ".", ".."}
+                or any(ord(character) < 0x20 or ord(character) == 0x7F for character in project)
+            ):
                 raise SecureAccessError(f"Claude project opt-in must be one directory name: {project}")
             memory_relative = f"{project}/memory"
             for name in root.list_directory(memory_relative):

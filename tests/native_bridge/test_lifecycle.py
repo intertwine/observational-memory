@@ -17,6 +17,7 @@ from observational_memory.native_bridge.lifecycle import (
     NATIVE_BRIDGE_INTERVAL_SECONDS,
     NativeBridgeLifecycleError,
     NativeBridgeSettings,
+    atomic_write_owned_file,
     disable_bridge_launchd,
     discover_claude_projects,
     discover_codex_sources,
@@ -26,6 +27,8 @@ from observational_memory.native_bridge.lifecycle import (
     load_settings,
     purge_bridge_state,
     quiesce_legacy_launchd,
+    restore_launchd_states,
+    snapshot_owned_file,
     uninstall_bridge_launchd,
     write_settings,
 )
@@ -117,6 +120,49 @@ def test_settings_fail_closed_on_allowlist_or_permission_change(monkeypatch, tmp
         load_settings(config)
 
 
+@pytest.mark.parametrize("project", ["project\x00name", "project\nname", "project\tname", "project\x7fname"])
+def test_project_selection_rejects_c0_and_del(project):
+    with pytest.raises(NativeBridgeLifecycleError, match="project names"):
+        NativeBridgeSettings((project,))
+
+
+def test_settings_expected_snapshot_rejects_concurrent_change(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    write_settings(config, NativeBridgeSettings(("old-project",)))
+    expected = snapshot_owned_file(config.native_bridge_config_path)
+    concurrent = b'{"concurrent":true}\n'
+    config.native_bridge_config_path.write_bytes(concurrent)
+    config.native_bridge_config_path.chmod(0o600)
+
+    with pytest.raises(NativeBridgeLifecycleError, match="concurrently changed"):
+        write_settings(
+            config,
+            NativeBridgeSettings(("new-project",)),
+            expected_snapshot=expected,
+        )
+
+    assert config.native_bridge_config_path.read_bytes() == concurrent
+
+
+def test_atomic_owned_write_rejects_concurrent_hook_change(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    path = config.claude_settings_path
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"hooks":{}}\n')
+    expected = snapshot_owned_file(path)
+    concurrent = b'{"hooks":{},"unrelated":true}\n'
+    path.write_bytes(concurrent)
+
+    with pytest.raises(NativeBridgeLifecycleError, match="concurrently changed"):
+        atomic_write_owned_file(
+            path,
+            b'{"hooks":{"SessionEnd":[]}}\n',
+            expected_snapshot=expected,
+        )
+
+    assert path.read_bytes() == concurrent
+
+
 def test_source_discovery_lists_names_and_counts_without_auto_enrollment(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
     first = config.claude_projects_dir / "-Users-example-project"
@@ -134,6 +180,26 @@ def test_source_discovery_lists_names_and_counts_without_auto_enrollment(monkeyp
     assert "sentinel" not in json.dumps(discovered)
 
 
+def test_source_discovery_counts_only_secure_regular_user_files(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    memory = config.claude_projects_dir / "project-a" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "valid.md").write_text("eligible")
+    (memory / "directory.md").mkdir()
+    (memory / "writable.md").write_text("unsafe")
+    (memory / "writable.md").chmod(0o622)
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside")
+    (memory / "symlink.md").symlink_to(outside)
+    hardlink_source = tmp_path / "hardlink-source.md"
+    hardlink_source.write_text("linked")
+    os.link(hardlink_source, memory / "hardlink.md")
+
+    discovered = discover_claude_projects(config)
+
+    assert discovered == ({"project": "project-a", "eligible_markdown_files": 1},)
+
+
 def test_codex_source_discovery_reports_fixed_presence_without_content(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
     memories = config.codex_home / "memories"
@@ -147,6 +213,20 @@ def test_codex_source_discovery_reports_fixed_presence_without_content(monkeypat
         {"filename": "memory_summary.md", "present": False},
     )
     assert "sentinel" not in json.dumps(discovered)
+
+
+def test_codex_source_discovery_rejects_unsafe_allowlisted_leaf(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    memories = config.codex_home / "memories"
+    memories.mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("private")
+    (memories / "MEMORY.md").symlink_to(outside)
+
+    assert discover_codex_sources(config) == (
+        {"filename": "MEMORY.md", "present": False},
+        {"filename": "memory_summary.md", "present": False},
+    )
 
 
 def test_launchd_plist_uses_installed_om_fixed_cadence_and_no_provider_env(monkeypatch, tmp_path):
@@ -205,6 +285,7 @@ def test_bootstrap_failure_restores_prior_plist_mode_and_loaded_state(monkeypatc
     config.native_bridge_launchd_plist_path.write_bytes(prior_payload)
     config.native_bridge_launchd_plist_path.chmod(0o640)
     fake = FakeLaunchctl(config)
+    fake.disabled[config.NATIVE_BRIDGE_LAUNCHD_LABEL] = False
     fake.loaded.add(config.NATIVE_BRIDGE_LAUNCHD_LABEL)
     fake.bootstrap_failures = 1
 
@@ -214,6 +295,52 @@ def test_bootstrap_failure_restores_prior_plist_mode_and_loaded_state(monkeypatc
     assert config.native_bridge_launchd_plist_path.read_bytes() == prior_payload
     assert stat.S_IMODE(config.native_bridge_launchd_plist_path.stat().st_mode) == 0o640
     assert config.NATIVE_BRIDGE_LAUNCHD_LABEL in fake.loaded
+
+
+def test_bootstrap_failure_from_default_enters_safe_disabled_hold(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    monkeypatch.setattr(lifecycle.sys, "platform", "darwin")
+    fake = FakeLaunchctl(config)
+    fake.bootstrap_failures = 1
+
+    with pytest.raises(NativeBridgeLifecycleError, match="activation failed"):
+        install_bridge_launchd(config, "/opt/om/bin/om", run_launchctl=fake)
+
+    label = config.NATIVE_BRIDGE_LAUNCHD_LABEL
+    assert fake.disabled[label] is True
+    assert label not in fake.loaded
+    override_calls = [call[0] for call in fake.calls if call[0] in {"enable", "disable"}]
+    assert override_calls[-1] == "disable"
+
+
+def test_plist_expected_snapshot_preserves_concurrent_replacement(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    monkeypatch.setattr(lifecycle.sys, "platform", "darwin")
+    fake = FakeLaunchctl(config)
+    path = config.native_bridge_launchd_plist_path
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"prior")
+    path.chmod(0o600)
+    concurrent = b"concurrent unrelated plist edit"
+    original_write = lifecycle.atomic_write_owned_file
+
+    def race(selected, data, *, mode=0o600, expected_snapshot=None):
+        assert expected_snapshot is not None
+        selected.write_bytes(concurrent)
+        return original_write(
+            selected,
+            data,
+            mode=mode,
+            expected_snapshot=expected_snapshot,
+        )
+
+    monkeypatch.setattr(lifecycle, "atomic_write_owned_file", race)
+
+    with pytest.raises(NativeBridgeLifecycleError, match="activation failed"):
+        install_bridge_launchd(config, "/opt/om/bin/om", run_launchctl=fake)
+
+    assert path.read_bytes() == concurrent
+    assert fake.disabled[config.NATIVE_BRIDGE_LAUNCHD_LABEL] is True
 
 
 def test_disable_retains_files_and_unloads_service(monkeypatch, tmp_path):
@@ -312,6 +439,21 @@ def test_bridge_activation_quiesces_exactly_four_legacy_launchagents(monkeypatch
     assert set(snapshots) == set(LEGACY_WRITER_LABELS)
     assert all(fake.disabled[label] is True for label in LEGACY_WRITER_LABELS)
     assert not fake.loaded.intersection(LEGACY_WRITER_LABELS)
+
+
+def test_restore_default_and_unknown_overrides_never_enables(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    monkeypatch.setattr(lifecycle.sys, "platform", "darwin")
+    fake = FakeLaunchctl(config)
+    states = {
+        "default-label": lifecycle.LaunchdState("default-label", False, False, "default"),
+        "unknown-label": lifecycle.LaunchdState("unknown-label", False, False, "unknown"),
+    }
+
+    restore_launchd_states(config, states, run_launchctl=fake)
+
+    assert fake.disabled == {"default-label": True, "unknown-label": True}
+    assert not [call for call in fake.calls if call[0] == "enable"]
 
 
 def test_non_macos_install_fails_before_launchctl_or_file_mutation(monkeypatch, tmp_path):

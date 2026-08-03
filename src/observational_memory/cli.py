@@ -22,6 +22,17 @@ from .config import Config
 _OBSERVE_SOURCES = ["claude", "codex", "opencode", "kimi", "grok", "hermes", "cowork", "claude-memory", "all"]
 _OBSERVER_WORKER_SOURCES = _OBSERVE_SOURCES
 _OBSERVER_RSS_CHECK_INTERVAL_SECONDS = 1.0
+_PROVIDER_FREE_ENTRYPOINTS = frozenset(
+    {
+        "bridge-native-memory",
+        "native-bridge-worker",
+        "native-bridge",
+        "install",
+        "search",
+        "uninstall",
+        "doctor",
+    }
+)
 _T = TypeVar("_T")
 
 
@@ -44,10 +55,19 @@ def cli(ctx: click.Context) -> None:
     """Observational Memory — shared memory for Claude Code, Codex CLI, OpenCode, Kimi Code CLI, and Hermes Agent."""
     ctx.ensure_object(dict)
     config = Config()
-    if ctx.invoked_subcommand not in {"bridge-native-memory", "native-bridge-worker"}:
+    if ctx.invoked_subcommand not in _PROVIDER_FREE_ENTRYPOINTS:
         config.load_env_file()  # Seed os.environ before constructing final config
         config = Config()
     ctx.obj["config"] = config
+
+
+def _load_runtime_config(ctx: click.Context) -> Config:
+    """Load provider env only after an entrypoint proves it needs the legacy runtime."""
+    config = ctx.obj["config"]
+    config.load_env_file()
+    config = Config()
+    ctx.obj["config"] = config
+    return config
 
 
 @cli.command(name="bridge-native-memory")
@@ -181,6 +201,150 @@ def _execute_native_memory_bridge(
             click.echo(f"Generation: {result.generation_id}")
     if result.exit_code:
         raise click.exceptions.Exit(result.exit_code)
+
+
+def _native_bridge_state_present(status: Mapping[str, object]) -> bool:
+    return (
+        status["config_status"] != "not configured"
+        or bool(status["service_installed"])
+        or status["generation_status"] != "not built"
+    )
+
+
+def _doctor_native_bridge_mode(
+    config: Config,
+    bridge_status: Mapping[str, object],
+    check: Callable[[str, str, str, str], None],
+    *,
+    validate_key: bool,
+) -> None:
+    """Run only LLM-free bridge diagnostics and safe-hold checks."""
+    check("Operating mode", "PASS", "native-memory bridge (LLM-free)", "")
+    if validate_key:
+        check("Configured LLM access", "WARN", "not applicable in native bridge mode; no provider call made", "")
+
+    config_status = str(bridge_status["config_status"])
+    if config_status == "configured":
+        check("Native bridge config", "PASS", "private fixed allowlist configured", "")
+    else:
+        check(
+            "Native bridge config",
+            "FAIL",
+            config_status,
+            "Run: om install --native-bridge --claude-project <name>",
+        )
+
+    service_status = str(bridge_status["service_status"])
+    if service_status == "enabled and loaded":
+        check("Native bridge LaunchAgent", "PASS", service_status, "")
+    elif service_status in {"disabled", "not installed"}:
+        check("Native bridge LaunchAgent", "WARN", service_status, "Run: om install --native-bridge")
+    else:
+        check("Native bridge LaunchAgent", "FAIL", service_status, "Run: om install --native-bridge")
+
+    generation_status = str(bridge_status["generation_status"])
+    if generation_status == "ready":
+        check(
+            "Native bridge generation",
+            "PASS",
+            f"verified {bridge_status['generation_id']}; search with `om search --native-bridge <query>`",
+            "",
+        )
+    elif generation_status == "not built":
+        check("Native bridge generation", "WARN", generation_status, "Run: om bridge-native-memory")
+    else:
+        check("Native bridge generation", "FAIL", generation_status, "Reinstall or disable the native bridge")
+
+    from .native_bridge.lifecycle import (
+        LEGACY_WRITER_LABELS,
+        NativeBridgeLifecycleError,
+        inspect_launchd,
+        snapshot_owned_file,
+    )
+    from .native_bridge.profiles import STRICT_DEFAULT_PROFILE
+
+    limits_ok = (
+        STRICT_DEFAULT_PROFILE.timeout_seconds <= 15 and STRICT_DEFAULT_PROFILE.max_rss_bytes <= 128 * 1024 * 1024
+    )
+    check(
+        "Native bridge worker ceilings",
+        "PASS" if limits_ok else "FAIL",
+        (
+            f"{STRICT_DEFAULT_PROFILE.timeout_seconds}s; "
+            f"{STRICT_DEFAULT_PROFILE.max_rss_bytes // (1024 * 1024)} MiB process-tree RSS"
+        ),
+        "",
+    )
+
+    if sys.platform == "darwin":
+        legacy_states = [
+            inspect_launchd(
+                config,
+                label,
+                plist_path=config.launch_agents_dir / f"{label}.plist",
+            )
+            for label in LEGACY_WRITER_LABELS
+        ]
+        legacy_errors = [state for state in legacy_states if state.error or state.override == "unknown"]
+        unsafe_legacy = [state for state in legacy_states if state.loaded or state.override != "disabled"]
+        if legacy_errors:
+            check(
+                "Native bridge legacy writers",
+                "FAIL",
+                "could not verify all legacy LaunchAgents",
+                "Run: om install --native-bridge",
+            )
+        elif unsafe_legacy:
+            check(
+                "Native bridge legacy writers",
+                "FAIL",
+                "not all four legacy LaunchAgents are disabled and unloaded",
+                "Run: om install --native-bridge",
+            )
+        else:
+            check("Native bridge legacy writers", "PASS", "four LaunchAgents disabled and unloaded", "")
+
+    try:
+        cowork_hooks_path = _cowork_plugin_dir(config) / "hooks" / "hooks.json"
+        hook_paths = (config.claude_settings_path, config.codex_hooks_path, cowork_hooks_path)
+        snapshots = {path: snapshot_owned_file(path, max_bytes=4 * 1024 * 1024) for path in hook_paths}
+        pending_updates = _render_native_bridge_hook_updates(config, snapshots)
+        if pending_updates:
+            check(
+                "Native bridge transcript hooks",
+                "FAIL",
+                "OM-managed transcript writer hooks remain installed",
+                "Run: om install --native-bridge",
+            )
+        else:
+            check("Native bridge transcript hooks", "PASS", "OM-managed writer hooks absent", "")
+    except (NativeBridgeLifecycleError, click.ClickException) as exc:
+        check("Native bridge transcript hooks", "FAIL", str(exc), "Run: om install --native-bridge")
+
+
+def _emit_doctor_results(results: list[dict], *, as_json: bool) -> None:
+    import json as json_mod
+
+    if as_json:
+        click.echo(json_mod.dumps(results, indent=2))
+        return
+    for row in results:
+        tag = row["status"]
+        if tag == "PASS":
+            prefix = click.style("[PASS]", fg="green")
+        elif tag == "WARN":
+            prefix = click.style("[WARN]", fg="yellow")
+        else:
+            prefix = click.style("[FAIL]", fg="red")
+        line = f"{prefix} {row['name']}: {row['detail']}"
+        if row["fix"]:
+            line += click.style(f" — {row['fix']}", fg="yellow")
+        click.echo(line)
+
+    passes = sum(1 for row in results if row["status"] == "PASS")
+    warns = sum(1 for row in results if row["status"] == "WARN")
+    fails = sum(1 for row in results if row["status"] == "FAIL")
+    click.echo(f"\n{passes} passed, {warns} warnings, {fails} failures")
 
 
 @cli.command()
@@ -1230,7 +1394,7 @@ def search(
     from .search import get_backend
     from .search import reindex as do_reindex
 
-    config = ctx.obj["config"]
+    config = ctx.obj["config"] if native_bridge else _load_runtime_config(ctx)
 
     if raw_qmd and as_json:
         raise click.ClickException("--raw-qmd cannot be combined with --json.")
@@ -3896,6 +4060,8 @@ def install(
     if claude_projects:
         raise click.UsageError("--claude-project is only valid with --native-bridge")
 
+    config = _load_runtime_config(ctx)
+
     config.ensure_memory_dir()
     scheduler_mode = _resolve_scheduler_mode(scheduler, cron_compat)
 
@@ -4030,6 +4196,8 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
             click.echo("Native-memory bridge LaunchAgent removed; config and generations preserved.")
         return
 
+    config = _load_runtime_config(ctx)
+
     if targets in ("claude", "both", "all"):
         _uninstall_claude_hooks(config)
 
@@ -4071,7 +4239,45 @@ def _hook_group_runs_command(group: object, predicate: Callable[[str], bool]) ->
     if not isinstance(hooks, list) or not hooks:
         return False
     commands = [hook.get("command", "") for hook in hooks if isinstance(hook, dict)]
-    return bool(commands) and all(isinstance(command, str) and predicate(command) for command in commands)
+    return any(isinstance(command, str) and predicate(command) for command in commands)
+
+
+def _without_hook_commands(
+    group: object,
+    predicate: Callable[[str], bool],
+) -> tuple[object | None, bool]:
+    """Remove only matching command entries while retaining group metadata."""
+    if not isinstance(group, dict):
+        return group, False
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list):
+        return group, False
+    filtered = [
+        hook
+        for hook in hooks
+        if not (isinstance(hook, dict) and isinstance(hook.get("command"), str) and predicate(hook["command"]))
+    ]
+    if len(filtered) == len(hooks):
+        return group, False
+    if not filtered:
+        return None, True
+    updated = dict(group)
+    updated["hooks"] = filtered
+    return updated, True
+
+
+def _without_hook_commands_from_groups(
+    groups: list[object],
+    predicate: Callable[[str], bool],
+) -> tuple[list[object], bool]:
+    filtered: list[object] = []
+    changed = False
+    for group in groups:
+        updated, group_changed = _without_hook_commands(group, predicate)
+        changed = changed or group_changed
+        if updated is not None:
+            filtered.append(updated)
+    return filtered, changed
 
 
 def _is_om_claude_writer_command(command: str) -> bool:
@@ -4106,8 +4312,8 @@ def _render_native_bridge_hook_updates(config: Config, snapshots: dict[Path, obj
                 raise click.ClickException(
                     f"{config.claude_settings_path} has invalid 'hooks.{event_name}'; expected a list."
                 )
-            filtered = [group for group in groups if not _hook_group_runs_command(group, _is_om_claude_writer_command)]
-            if len(filtered) != len(groups):
+            filtered, event_changed = _without_hook_commands_from_groups(groups, _is_om_claude_writer_command)
+            if event_changed:
                 changed = True
                 if filtered:
                     hooks[event_name] = filtered
@@ -4130,8 +4336,8 @@ def _render_native_bridge_hook_updates(config: Config, snapshots: dict[Path, obj
         groups = hooks.get("Stop", [])
         if not isinstance(groups, list):
             raise click.ClickException(f"{config.codex_hooks_path} has invalid 'hooks.Stop'; expected a list.")
-        filtered = [group for group in groups if not _is_om_codex_stop_group(group)]
-        if len(filtered) != len(groups):
+        filtered, changed = _without_hook_commands_from_groups(groups, _command_invokes_om_codex_checkpoint)
+        if changed:
             if filtered:
                 hooks["Stop"] = filtered
             else:
@@ -4155,8 +4361,8 @@ def _render_native_bridge_hook_updates(config: Config, snapshots: dict[Path, obj
             groups = hooks.get(event_name, [])
             if not isinstance(groups, list):
                 raise click.ClickException(f"{cowork_hooks_path} has invalid 'hooks.{event_name}'; expected a list.")
-            filtered = [group for group in groups if not _hook_group_runs_command(group, _is_om_cowork_writer_command)]
-            if len(filtered) != len(groups):
+            filtered, event_changed = _without_hook_commands_from_groups(groups, _is_om_cowork_writer_command)
+            if event_changed:
                 changed = True
                 if filtered:
                     hooks[event_name] = filtered
@@ -4216,16 +4422,22 @@ def _install_native_bridge_product(config: Config, claude_projects: tuple[str, .
     except (NativeBridgeLifecycleError, click.ClickException) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    installed_digests: dict[Path, str] = {}
+    attempted_digests: dict[Path, str] = {}
     legacy_states = None
     try:
-        write_settings(config, settings)
-        installed_digests[config.native_bridge_config_path] = hashlib.sha256(settings_bytes(settings)).hexdigest()
+        attempted_digests[config.native_bridge_config_path] = hashlib.sha256(settings_bytes(settings)).hexdigest()
+        write_settings(
+            config,
+            settings,
+            expected_snapshot=snapshots[config.native_bridge_config_path],
+        )
         for path, content in hook_updates.items():
-            installed_digests[path] = atomic_write_owned_file(
+            attempted_digests[path] = hashlib.sha256(content).hexdigest()
+            atomic_write_owned_file(
                 path,
                 content,
                 mode=getattr(snapshots[path], "mode", None) or 0o600,
+                expected_snapshot=snapshots[path],
             )
         legacy_states = quiesce_legacy_launchd(config)
         install_bridge_launchd(config, om_path)
@@ -4237,10 +4449,10 @@ def _install_native_bridge_product(config: Config, claude_projects: tuple[str, .
             except Exception as exc:
                 rollback_errors.append(str(exc))
         for path in reversed(managed_paths):
-            if path not in installed_digests:
+            if path not in attempted_digests:
                 continue
             try:
-                restore_owned_file(path, snapshots[path], expected_digest=installed_digests[path])
+                restore_owned_file(path, snapshots[path], expected_digest=attempted_digests[path])
             except Exception as exc:
                 rollback_errors.append(str(exc))
         detail = f"native bridge installation failed: {activation_error}"
@@ -4768,6 +4980,15 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         _check("om binary", "PASS", om_path)
     else:
         _check("om binary", "FAIL", "not found on PATH", fix="Run: uv tool install observational-memory")
+
+    bridge_status = _native_bridge_status_payload(config)
+    if _native_bridge_state_present(bridge_status):
+        _doctor_native_bridge_mode(config, bridge_status, _check, validate_key=validate_key)
+        _check("Platform", "PASS", sys.platform)
+        _emit_doctor_results(results, as_json=as_json)
+        return
+
+    config = _load_runtime_config(ctx)
 
     # 3. Provider config
     resolved_provider: str | None = None
@@ -5553,28 +5774,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     # 15. Platform
     _check("Platform", "PASS", sys.platform)
 
-    # Output
-    if as_json:
-        click.echo(json_mod.dumps(results, indent=2))
-    else:
-        for r in results:
-            tag = r["status"]
-            if tag == "PASS":
-                prefix = click.style("[PASS]", fg="green")
-            elif tag == "WARN":
-                prefix = click.style("[WARN]", fg="yellow")
-            else:
-                prefix = click.style("[FAIL]", fg="red")
-            line = f"{prefix} {r['name']}: {r['detail']}"
-            if r["fix"]:
-                line += click.style(f" — {r['fix']}", fg="yellow")
-            click.echo(line)
-
-        # Summary
-        passes = sum(1 for r in results if r["status"] == "PASS")
-        warns = sum(1 for r in results if r["status"] == "WARN")
-        fails = sum(1 for r in results if r["status"] == "FAIL")
-        click.echo(f"\n{passes} passed, {warns} warnings, {fails} failures")
+    _emit_doctor_results(results, as_json=as_json)
 
 
 # --- Claude Code hook installation ---
@@ -5957,23 +6157,8 @@ def _is_om_codex_session_start_group(group: object) -> bool:
 
 
 def _is_om_codex_stop_group(group: object) -> bool:
-    """Return True when *group* is the OM-managed Codex Stop hook group."""
-    if not isinstance(group, dict):
-        return False
-
-    hooks = group.get("hooks")
-    if not isinstance(hooks, list) or len(hooks) != 1:
-        return False
-
-    hook = hooks[0]
-    if not isinstance(hook, dict):
-        return False
-
-    return (
-        hook.get("type") == "command"
-        and hook.get("statusMessage") == _CODEX_STOP_STATUS
-        and _command_invokes_om_codex_checkpoint(hook.get("command", ""))
-    )
+    """Return True when *group* contains an OM-managed Codex Stop hook."""
+    return _hook_group_runs_command(group, _command_invokes_om_codex_checkpoint)
 
 
 def _find_codex_session_start_hook(config: Config) -> tuple[dict | None, str | None]:
@@ -6031,13 +6216,18 @@ def _find_codex_stop_hook(config: Config) -> tuple[dict | None, str | None]:
         return None, "'hooks.Stop' must be a list"
 
     for group in groups:
-        if _is_om_codex_stop_group(group):
-            hook_list = group.get("hooks", [])
-            if hook_list:
-                hook = hook_list[0]
-                if isinstance(hook, dict):
-                    return hook, None
-            return None, "invalid OM Stop hook group"
+        if not isinstance(group, dict):
+            continue
+        hook_list = group.get("hooks", [])
+        if not isinstance(hook_list, list):
+            continue
+        for hook in hook_list:
+            if (
+                isinstance(hook, dict)
+                and isinstance(hook.get("command"), str)
+                and _command_invokes_om_codex_checkpoint(hook["command"])
+            ):
+                return hook, None
 
     return None, None
 
@@ -6208,7 +6398,7 @@ def _install_codex_stop_hook(config: Config) -> None:
     if not isinstance(groups, list):
         raise click.ClickException(f"{path} has invalid 'hooks.Stop'; expected a list.")
 
-    filtered = [group for group in groups if not _is_om_codex_stop_group(group)]
+    filtered, _changed = _without_hook_commands_from_groups(groups, _command_invokes_om_codex_checkpoint)
     filtered.append(_om_codex_stop_group())
     hooks["Stop"] = filtered
 
@@ -6264,7 +6454,7 @@ def _uninstall_codex_stop_hook(config: Config) -> None:
     if not isinstance(groups, list):
         raise click.ClickException(f"{path} has invalid 'hooks.Stop'; expected a list.")
 
-    filtered = [group for group in groups if not _is_om_codex_stop_group(group)]
+    filtered, _changed = _without_hook_commands_from_groups(groups, _command_invokes_om_codex_checkpoint)
     if filtered:
         hooks["Stop"] = filtered
     else:

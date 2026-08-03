@@ -59,6 +59,15 @@ def test_claude_raw_memory_is_excluded_not_read(tmp_path):
     assert [artifact.relative_path for artifact in artifacts] == ["project-a/memory/MEMORY.md"]
 
 
+@pytest.mark.parametrize("project", ["project\nname", "project\tname", "project\x7fname"])
+def test_claude_capture_rejects_control_characters_in_project_name(tmp_path, project):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+
+    with pytest.raises(SecureAccessError, match="one directory name"):
+        capture_claude(projects, (project,), max_file_bytes=1024)
+
+
 def test_snapshot_requires_two_identical_complete_captures(tmp_path, monkeypatch):
     import observational_memory.native_bridge.sources as sources
 

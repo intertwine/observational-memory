@@ -848,6 +848,33 @@ class SecureRoot:
         finally:
             os.close(fd)
 
+    def inspect_regular_file(self, relative: str | Path) -> SecureFileInfo:
+        """Validate an input leaf from metadata only, without reading its content."""
+        parent, name = self._parent_and_name(relative)
+        try:
+            info = self._stat_leaf(parent, name)
+            if info is None:
+                raise FileNotFoundError(str(relative))
+            self._require_regular_owned_single_link(info, relative)
+            if stat.S_IMODE(info.st_mode) & 0o022:
+                raise SecureAccessError(f"input file is group/world writable: {relative}")
+            return SecureFileInfo(
+                relative_path=str(PurePosixPath(*_parts(relative))),
+                size=info.st_size,
+                device=info.st_dev,
+                inode=info.st_ino,
+            )
+        finally:
+            os.close(parent)
+
+    def has_secure_regular_file(self, relative: str | Path) -> bool:
+        """Return whether a leaf is a securely eligible regular input file."""
+        try:
+            self.inspect_regular_file(relative)
+        except (FileNotFoundError, SecureAccessError):
+            return False
+        return True
+
     def _parent_and_name(self, relative: str | Path, *, create_parent: bool = False) -> tuple[int, str]:
         parts = _parts(relative)
         parent = self._open_dir(parts[:-1], create=create_parent) if len(parts) > 1 else os.dup(self._fd)
