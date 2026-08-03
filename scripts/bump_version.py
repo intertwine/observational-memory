@@ -109,11 +109,23 @@ def update_package_init_version(init_path: Path, old_version: str, new_version: 
     init_path.write_text(content.replace(old_line, new_line, 1))
 
 
-def update_cowork_plugin_version(version_json_path: Path, new_version: str) -> None:
-    """Keep the Cowork plugin manifest version in step with the package version."""
-    if not version_json_path.exists():
-        return
-    version_json_path.write_text(json.dumps({"version": new_version}) + "\n")
+def update_json_version(json_path: Path, new_version: str) -> None:
+    """Update a top-level JSON version while preserving the file's formatting."""
+    if not json_path.exists():
+        raise FileNotFoundError(f"Version metadata file not found at: {json_path}")
+
+    content = json_path.read_text()
+    metadata = json.loads(content)
+    old_version = metadata.get("version")
+    if not isinstance(old_version, str):
+        raise ValueError(f"Expected string version field in {json_path}")
+
+    old_field = f'"version": {json.dumps(old_version)}'
+    if content.count(old_field) != 1:
+        raise ValueError(f"Expected one top-level version field in {json_path}")
+
+    new_field = f'"version": {json.dumps(new_version)}'
+    json_path.write_text(content.replace(old_field, new_field, 1))
 
 
 def main():
@@ -135,7 +147,9 @@ def main():
         old_version, new_version = update_pyproject_version(pyproject_path, bump_type)
         pkg_dir = pyproject_path.parent / "src" / "observational_memory"
         update_package_init_version(pkg_dir / "__init__.py", old_version, new_version)
-        update_cowork_plugin_version(pkg_dir / "cowork_plugin" / "version.json", new_version)
+        cowork_dir = pkg_dir / "cowork_plugin"
+        update_json_version(cowork_dir / "version.json", new_version)
+        update_json_version(cowork_dir / ".claude-plugin" / "plugin.json", new_version)
         print(f"{old_version} → {new_version}")
         sys.exit(0)
     except Exception as e:
