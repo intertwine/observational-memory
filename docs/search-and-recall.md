@@ -16,7 +16,7 @@ Route the startup pack when the host can provide more detail:
 
 ```bash
 om context --for codex --cwd "$PWD" --task "fix cluster validation docs"
-om context --for claude --cwd "$PWD" --task "prepare v0.6.6 release notes"
+om context --for claude --cwd "$PWD" --task "prepare release notes"
 ```
 
 Control the budget:
@@ -87,6 +87,18 @@ om search "preferences" --reindex
 ```
 
 Use `om recall` for agent-friendly retrieval. Use `om search` when you want direct search results and source metadata.
+
+### Native-memory bridge search
+
+The v0.10.0 macOS bridge has an isolated fixed-BM25 index. Query it explicitly:
+
+```bash
+om search --native-bridge "current project status"
+```
+
+Ordinary `om search` and `om recall` do not merge bridge results. Before the bridge has produced its first verified index, `--native-bridge` exits with guidance to install or run the bridge rather than falling back to the ordinary OM store.
+
+See [Native Claude and Codex memory](native-memory-bridge.md) for setup and the source boundary.
 
 ## Search Backends
 

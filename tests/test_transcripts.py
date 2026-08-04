@@ -353,6 +353,51 @@ class TestCodexParser:
         # agree with the parser's own message numbering for that wrapper shape.
         assert line_offset_to_message_count(transcript, 2) == 2
 
+    def test_line_offset_skips_empty_content_records_like_parser(self, tmp_path):
+        transcript = tmp_path / "codex-empty-content.jsonl"
+        transcript.write_text(
+            (
+                json.dumps(
+                    {
+                        "role": "user",
+                        "content": "first",
+                        "timestamp": "2026-03-11T04:08:58.126Z",
+                    }
+                )
+                + "\n"
+            )
+            + (
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "timestamp": "2026-03-11T04:08:59.000Z",
+                    }
+                )
+                + "\n"
+            )
+            + (
+                json.dumps(
+                    {
+                        "role": "assistant",
+                        "content": "second",
+                        "timestamp": "2026-03-11T04:09:00.000Z",
+                    }
+                )
+                + "\n"
+            )
+        )
+
+        messages = parse_codex(transcript)
+        assert [m.content for m in messages] == ["first", "second"]
+        assert count_codex_messages(transcript) == 2
+
+        # The empty-content assistant record on line 2 is skipped by the
+        # parser, so a legacy cursor covering all three lines must migrate to
+        # the parser's numbering (2), not the raw extractable-record count (3)
+        # — otherwise the migrated cursor overshoots and drops real messages.
+        assert line_offset_to_message_count(transcript, 3) == 2
+
 
 class TestHermesParser:
     def test_parse_full_transcript(self):

@@ -1,6 +1,6 @@
 # Configuration
 
-Most users only need `om install`. This page explains the knobs behind it.
+Most native-bridge users do not need to edit configuration. Use `om install --native-bridge` for provider-free native-summary search. Bare `om install` configures the separate transcript-based workflow. This page explains the settings behind both modes.
 
 ## Env File
 
@@ -16,7 +16,7 @@ On Windows:
 %APPDATA%\observational-memory\env
 ```
 
-`om install` creates this file with owner-only permissions. The CLI loads it at startup, including when hooks and scheduled jobs call `om`.
+The full workflow's `om install` creates this file with owner-only permissions. Full-workflow commands load it when provider settings are needed. Native-bridge commands do not load it.
 
 Environment variables already set in your shell win over values in the file.
 
@@ -32,7 +32,7 @@ If you already pay for ChatGPT Plus / Pro / Team / Enterprise or for SuperGrok, 
 | `openai`           | `OPENAI_API_KEY`           | `gpt-4o-mini`       | Metered                |
 | `anthropic`        | `ANTHROPIC_API_KEY`        | `claude-sonnet-4-5` | Metered                |
 
-To sign in, run `om login` and pick your provider. Tokens land in `~/.config/observational-memory/auth.json` (0600, host-local). `om` never writes back to `~/.codex/` or `~/.grok/`; if you already have those CLIs, run `om login --import` to copy their tokens into om's own store.
+To sign in, run `om login` and pick your provider. Tokens land in `~/.config/observational-memory/auth.json` (0600, host-local). If you already use Codex or Grok, `om login --import` copies their tokens into OM's own store without modifying the source token files. Separate commands such as `om install --codex` and `om install --grok` do manage OM hook files in those CLI directories.
 
 `om auth status` shows what is currently configured (tokens are redacted to the last 4 characters). `om auth refresh` forces a refresh now. `om logout [provider]` clears stored tokens.
 
@@ -356,9 +356,41 @@ Important files:
 - `.search-index/`: local search index
 - `backups/`: host-local memory snapshots (never synced)
 
+## Native-Memory Bridge
+
+The v0.10.0 native-memory bridge is a separate, fixed local lane for Claude Code and Codex memory summaries on macOS:
+
+```bash
+om native-bridge sources
+om install --native-bridge --claude-project "<exact-directory-name>"
+om bridge-native-memory
+om native-bridge status
+om status
+om doctor
+```
+
+It is intentionally not configured like the full observation and reflection workflow:
+
+- no LLM provider, login, or API key;
+- Codex `MEMORY.md` and `memory_summary.md`, plus top-level `.md` files directly in the exact Claude project memory directories selected with repeated `--claude-project` flags;
+- an isolated local BM25 generation rather than QMD, Moss, or a remote backend;
+- one fixed 15-minute launchd cadence;
+- normal macOS memory pressure, at most 80% swap use, a 15-second bounded-run deadline for admission, index building, publication, and in-deadline telemetry, 128 MiB bridge-worker process-tree RSS, 2 MiB per file, and 16 MiB total input;
+- no Claude, Codex, or Cowork writer hooks, observer services, auto-memory service, or reflector service enabled for this path.
+
+`om native-bridge sources [--json]` lists eligible Claude project directory names with counts only and reports whether the fixed Codex allowlist files are present. It does not enroll a source. On first install, at least one `--claude-project <exact-directory-name>` is required. The sorted selection is saved in private `0600` bridge config. A later install or one-shot run can omit the flag and reuse that selection.
+
+The bridge does not load provider settings for a run. `OM_SEARCH_BACKEND`, the observer interval settings, and the reflector settings below do not widen or change its behavior.
+
+Bridge activation keeps read-only SessionStart context in place and preserves unrelated hook groups. Grok, Kimi, and OpenCode integrations are outside its migration scope.
+
+Use `om native-bridge disable` to unload the bridge while keeping its service definition. Use `om uninstall --native-bridge` to remove the service definition too. Both preserve native source memory, the private project selection, derived index data, and receipts; neither restarts older writer jobs. To return explicitly to the full Claude Code and Codex workflow, run `om install --both` afterward, then restart affected Claude Code and Codex app or CLI sessions before running `om doctor`.
+
+For source scope, retrieval, upgrade, rollback, and failure handling, see [Native Claude and Codex memory](native-memory-bridge.md).
+
 ## Memory Backup
 
-OM keeps host-local, versioned snapshots of your memory so a bad reflect or an accidental delete can be rolled back. Before every reflect write, OM takes an automatic `pre-reflect` snapshot of the current (last-good) Markdown. The snapshot step is fail-closed: if it cannot run, reflect still writes and only logs a one-line note.
+OM keeps host-local, versioned snapshots of your memory so a bad reflect or an accidental delete can be rolled back. Before each reflection write, OM tries to create a `pre-reflect` snapshot of the current Markdown. If the snapshot fails, OM logs a warning and continues the write.
 
 Each snapshot is one self-contained directory under `backups/` with the four Markdown files plus a `manifest.json` that records a sha256 for each file. Snapshots never include `usage.sqlite`, auth or cluster keys, or the search index — only the authoritative Markdown.
 

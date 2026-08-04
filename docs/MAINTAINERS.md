@@ -39,6 +39,7 @@ CI runs the lint step on Python 3.11, 3.12, and 3.13. A local `ruff check` pass 
 Current docs should follow this layout:
 
 - `README.md`: short user doorway, install snippet, architecture picture, and links.
+- `docs/native-memory-bridge.md`: reader-facing bridge setup, privacy boundary, lifecycle, rollback, and troubleshooting.
 - `docs/install.md`: user install and setup.
 - `docs/integrations.md`: host-specific behavior.
 - `docs/search-and-recall.md`: `om context`, `om recall`, `om search`, and QMD basics.
@@ -48,6 +49,39 @@ Current docs should follow this layout:
 - `docs/MAINTAINERS.md`: maintainer and release workflows.
 
 Use plain English. Aim for a 10th grade reading level. Prefer short sections, tables, and working CLI snippets. Archive completed implementation plans under `docs/archive/` instead of linking them as current guidance.
+
+## Native-Memory Bridge Release Gate
+
+The v0.10 native-memory bridge has a narrower contract than the full OM workflow. Documentation and CLI review must preserve these points:
+
+- macOS-only availability for both scheduled and one-shot use;
+- read-only Claude Code and Codex native source roots;
+- Codex `MEMORY.md` and `memory_summary.md` only, plus top-level `.md` files directly in explicitly selected Claude `projects/<name>/memory/` directories, with raw memory, transcripts, and session logs excluded;
+- local BM25 only, with no provider environment, LLM, reflection, QMD, Moss, or remote-backend path;
+- a fixed 15-minute service interval; normal-pressure and at-most-80%-swap admission; a fixed 15-second bounded-run deadline for admission, index building, publication, and in-deadline telemetry; and fixed 128 MiB worker process-tree RSS, 2 MiB per-file, and 16 MiB total-input ceilings;
+- `om status` and `om doctor` visibility;
+- `om native-bridge disable` unloads the service but retains its plist, while `om uninstall --native-bridge` removes only the bridge service; both preserve private config, derived data, and receipts, and neither restarts older writer jobs;
+- return to the full workflow requires an explicit install target such as `om install --both`, followed by a restart of affected Claude Code and Codex app or CLI sessions.
+
+The resource and publication contract is also part of the release gate:
+
+- The bridge worker cannot create child processes. The supervisor samples the worker process tree, and every sampling probe is limited by the remaining 15-second bounded-run deadline. An external-failure receipt written after a timeout is outside that deadline and has no publication authority.
+- The worker reports the kernel's child-process RSS high-water mark so a fast run cannot finish between samples and evade the 128 MiB worker limit. macOS `RLIMIT_RSS` is advisory; it is recorded but is not the sole enforcement mechanism.
+- The index normally keeps the current generation and three rollback candidates. A generation pinned by an active reader can temporarily raise that count, and a later successful publication removes released generations.
+- Retention and persisted-byte verification finish before the current-generation pointer changes. The transaction owner checks the remaining time and memory budget before publication and again after reading the persisted generation. A late failure restores the prior pointer.
+
+Before release, use isolated test roots for lifecycle tests; do not exercise an unreviewed build against a maintainer's live native-memory directories. Verify the exact release head with:
+
+```bash
+uv run pytest tests/native_bridge tests/test_cli_install.py tests/test_cli_doctor.py
+uv run ruff check .
+uv run ruff format --check .
+git diff --check
+```
+
+Also compare `om install --help`, `om uninstall --help`, `om native-bridge --help`, `om bridge-native-memory --help`, `om search --help`, `om status`, and `om doctor` with the public examples. `om native-bridge sources [--json]` must expose eligible project names and counts without memory text or implicit enrollment. The first install must require an explicit Claude project selection, while re-install and one-shot paths may reuse the saved private config. Do not expose internal resource profiles in public help or publish test totals or performance figures that were not captured from the exact release head.
+
+The external Hermes memory-provider and Grok marketplace plugins have independent OM dependency ranges. A core v0.10 release does not prove those plugins compatible; each plugin needs its own compatibility pass before OM docs can claim support for that release line.
 
 ## QMD Benchmarking
 
@@ -202,7 +236,7 @@ Runtime expectations:
 - It intentionally drops `session_meta`, raw tool output, and other machine-oriented records before the observer LLM sees them.
 - `om install` does not manage Hermes hooks, install the Hermes plugin, or set `memory.provider`; keep docs and status output truthful about that scope.
 - The Hermes plugin is installed with `hermes plugins install intertwine/hermes-observational-memory --no-enable` and activated with `hermes memory setup`.
-- Keep the plugin dependency line aligned with the current OM release line; for `v0.9.0`, the plugin should require `observational-memory>=0.9.0,<0.10` after the plugin repo passes its compatibility validation.
+- Hermes memory-provider plugin v1.5.1 declares `observational-memory>=0.10.0,<0.11`. Keep that claim tied to the plugin repo's own compatibility suite and release artifact.
 
 Tests that should protect Hermes behavior:
 
@@ -215,8 +249,9 @@ The standalone plugin has its own tests in the `intertwine/hermes-observational-
 
 The `om reflect --async` Batch path is fully covered by mocked tests
 (`tests/test_jobs_batch.py`). A live end-to-end smoke needs a real `OPENAI_API_KEY`
-with usable billing (the v0.6.5 validation hit `billing_hard_limit_reached`, which
-blocked a real run). When billing is available, run a tiny end-to-end check:
+with usable billing. If the provider returns `billing_hard_limit_reached` or another
+billing error, record the live smoke as blocked rather than validated. When billing
+is available, run a tiny end-to-end check:
 
 ```bash
 export OPENAI_API_KEY=sk-...           # billing enabled
@@ -300,7 +335,7 @@ If `intertwine/tap` is not tapped locally, `make brew-check` exits with instruct
 
 ## Current Release Process
 
-`v0.9.1` is the current release (bounded Claude checkpoints, streaming transcript scans, and a worker memory ceiling; see `docs/RELEASE-0.9.1.md`). The release process below should be followed for future releases.
+`v0.10.0` is the current release (native Claude Code and Codex memory bridge for macOS; see `docs/RELEASE-0.10.0.md`). The release process below should be followed for future releases.
 
 Before cutting a patch release:
 
@@ -342,13 +377,18 @@ It is the authoritative way to prove "the om session start issue is fixed and wi
 
 Release flow:
 
-1. Confirm the docs and release notes in the latest [RELEASE-*.md](RELEASE-0.9.0.md) file (or create a new one for the next version).
+1. Confirm the README, documentation index, operating guide, and latest [RELEASE-*.md](RELEASE-0.10.0.md) file. Review public copy for factual accuracy, a clear reader path, and support-safe commands.
 2. Bump the version with the appropriate `make bump-version BUMP=...` command.
-3. Run `make check`.
-4. Build with `make build`.
-5. Publish to PyPI.
-6. Push the tag.
-7. Watch the Homebrew release workflow.
+3. Validate companion integrations against a wheel built from the candidate. Publish any companion versions named by the core docs before those docs become public.
+4. Run `make check`, the relevant integration suites, the documentation link check, and an installed-wheel smoke test.
+5. Open the release pull request and wait for both CI and dependency review to pass on its final merge ref. Merge only after those checks are green, then record the exact merged commit with `git rev-parse HEAD`.
+6. Wait for CI to pass again on that exact merged `main` commit. Dependency review runs on pull requests, so its accepted evidence is the final pre-merge check; a green earlier candidate or earlier `main` commit is not sufficient.
+7. Build the wheel and source archive once from a clean checkout of the accepted merged commit. Run `twine check`, record both SHA-256 hashes, and use this same artifact set for publication and verification.
+8. Upload those accepted artifacts directly with `uv run twine upload dist/*`, then verify the public version and a clean isolated install. Do not use a publish target that rebuilds them.
+9. Tag that same accepted commit as `vX.Y.Z`, push the tag, and create the GitHub release with the plain title `vX.Y.Z` and the reviewed release notes.
+10. Watch the Homebrew release workflow, then verify the tap formula points to the released artifact and that a clean install or upgrade reports the expected version.
+
+Do not publish from an unmerged branch, rebuild artifacts between validation and upload, or move the release tag to a different commit.
 
 ## File Structure
 
@@ -356,6 +396,7 @@ Release flow:
 observational-memory/
 ├── README.md                         # Short user doorway
 ├── docs/MAINTAINERS.md               # This file
+├── docs/native-memory-bridge.md       # Native Claude and Codex bridge guide
 ├── docs/install.md                   # User install guide
 ├── docs/integrations.md              # Agent/platform integrations
 ├── docs/search-and-recall.md         # Startup, recall, search, QMD basics

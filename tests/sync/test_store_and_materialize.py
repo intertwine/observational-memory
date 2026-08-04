@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timezone
 
+import observational_memory.search as search_module
 from observational_memory.config import Config
 from observational_memory.sync.config import (
     TransportConfig,
@@ -302,6 +303,35 @@ def test_materialize_ignores_backups_dir(tmp_path):
     # The backup is left exactly as-is — never read into or overwritten by sync.
     assert sentinel.read_text() == "backup sentinel\n"
     assert "hello" in config.observations_path.read_text()
+
+
+def test_non_bm25_materialize_uses_base_reindex_without_generation_store(tmp_path, monkeypatch):
+    """Invariant: cluster materialization does not enroll QMD in BM25 generation storage."""
+    config, store = _init_store(tmp_path)
+    config.search_backend = "qmd"
+    store.append_record(
+        kind="observation",
+        namespace="personal",
+        source={"agent": "codex", "host_alias": "node-a"},
+        payload={
+            "format": "markdown",
+            "body": "# Observations\n\n## 2026-05-08\n\n- qmd payload sentinel",
+            "observed_at": "2026-05-08T12:00:00Z",
+        },
+    )
+    indexed = []
+
+    class FakeQMD:
+        def index(self, documents):
+            indexed.extend(documents)
+
+    monkeypatch.setattr(search_module, "get_backend", lambda _name, _config: FakeQMD())
+
+    materialize_cluster_memory(config, store)
+
+    assert indexed
+    assert all("generation_id" not in document.metadata for document in indexed)
+    assert not config.search_index_dir.exists()
 
 
 def test_manual_overrides_are_latest_wins_by_section(tmp_path):

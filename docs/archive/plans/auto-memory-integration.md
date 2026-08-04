@@ -71,6 +71,7 @@ Add `parse_auto_memory(claude_projects_dir: Path) -> list[Document]` — calls `
 In `reindex()` (line 58), add after reflections:
 ```python
 from .parser import parse_auto_memory
+
 documents.extend(parse_auto_memory(config.claude_projects_dir))
 ```
 

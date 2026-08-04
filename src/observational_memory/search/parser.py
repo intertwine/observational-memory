@@ -79,7 +79,11 @@ def parse_observations(path: Path) -> list[Document]:
     """Split observations.md into one Document per date section."""
     if not path.exists():
         return []
-    content = path.read_text()
+    return parse_observations_content(path.read_text(), source_path=path)
+
+
+def parse_observations_content(content: str, *, source_path: Path | str) -> list[Document]:
+    """Parse observations from already captured immutable text."""
     matches = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2})", content, flags=re.MULTILINE))
 
     documents = []
@@ -99,7 +103,7 @@ def parse_observations(path: Path) -> list[Document]:
                 content=section,
                 date=date,
                 metadata={
-                    "file_path": str(path),
+                    "file_path": str(source_path),
                     "source_start_line": _line_number_for_offset(content, start),
                 },
             )
@@ -111,7 +115,11 @@ def parse_reflections(path: Path) -> list[Document]:
     """Split reflections.md into one Document per top-level section."""
     if not path.exists():
         return []
-    content = path.read_text()
+    return parse_reflections_content(path.read_text(), source_path=path)
+
+
+def parse_reflections_content(content: str, *, source_path: Path | str) -> list[Document]:
+    """Parse reflections from already captured immutable text."""
     matches = list(re.finditer(r"^## (.+)", content, flags=re.MULTILINE))
 
     documents = []
@@ -132,7 +140,7 @@ def parse_reflections(path: Path) -> list[Document]:
                 heading=f"## {heading}",
                 content=section,
                 metadata={
-                    "file_path": str(path),
+                    "file_path": str(source_path),
                     "source_start_line": _line_number_for_offset(content, start),
                 },
                 owner=owner,

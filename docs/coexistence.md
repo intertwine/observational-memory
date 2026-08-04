@@ -2,6 +2,12 @@
 
 Observational Memory can run beside host-agent memory systems such as Claude Code memory, Codex startup context, ChatGPT memory, or other product-local recall layers.
 
+## Native Bridge Ownership
+
+In v0.10.0 on macOS, the native-memory bridge keeps ownership simple: Claude Code and Codex continue to own and write their native memory summaries; OM reads an approved set and maintains a separate private BM25 index. OM never writes back to those source files.
+
+Bridge results are available only through `om search --native-bridge`. The ordinary OM store, `om recall`, and startup context remain separate unless you explicitly enable the full OM workflow.
+
 Recommended ownership:
 
 - Host memory owns host-local feedback, UI/tool preferences, ephemeral conversation state, and behavior that applies only inside that host.

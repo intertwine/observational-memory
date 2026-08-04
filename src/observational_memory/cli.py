@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -21,6 +22,17 @@ from .config import Config
 _OBSERVE_SOURCES = ["claude", "codex", "opencode", "kimi", "grok", "hermes", "cowork", "claude-memory", "all"]
 _OBSERVER_WORKER_SOURCES = _OBSERVE_SOURCES
 _OBSERVER_RSS_CHECK_INTERVAL_SECONDS = 1.0
+_PROVIDER_FREE_ENTRYPOINTS = frozenset(
+    {
+        "bridge-native-memory",
+        "native-bridge-worker",
+        "native-bridge",
+        "install",
+        "search",
+        "uninstall",
+        "doctor",
+    }
+)
 _T = TypeVar("_T")
 
 
@@ -42,9 +54,361 @@ class ObserverWorkerMemoryExceeded(ObserverWorkerTimeout):
 def cli(ctx: click.Context) -> None:
     """Observational Memory — shared memory for Claude Code, Codex CLI, OpenCode, Kimi Code CLI, and Hermes Agent."""
     ctx.ensure_object(dict)
-    Config().load_env_file()  # Seed os.environ before constructing final config
+    config = Config()
+    if ctx.invoked_subcommand not in _PROVIDER_FREE_ENTRYPOINTS:
+        config.load_env_file()  # Seed os.environ before constructing final config
+        config = Config()
+    ctx.obj["config"] = config
+
+
+def _load_runtime_config(ctx: click.Context) -> Config:
+    """Load provider env only after an entrypoint proves it needs the legacy runtime."""
+    config = ctx.obj["config"]
+    config.load_env_file()
     config = Config()
     ctx.obj["config"] = config
+    return config
+
+
+@cli.command(name="bridge-native-memory")
+@click.option(
+    "--claude-project",
+    "claude_projects",
+    multiple=True,
+    help="Exact Claude project directory name. Repeat, or omit to use installed bridge settings.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print one machine-readable result.")
+@click.pass_context
+def bridge_native_memory(
+    ctx: click.Context,
+    claude_projects: tuple[str, ...],
+    as_json: bool,
+) -> None:
+    """Publish allowlisted native memories to the isolated local BM25 bridge."""
+    if sys.platform != "darwin":
+        raise click.ClickException("the native-memory bridge is only supported on macOS")
+    from .native_bridge.lifecycle import NativeBridgeLifecycleError, NativeBridgeSettings, load_settings
+
+    try:
+        settings = NativeBridgeSettings(claude_projects) if claude_projects else load_settings(ctx.obj["config"])
+    except NativeBridgeLifecycleError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if settings is None:  # required=True above; retained for static type narrowing.
+        raise click.ClickException("native bridge settings are unavailable")
+    _execute_native_memory_bridge(
+        ctx.obj["config"],
+        settings.claude_projects,
+        as_json=as_json,
+        invocation="manual",
+    )
+
+
+@cli.command(hidden=True, name="native-bridge-worker")
+@click.pass_context
+def native_bridge_worker(ctx: click.Context) -> None:
+    """Run one installed launchd-owned native bridge attempt."""
+    if sys.platform != "darwin":
+        raise click.ClickException("the native-memory bridge worker is only supported on macOS")
+    from .native_bridge.lifecycle import NativeBridgeLifecycleError, load_settings
+
+    try:
+        settings = load_settings(ctx.obj["config"])
+    except NativeBridgeLifecycleError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if settings is None:
+        raise click.ClickException("native bridge settings are unavailable")
+    _execute_native_memory_bridge(
+        ctx.obj["config"],
+        settings.claude_projects,
+        as_json=True,
+        invocation="scheduled",
+    )
+
+
+def _execute_native_memory_bridge(
+    config: Config,
+    claude_projects: tuple[str, ...],
+    *,
+    as_json: bool,
+    invocation: str,
+) -> None:
+    """Execute one fixed-profile bridge attempt and emit its exact receipt."""
+    from .native_bridge import BridgePolicy, NativeMemoryBridge
+    from .native_bridge.admission import AdmissionResult
+    from .native_bridge.lifecycle import NATIVE_BRIDGE_CODEX_ALLOWLIST
+    from .native_bridge.profiles import STRICT_DEFAULT_PROFILE
+    from .native_bridge.worker import (
+        BridgeWorkerError,
+        run_bounded_bridge,
+    )
+
+    profile = STRICT_DEFAULT_PROFILE
+    policy = BridgePolicy(
+        claude_projects=claude_projects,
+        codex_allowlist=NATIVE_BRIDGE_CODEX_ALLOWLIST,
+        max_file_bytes=profile.max_file_input_bytes,
+        max_total_bytes=profile.max_total_input_bytes,
+    )
+    bridge = NativeMemoryBridge(
+        config,
+        policy,
+        resource_profile=profile,
+        invocation=invocation,
+    )
+    try:
+        result = run_bounded_bridge(bridge)
+    except (BridgeWorkerError, RuntimeError) as exc:
+        admission = getattr(exc, "admission", None) or AdmissionResult(
+            False,
+            "probe-error",
+            0,
+            0,
+            "supervisor admission evidence unavailable",
+            profile.name,
+        )
+        result = bridge.record_external_failure(
+            str(exc),
+            admission=admission,
+            telemetry=getattr(exc, "telemetry", None),
+            attempt_id=getattr(exc, "attempt_id", None),
+        )
+    payload = {
+        "attempt_id": result.attempt_id,
+        "status": result.status,
+        "message": result.message,
+        "generation_id": result.generation_id,
+        "desired_state_digest": result.desired_state_digest,
+        "exit_code": result.exit_code,
+        "resource_profile": result.resource_profile,
+        "resource_limits": result.resource_limits,
+        "output_root": result.output_root,
+        "durable_receipt_written": result.durable_receipt_written,
+        "admission": {
+            "admitted": result.admission.admitted,
+            "pressure": result.admission.pressure,
+            "swap_used_bytes": result.admission.swap_used_bytes,
+            "swap_total_bytes": result.admission.swap_total_bytes,
+            "reason": result.admission.reason,
+            "resource_profile": result.admission.resource_profile,
+        },
+    }
+    if as_json:
+        click.echo(json.dumps(payload, sort_keys=True))
+    else:
+        click.echo(f"Native-memory bridge {result.status}: {result.message}")
+        click.echo(f"Attempt: {result.attempt_id}")
+        if result.generation_id:
+            click.echo(f"Generation: {result.generation_id}")
+    if result.exit_code:
+        raise click.exceptions.Exit(result.exit_code)
+
+
+def _native_bridge_state_present(status: Mapping[str, object]) -> bool:
+    if not status["platform_supported"]:
+        return False
+    return (
+        status["config_status"] != "not configured"
+        or bool(status["service_installed"])
+        or status["generation_status"] != "not built"
+    )
+
+
+def _legacy_writer_activity_present(config: Config) -> bool:
+    """Return whether installed hooks or launchd state select the full workflow."""
+    from .native_bridge.lifecycle import (
+        LEGACY_WRITER_LABELS,
+        NativeBridgeLifecycleError,
+        inspect_launchd,
+        snapshot_owned_file,
+    )
+
+    cowork_hooks_path = _cowork_plugin_dir(config) / "hooks" / "hooks.json"
+    hook_paths = (config.claude_settings_path, config.codex_hooks_path, cowork_hooks_path)
+    try:
+        snapshots = {path: snapshot_owned_file(path, max_bytes=4 * 1024 * 1024) for path in hook_paths}
+        hook_activity = bool(_render_native_bridge_hook_updates(config, snapshots))
+    except (NativeBridgeLifecycleError, click.ClickException, OSError):
+        # Invalid managed hook state is diagnosed by the selected doctor mode.
+        # It is not positive evidence that a writer is active.
+        hook_activity = False
+
+    launchd_activity = False
+    if sys.platform == "darwin":
+        for label in LEGACY_WRITER_LABELS:
+            state = inspect_launchd(
+                config,
+                label,
+                plist_path=config.launch_agents_dir / f"{label}.plist",
+            )
+            if state.loaded or (state.installed and state.override != "disabled"):
+                launchd_activity = True
+                break
+
+    return hook_activity or launchd_activity
+
+
+def _doctor_operating_mode(config: Config, bridge_status: Mapping[str, object]) -> str:
+    """Select full, bridge, or unsafe mixed diagnostics from active state."""
+    if not _native_bridge_state_present(bridge_status):
+        return "full"
+
+    legacy_active = _legacy_writer_activity_present(config)
+    bridge_installed = bool(bridge_status["service_installed"])
+    bridge_active = bool(bridge_status["service_loaded"]) or (
+        bridge_installed and bridge_status["service_override"] == "enabled"
+    )
+    if bridge_active and legacy_active:
+        return "mixed"
+    if bridge_installed:
+        return "bridge"
+    if legacy_active:
+        return "full"
+    return "bridge"
+
+
+def _doctor_native_bridge_mode(
+    config: Config,
+    bridge_status: Mapping[str, object],
+    check: Callable[[str, str, str, str], None],
+    *,
+    validate_key: bool,
+    mixed_active: bool = False,
+) -> None:
+    """Run only LLM-free bridge diagnostics and safe-hold checks."""
+    if mixed_active:
+        check(
+            "Operating mode",
+            "FAIL",
+            "unsafe mixed state: native bridge and legacy writers are active",
+            "Run: om uninstall --native-bridge before continuing with the full workflow",
+        )
+    else:
+        check("Operating mode", "PASS", "native-memory bridge (LLM-free)", "")
+    if validate_key:
+        check("Configured LLM access", "WARN", "not applicable in native bridge mode; no provider call made", "")
+
+    config_status = str(bridge_status["config_status"])
+    if config_status == "configured":
+        check("Native bridge config", "PASS", "private fixed allowlist configured", "")
+    else:
+        check(
+            "Native bridge config",
+            "FAIL",
+            config_status,
+            "Run: om install --native-bridge --claude-project <name>",
+        )
+
+    service_status = str(bridge_status["service_status"])
+    if service_status == "enabled and loaded":
+        check("Native bridge LaunchAgent", "PASS", service_status, "")
+    elif service_status in {"disabled", "not installed"}:
+        check("Native bridge LaunchAgent", "WARN", service_status, "Run: om install --native-bridge")
+    else:
+        check("Native bridge LaunchAgent", "FAIL", service_status, "Run: om install --native-bridge")
+
+    generation_status = str(bridge_status["generation_status"])
+    if generation_status == "ready":
+        check(
+            "Native bridge generation",
+            "PASS",
+            f"verified {bridge_status['generation_id']}; search with `om search --native-bridge <query>`",
+            "",
+        )
+    elif generation_status == "not built":
+        check("Native bridge generation", "WARN", generation_status, "Run: om bridge-native-memory")
+    else:
+        check("Native bridge generation", "FAIL", generation_status, "Reinstall or disable the native bridge")
+
+    from .native_bridge.lifecycle import (
+        LEGACY_WRITER_LABELS,
+        NativeBridgeLifecycleError,
+        inspect_launchd,
+        snapshot_owned_file,
+    )
+    from .native_bridge.profiles import STRICT_DEFAULT_PROFILE
+
+    limits_ok = (
+        STRICT_DEFAULT_PROFILE.timeout_seconds <= 15 and STRICT_DEFAULT_PROFILE.max_rss_bytes <= 128 * 1024 * 1024
+    )
+    check(
+        "Native bridge worker ceilings",
+        "PASS" if limits_ok else "FAIL",
+        (
+            f"{STRICT_DEFAULT_PROFILE.timeout_seconds}s; "
+            f"{STRICT_DEFAULT_PROFILE.max_rss_bytes // (1024 * 1024)} MiB process-tree RSS"
+        ),
+        "",
+    )
+
+    if sys.platform == "darwin":
+        legacy_states = [
+            inspect_launchd(
+                config,
+                label,
+                plist_path=config.launch_agents_dir / f"{label}.plist",
+            )
+            for label in LEGACY_WRITER_LABELS
+        ]
+        legacy_errors = [state for state in legacy_states if state.error or state.override == "unknown"]
+        unsafe_legacy = [state for state in legacy_states if state.loaded or state.override != "disabled"]
+        if legacy_errors:
+            check(
+                "Native bridge legacy writers",
+                "FAIL",
+                "could not verify all legacy LaunchAgents",
+                "Run: om install --native-bridge",
+            )
+        elif unsafe_legacy:
+            check(
+                "Native bridge legacy writers",
+                "FAIL",
+                "not all four legacy LaunchAgents are disabled and unloaded",
+                "Run: om install --native-bridge",
+            )
+        else:
+            check("Native bridge legacy writers", "PASS", "four LaunchAgents disabled and unloaded", "")
+
+    try:
+        cowork_hooks_path = _cowork_plugin_dir(config) / "hooks" / "hooks.json"
+        hook_paths = (config.claude_settings_path, config.codex_hooks_path, cowork_hooks_path)
+        snapshots = {path: snapshot_owned_file(path, max_bytes=4 * 1024 * 1024) for path in hook_paths}
+        pending_updates = _render_native_bridge_hook_updates(config, snapshots)
+        if pending_updates:
+            check(
+                "Native bridge transcript hooks",
+                "FAIL",
+                "OM-managed transcript writer hooks remain installed",
+                "Run: om install --native-bridge",
+            )
+        else:
+            check("Native bridge transcript hooks", "PASS", "OM-managed writer hooks absent", "")
+    except (NativeBridgeLifecycleError, click.ClickException) as exc:
+        check("Native bridge transcript hooks", "FAIL", str(exc), "Run: om install --native-bridge")
+
+
+def _emit_doctor_results(results: list[dict], *, as_json: bool) -> None:
+    import json as json_mod
+
+    if as_json:
+        click.echo(json_mod.dumps(results, indent=2))
+        return
+    for row in results:
+        tag = row["status"]
+        if tag == "PASS":
+            prefix = click.style("[PASS]", fg="green")
+        elif tag == "WARN":
+            prefix = click.style("[WARN]", fg="yellow")
+        else:
+            prefix = click.style("[FAIL]", fg="red")
+        line = f"{prefix} {row['name']}: {row['detail']}"
+        if row["fix"]:
+            line += click.style(f" — {row['fix']}", fg="yellow")
+        click.echo(line)
+
+    passes = sum(1 for row in results if row["status"] == "PASS")
+    warns = sum(1 for row in results if row["status"] == "WARN")
+    fails = sum(1 for row in results if row["status"] == "FAIL")
+    click.echo(f"\n{passes} passed, {warns} warnings, {fails} failures")
 
 
 @cli.command()
@@ -1075,25 +1439,63 @@ def backfill(ctx: click.Context, source: str, dry_run: bool, limit: int, reflect
 @click.option("--reindex", is_flag=True, help="Rebuild the search index before searching")
 @click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
 @click.option("--raw-qmd", is_flag=True, help="Pass through native qmd output (QMD backends only)")
+@click.option(
+    "--native-bridge",
+    is_flag=True,
+    help="Search the isolated native-memory bridge generation (fixed local BM25).",
+)
 @click.pass_context
-def search(ctx: click.Context, query: str, limit: int, reindex: bool, as_json: bool, raw_qmd: bool) -> None:
+def search(
+    ctx: click.Context,
+    query: str,
+    limit: int,
+    reindex: bool,
+    as_json: bool,
+    raw_qmd: bool,
+    native_bridge: bool,
+) -> None:
     """Search observations and reflections for relevant memories."""
     from .search import get_backend
     from .search import reindex as do_reindex
 
-    config = ctx.obj["config"]
+    config = ctx.obj["config"] if native_bridge else _load_runtime_config(ctx)
 
     if raw_qmd and as_json:
         raise click.ClickException("--raw-qmd cannot be combined with --json.")
 
-    if reindex:
+    if native_bridge:
+        if sys.platform != "darwin":
+            raise click.ClickException("the native-memory bridge is only supported on macOS")
+        if raw_qmd or reindex:
+            raise click.ClickException("--native-bridge cannot be combined with --raw-qmd or --reindex.")
+        from .search.bm25 import BM25Backend, BM25GenerationStore
+        from .search.generation_store import GenerationStoreError
+
+        bridge_store = BM25GenerationStore(config.native_bridge_data_dir)
+        try:
+            if not bridge_store.has_generation_state():
+                raise click.ClickException(
+                    "no native bridge generation is available; run `om bridge-native-memory` "
+                    "or install it with `om install --native-bridge`"
+                )
+            backend = BM25Backend(
+                config.native_bridge_data_dir / "legacy-index-disabled.pkl",
+                store_root=config.native_bridge_data_dir,
+            )
+        except GenerationStoreError as exc:
+            raise click.ClickException(f"native bridge generation failed verification: {exc}") from exc
+    else:
+        backend = None
+
+    if reindex and not native_bridge:
         n = do_reindex(config)
         if not as_json and not raw_qmd:
             click.echo(f"Indexed {n} document(s)")
 
-    backend = get_backend(config.search_backend, config)
+    if backend is None:
+        backend = get_backend(config.search_backend, config)
 
-    if not backend.is_ready():
+    if not native_bridge and not backend.is_ready():
         # Auto-index on first search
         n = do_reindex(config)
         if not as_json and not raw_qmd:
@@ -3660,6 +4062,12 @@ def _configure_llm(
 @click.option("--grok", "targets", flag_value="grok", help="Install Grok Build TUI hooks (Claude compat aware)")
 @click.option("--opencode", "targets", flag_value="opencode", help="Install OpenCode plugin and AGENTS fallback")
 @click.option("--kimi", "targets", flag_value="kimi", help="Install Kimi Code CLI hooks")
+@click.option(
+    "--native-bridge",
+    "targets",
+    flag_value="native-bridge",
+    help="Install the macOS native-memory bridge without enabling legacy writers",
+)
 @click.option("--both", "targets", flag_value="both", default=True, help="Install Claude Code + Codex (default)")
 @click.option(
     "--all",
@@ -3684,6 +4092,12 @@ def _configure_llm(
 @click.option("--vertex-project-id", help="GCP project ID for anthropic-vertex")
 @click.option("--vertex-region", help="GCP region for anthropic-vertex (for example: us-east5)")
 @click.option("--bedrock-region", help="AWS region for anthropic-bedrock (for example: us-east-1)")
+@click.option(
+    "--claude-project",
+    "claude_projects",
+    multiple=True,
+    help="Exact Claude project directory for --native-bridge. Repeat for multiple projects.",
+)
 @click.option("--non-interactive", is_flag=True, help="Do not prompt; require all needed config via flags/env")
 @click.pass_context
 def install(
@@ -3696,10 +4110,24 @@ def install(
     vertex_project_id: str | None,
     vertex_region: str | None,
     bedrock_region: str | None,
+    claude_projects: tuple[str, ...],
     non_interactive: bool,
 ) -> None:
     """Set up observational memory for Claude Code, Codex, OpenCode, Kimi, Grok, and/or Cowork."""
     config = ctx.obj["config"]
+
+    if targets == "native-bridge":
+        if scheduler.lower() not in {"auto", "launchd"} or cron_compat is not None:
+            raise click.UsageError("--native-bridge uses its fixed macOS launchd scheduler; omit --scheduler/--cron")
+        if any((provider, llm_model, vertex_project_id, vertex_region, bedrock_region)):
+            raise click.UsageError("--native-bridge is LLM-free; provider and model options are not accepted")
+        _install_native_bridge_product(config, claude_projects)
+        return
+    if claude_projects:
+        raise click.UsageError("--claude-project is only valid with --native-bridge")
+
+    config = _load_runtime_config(ctx)
+
     config.ensure_memory_dir()
     scheduler_mode = _resolve_scheduler_mode(scheduler, cron_compat)
 
@@ -3798,13 +4226,45 @@ def install(
 @click.option("--grok", "targets", flag_value="grok", help="Remove Grok Build TUI hooks")
 @click.option("--opencode", "targets", flag_value="opencode", help="Remove OpenCode plugin and AGENTS fallback")
 @click.option("--kimi", "targets", flag_value="kimi", help="Remove Kimi Code CLI hooks")
+@click.option(
+    "--native-bridge",
+    "targets",
+    flag_value="native-bridge",
+    help="Remove only the native bridge LaunchAgent",
+)
 @click.option("--both", "targets", flag_value="both", default=True)
 @click.option("--all", "targets", flag_value="all")
-@click.option("--purge", is_flag=True, help="Also remove memory files")
+@click.option(
+    "--purge",
+    is_flag=True,
+    help="Also remove selected local data (native bridge: private derived state only)",
+)
 @click.pass_context
 def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
     """Remove OM hooks/scheduler jobs for selected targets (claude/codex/opencode/kimi/grok/cowork)."""
     config = ctx.obj["config"]
+
+    if targets == "native-bridge":
+        if sys.platform != "darwin":
+            raise click.ClickException("`om uninstall --native-bridge` is only supported on macOS")
+        from .native_bridge.lifecycle import NativeBridgeLifecycleError, purge_bridge_state, uninstall_bridge_launchd
+
+        try:
+            uninstall_bridge_launchd(config)
+            removed = purge_bridge_state(config) if purge else ()
+        except NativeBridgeLifecycleError as exc:
+            raise click.ClickException(str(exc)) from exc
+        if purge:
+            click.echo("Native-memory bridge LaunchAgent removed and absence verified.")
+            if removed:
+                click.echo("Removed private bridge config, derived generations, receipts, and logs.")
+            else:
+                click.echo("No private bridge state remained to remove.")
+        else:
+            click.echo("Native-memory bridge LaunchAgent removed; config and generations preserved.")
+        return
+
+    config = _load_runtime_config(ctx)
 
     if targets in ("claude", "both", "all"):
         _uninstall_claude_hooks(config)
@@ -3838,6 +4298,388 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
             click.echo(f"Removed {config.memory_dir}")
 
     click.echo("Uninstall complete.")
+
+
+def _hook_group_runs_command(group: object, predicate: Callable[[str], bool]) -> bool:
+    if not isinstance(group, dict):
+        return False
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list) or not hooks:
+        return False
+    commands = [hook.get("command", "") for hook in hooks if isinstance(hook, dict)]
+    return any(isinstance(command, str) and predicate(command) for command in commands)
+
+
+def _without_hook_commands(
+    group: object,
+    predicate: Callable[[str], bool],
+) -> tuple[object | None, bool]:
+    """Remove only matching command entries while retaining group metadata."""
+    if not isinstance(group, dict):
+        return group, False
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list):
+        return group, False
+    filtered = [
+        hook
+        for hook in hooks
+        if not (isinstance(hook, dict) and isinstance(hook.get("command"), str) and predicate(hook["command"]))
+    ]
+    if len(filtered) == len(hooks):
+        return group, False
+    if not filtered:
+        return None, True
+    updated = dict(group)
+    updated["hooks"] = filtered
+    return updated, True
+
+
+def _without_hook_commands_from_groups(
+    groups: list[object],
+    predicate: Callable[[str], bool],
+) -> tuple[list[object], bool]:
+    filtered: list[object] = []
+    changed = False
+    for group in groups:
+        updated, group_changed = _without_hook_commands(group, predicate)
+        changed = changed or group_changed
+        if updated is not None:
+            filtered.append(updated)
+    return filtered, changed
+
+
+def _is_om_claude_writer_command(command: str) -> bool:
+    if _command_invokes_om_subcommand(command, "claude-checkpoint"):
+        return True
+    normalized = command.replace("\\", "/")
+    return normalized.endswith("/observational_memory/hooks/claude/session-end.sh")
+
+
+def _is_om_cowork_writer_command(command: str) -> bool:
+    normalized = " ".join(command.split()).replace("\\", "/")
+    return normalized == "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session-end.sh"
+
+
+def _render_native_bridge_hook_updates(config: Config, snapshots: dict[Path, object]) -> dict[Path, bytes]:
+    """Render writer-hook removals without changing any file."""
+    updates: dict[Path, bytes] = {}
+
+    claude_snapshot = snapshots[config.claude_settings_path]
+    if getattr(claude_snapshot, "exists", False):
+        try:
+            settings = json.loads(getattr(claude_snapshot, "data"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise click.ClickException(f"Failed to parse {config.claude_settings_path}: {exc}") from exc
+        hooks = settings.get("hooks", {})
+        if not isinstance(hooks, dict):
+            raise click.ClickException(f"{config.claude_settings_path} must contain a 'hooks' object.")
+        changed = False
+        for event_name in ("SessionEnd", "UserPromptSubmit", "PreCompact"):
+            groups = hooks.get(event_name, [])
+            if not isinstance(groups, list):
+                raise click.ClickException(
+                    f"{config.claude_settings_path} has invalid 'hooks.{event_name}'; expected a list."
+                )
+            filtered, event_changed = _without_hook_commands_from_groups(groups, _is_om_claude_writer_command)
+            if event_changed:
+                changed = True
+                if filtered:
+                    hooks[event_name] = filtered
+                else:
+                    hooks.pop(event_name, None)
+        if changed:
+            if not hooks:
+                settings.pop("hooks", None)
+            updates[config.claude_settings_path] = (json.dumps(settings, indent=2) + "\n").encode("utf-8")
+
+    codex_snapshot = snapshots[config.codex_hooks_path]
+    if getattr(codex_snapshot, "exists", False):
+        try:
+            payload = json.loads(getattr(codex_snapshot, "data"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise click.ClickException(f"Failed to parse {config.codex_hooks_path}: {exc}") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("hooks", {}), dict):
+            raise click.ClickException(f"{config.codex_hooks_path} must contain a top-level 'hooks' object.")
+        hooks = payload.get("hooks", {})
+        groups = hooks.get("Stop", [])
+        if not isinstance(groups, list):
+            raise click.ClickException(f"{config.codex_hooks_path} has invalid 'hooks.Stop'; expected a list.")
+        filtered, changed = _without_hook_commands_from_groups(groups, _command_invokes_om_codex_checkpoint)
+        if changed:
+            if filtered:
+                hooks["Stop"] = filtered
+            else:
+                hooks.pop("Stop", None)
+            if not hooks:
+                payload["hooks"] = {}
+            updates[config.codex_hooks_path] = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+
+    cowork_hooks_path = _cowork_plugin_dir(config) / "hooks" / "hooks.json"
+    cowork_snapshot = snapshots[cowork_hooks_path]
+    if getattr(cowork_snapshot, "exists", False):
+        try:
+            payload = json.loads(getattr(cowork_snapshot, "data"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise click.ClickException(f"Failed to parse {cowork_hooks_path}: {exc}") from exc
+        hooks = payload.get("hooks", {})
+        if not isinstance(hooks, dict):
+            raise click.ClickException(f"{cowork_hooks_path} must contain a top-level 'hooks' object.")
+        changed = False
+        for event_name in ("SessionEnd", "UserPromptSubmit", "PreCompact"):
+            groups = hooks.get(event_name, [])
+            if not isinstance(groups, list):
+                raise click.ClickException(f"{cowork_hooks_path} has invalid 'hooks.{event_name}'; expected a list.")
+            filtered, event_changed = _without_hook_commands_from_groups(groups, _is_om_cowork_writer_command)
+            if event_changed:
+                changed = True
+                if filtered:
+                    hooks[event_name] = filtered
+                else:
+                    hooks.pop(event_name, None)
+        if changed:
+            updates[cowork_hooks_path] = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+
+    return updates
+
+
+def _install_native_bridge_product(config: Config, claude_projects: tuple[str, ...]) -> None:
+    """Activate the bridge transaction without enabling any legacy writer."""
+    if sys.platform != "darwin":
+        raise click.ClickException("`om install --native-bridge` is only supported on macOS (launchd required)")
+    from .native_bridge.lifecycle import (
+        NativeBridgeLifecycleError,
+        NativeBridgeSettings,
+        atomic_write_owned_file,
+        install_bridge_launchd,
+        load_settings,
+        quiesce_legacy_launchd,
+        require_eligible_claude_projects,
+        restore_launchd_states,
+        restore_owned_file,
+        settings_bytes,
+        snapshot_owned_file,
+        write_settings,
+    )
+
+    try:
+        if claude_projects:
+            settings = NativeBridgeSettings(claude_projects)
+        else:
+            settings = load_settings(config, required=False)
+            if settings is None:
+                raise NativeBridgeLifecycleError(
+                    "first install requires at least one `--claude-project <exact-directory-name>`; "
+                    "run `om native-bridge sources` to list candidates"
+                )
+        require_eligible_claude_projects(config, settings.claude_projects)
+    except NativeBridgeLifecycleError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    om_path = _find_om_path()
+    if not om_path or not Path(om_path).is_absolute():
+        raise click.ClickException("Could not resolve an absolute 'om' path for the native bridge LaunchAgent.")
+
+    cowork_hooks_path = _cowork_plugin_dir(config) / "hooks" / "hooks.json"
+    managed_paths = (
+        config.native_bridge_config_path,
+        config.claude_settings_path,
+        config.codex_hooks_path,
+        cowork_hooks_path,
+    )
+    try:
+        snapshots = {path: snapshot_owned_file(path, max_bytes=4 * 1024 * 1024) for path in managed_paths}
+        hook_updates = _render_native_bridge_hook_updates(config, snapshots)
+    except (NativeBridgeLifecycleError, click.ClickException) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    attempted_digests: dict[Path, str] = {}
+    legacy_states = None
+    try:
+        attempted_digests[config.native_bridge_config_path] = hashlib.sha256(settings_bytes(settings)).hexdigest()
+        write_settings(
+            config,
+            settings,
+            expected_snapshot=snapshots[config.native_bridge_config_path],
+        )
+        for path, content in hook_updates.items():
+            attempted_digests[path] = hashlib.sha256(content).hexdigest()
+            atomic_write_owned_file(
+                path,
+                content,
+                mode=getattr(snapshots[path], "mode", None) or 0o600,
+                expected_snapshot=snapshots[path],
+            )
+        legacy_states = quiesce_legacy_launchd(config)
+        install_bridge_launchd(config, om_path)
+    except Exception as activation_error:
+        rollback_errors: list[str] = []
+        if legacy_states is not None:
+            try:
+                restore_launchd_states(config, legacy_states)
+            except Exception as exc:
+                rollback_errors.append(str(exc))
+        for path in reversed(managed_paths):
+            if path not in attempted_digests:
+                continue
+            try:
+                restore_owned_file(path, snapshots[path], expected_digest=attempted_digests[path])
+            except Exception as exc:
+                rollback_errors.append(str(exc))
+        detail = f"native bridge installation failed: {activation_error}"
+        if rollback_errors:
+            detail += "; rollback incomplete: " + "; ".join(rollback_errors)
+        raise click.ClickException(detail) from activation_error
+
+    click.echo("Installed native-memory bridge LaunchAgent (15-minute cadence).")
+    click.echo("Disabled legacy observer/reflect LaunchAgents and OM-managed transcript writer hooks.")
+    click.echo("Run `om bridge-native-memory` once now, then query it with `om search --native-bridge <query>`.")
+
+
+@cli.group(name="native-bridge")
+def native_bridge_group() -> None:
+    """Inspect or disable the installed native-memory bridge."""
+
+
+@native_bridge_group.command(name="disable")
+@click.pass_context
+def native_bridge_disable(ctx: click.Context) -> None:
+    """Disable and unload the bridge while retaining its files."""
+    if sys.platform != "darwin":
+        raise click.ClickException("the native-memory bridge is only supported on macOS")
+    from .native_bridge.lifecycle import NativeBridgeLifecycleError, disable_bridge_launchd
+
+    try:
+        disable_bridge_launchd(ctx.obj["config"])
+    except NativeBridgeLifecycleError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("Native-memory bridge disabled; plist, config, generations, and receipts retained.")
+
+
+@native_bridge_group.command(name="status")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.pass_context
+def native_bridge_status(ctx: click.Context, as_json: bool) -> None:
+    """Show native bridge configuration, service, and generation state."""
+    payload = _native_bridge_status_payload(ctx.obj["config"])
+    if as_json:
+        click.echo(json.dumps(payload, sort_keys=True))
+        return
+    click.echo("Native-memory bridge")
+    click.echo(f"  Config: {payload['config_status']}")
+    click.echo(f"  LaunchAgent: {payload['service_status']}")
+    click.echo(f"  Generation: {payload['generation_status']}")
+    if payload.get("generation_id"):
+        click.echo(f"  Generation ID: {payload['generation_id']}")
+    click.echo("  Search: om search --native-bridge <query>")
+
+
+@native_bridge_group.command(name="sources")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+@click.pass_context
+def native_bridge_sources(ctx: click.Context, as_json: bool) -> None:
+    """List eligible local source names without reading memory content."""
+    if sys.platform != "darwin":
+        raise click.ClickException("the native-memory bridge is only supported on macOS")
+    from .native_bridge.lifecycle import (
+        NATIVE_BRIDGE_CODEX_ALLOWLIST,
+        NativeBridgeLifecycleError,
+        discover_claude_projects,
+        discover_codex_sources,
+    )
+
+    try:
+        candidates = list(discover_claude_projects(ctx.obj["config"]))
+        codex_sources = list(discover_codex_sources(ctx.obj["config"]))
+    except NativeBridgeLifecycleError as exc:
+        raise click.ClickException(str(exc)) from exc
+    payload = {
+        "claude_projects": candidates,
+        "codex_allowlist": list(NATIVE_BRIDGE_CODEX_ALLOWLIST),
+        "codex_sources": codex_sources,
+        "auto_enrolled": False,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, sort_keys=True))
+        return
+    click.echo("Eligible Claude project directory names:")
+    if candidates:
+        for candidate in candidates:
+            click.echo(f"  {candidate['project']} ({candidate['eligible_markdown_files']} eligible Markdown file(s))")
+    else:
+        click.echo("  none found")
+    click.echo("Fixed Codex allowlist:")
+    for source in codex_sources:
+        availability = "present" if source["present"] else "not present"
+        click.echo(f"  {source['filename']} ({availability})")
+    click.echo("Nothing was enrolled. Pass one or more exact names with `--claude-project`.")
+
+
+def _native_bridge_status_payload(config: Config) -> dict[str, object]:
+    """Return truthful, read-only bridge state for status and doctor."""
+    payload: dict[str, object] = {
+        "platform_supported": sys.platform == "darwin",
+        "config_status": "not configured" if sys.platform == "darwin" else "unsupported (macOS only)",
+        "claude_projects": [],
+        "codex_allowlist": [],
+        "service_status": "unavailable (launchd requires macOS)",
+        "service_installed": False,
+        "service_loaded": False,
+        "service_override": "unavailable",
+        "generation_status": "not built" if sys.platform == "darwin" else "unavailable (macOS only)",
+        "generation_id": None,
+        "search_command": "om search --native-bridge <query>",
+    }
+    if sys.platform != "darwin":
+        return payload
+
+    from .native_bridge.lifecycle import NativeBridgeLifecycleError, inspect_launchd, load_settings
+    from .search.bm25 import BRIDGE_GENERATION_SCHEMA, BM25GenerationStore
+    from .search.generation_store import GenerationStoreError, StoreReadRoot
+
+    try:
+        settings = load_settings(config, required=False)
+        if settings is not None:
+            payload["config_status"] = "configured"
+            payload["claude_projects"] = list(settings.claude_projects)
+            from .native_bridge.lifecycle import NATIVE_BRIDGE_CODEX_ALLOWLIST
+
+            payload["codex_allowlist"] = list(NATIVE_BRIDGE_CODEX_ALLOWLIST)
+    except NativeBridgeLifecycleError as exc:
+        payload["config_status"] = f"invalid ({exc})"
+
+    bridge_service_state_present = (
+        payload["config_status"] != "not configured"
+        or config.native_bridge_launchd_plist_path.exists()
+        or config.native_bridge_data_dir.exists()
+    )
+    if sys.platform == "darwin" and bridge_service_state_present:
+        state = inspect_launchd(config, config.NATIVE_BRIDGE_LAUNCHD_LABEL)
+        payload["service_installed"] = state.installed
+        payload["service_loaded"] = state.loaded
+        payload["service_override"] = state.override
+        if state.error:
+            payload["service_status"] = f"unknown ({state.error})"
+        elif state.override == "disabled":
+            payload["service_status"] = "disabled"
+        elif state.loaded:
+            payload["service_status"] = "enabled and loaded"
+        elif state.installed:
+            payload["service_status"] = "enabled but not loaded"
+        else:
+            payload["service_status"] = "not installed"
+
+    store = BM25GenerationStore(config.native_bridge_data_dir)
+    try:
+        if store.has_generation_state():
+            with StoreReadRoot.open(config.native_bridge_data_dir) as read_root:
+                verified = store.read_current(read_root)
+            if verified.manifest.get("bridge_schema") != BRIDGE_GENERATION_SCHEMA:
+                raise GenerationStoreError("current generation is not a native bridge generation")
+            payload["generation_status"] = "ready"
+            payload["generation_id"] = verified.generation_id
+    except (GenerationStoreError, OSError) as exc:
+        payload["generation_status"] = f"invalid ({exc})"
+    return payload
 
 
 @cli.command()
@@ -3912,7 +4754,12 @@ def status(ctx: click.Context) -> None:
     click.echo("\nSearch:")
     click.echo(f"  Backend: {config.search_backend}")
     if config.search_backend == "bm25":
-        click.echo(f"  BM25 index: {config.search_index_dir / 'bm25.pkl'}")
+        if sys.platform == "win32":
+            click.echo(f"  BM25 index: {config.search_index_dir / 'bm25.pkl'}")
+        else:
+            click.echo(f"  BM25 generation store: {config.search_index_dir}")
+            click.echo(f"  BM25 current pointer: {config.search_index_dir / 'current-generation.json'}")
+            click.echo(f"  BM25 legacy index (preserved): {config.search_index_dir / 'bm25.pkl'}")
     elif config.search_backend in {"qmd", "qmd-hybrid"}:
         from .search.qmd import QMDBackend, inspect_qmd_index, inspect_qmd_install
 
@@ -3958,6 +4805,15 @@ def status(ctx: click.Context) -> None:
         model_env = config.qmd_model_env()
         if model_env:
             click.echo("  Model overrides: " + ", ".join(f"{key}={value}" for key, value in sorted(model_env.items())))
+
+    bridge_status = _native_bridge_status_payload(config)
+    click.echo("\nNative-memory bridge:")
+    click.echo(f"  Config: {bridge_status['config_status']}")
+    click.echo(f"  LaunchAgent: {bridge_status['service_status']}")
+    click.echo(f"  Generation: {bridge_status['generation_status']}")
+    if bridge_status.get("generation_id"):
+        click.echo(f"  Generation ID: {bridge_status['generation_id']}")
+    click.echo("  Retrieval: om search --native-bridge <query>")
 
     # LLM provider/model status (shared summary with `om auth status`)
     from .auth import provider_summary_lines
@@ -4204,6 +5060,23 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         _check("om binary", "PASS", om_path)
     else:
         _check("om binary", "FAIL", "not found on PATH", fix="Run: uv tool install observational-memory")
+
+    bridge_status = _native_bridge_status_payload(config)
+    operating_mode = _doctor_operating_mode(config, bridge_status)
+    if operating_mode in {"bridge", "mixed"}:
+        _doctor_native_bridge_mode(
+            config,
+            bridge_status,
+            _check,
+            validate_key=validate_key,
+            mixed_active=operating_mode == "mixed",
+        )
+        _check("Platform", "PASS", sys.platform)
+        _emit_doctor_results(results, as_json=as_json)
+        return
+
+    config = _load_runtime_config(ctx)
+    _check("Operating mode", "PASS", "full workflow (LLM-backed)")
 
     # 3. Provider config
     resolved_provider: str | None = None
@@ -4710,7 +5583,24 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         except Exception:
             pass  # Already reported above
 
-    # 13. Background scheduler
+    # 13. Native-memory bridge state retained after an explicit return to the
+    # full workflow is data, not an instruction to diagnose bridge safe hold.
+    bridge_status = _native_bridge_status_payload(config)
+    if not _native_bridge_state_present(bridge_status):
+        _check("Native-memory bridge", "PASS", "not installed (optional)")
+    else:
+        retained_ok = (
+            bridge_status["config_status"] == "configured"
+            and bridge_status["service_status"] == "not installed"
+            and bridge_status["generation_status"] in {"ready", "not built"}
+        )
+        retained_status = (
+            f"inactive retained state; config {bridge_status['config_status']}; "
+            f"generation {bridge_status['generation_status']}"
+        )
+        _check("Native-memory bridge", "PASS" if retained_ok else "WARN", retained_status)
+
+    # 14. Background scheduler
     _check("Scheduler default", "PASS", _resolve_scheduler_mode("auto", None))
 
     launchd_jobs = _launchd_job_statuses(config) if sys.platform == "darwin" else []
@@ -4878,28 +5768,7 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
     # 15. Platform
     _check("Platform", "PASS", sys.platform)
 
-    # Output
-    if as_json:
-        click.echo(json_mod.dumps(results, indent=2))
-    else:
-        for r in results:
-            tag = r["status"]
-            if tag == "PASS":
-                prefix = click.style("[PASS]", fg="green")
-            elif tag == "WARN":
-                prefix = click.style("[WARN]", fg="yellow")
-            else:
-                prefix = click.style("[FAIL]", fg="red")
-            line = f"{prefix} {r['name']}: {r['detail']}"
-            if r["fix"]:
-                line += click.style(f" — {r['fix']}", fg="yellow")
-            click.echo(line)
-
-        # Summary
-        passes = sum(1 for r in results if r["status"] == "PASS")
-        warns = sum(1 for r in results if r["status"] == "WARN")
-        fails = sum(1 for r in results if r["status"] == "FAIL")
-        click.echo(f"\n{passes} passed, {warns} warnings, {fails} failures")
+    _emit_doctor_results(results, as_json=as_json)
 
 
 # --- Claude Code hook installation ---
@@ -5282,23 +6151,8 @@ def _is_om_codex_session_start_group(group: object) -> bool:
 
 
 def _is_om_codex_stop_group(group: object) -> bool:
-    """Return True when *group* is the OM-managed Codex Stop hook group."""
-    if not isinstance(group, dict):
-        return False
-
-    hooks = group.get("hooks")
-    if not isinstance(hooks, list) or len(hooks) != 1:
-        return False
-
-    hook = hooks[0]
-    if not isinstance(hook, dict):
-        return False
-
-    return (
-        hook.get("type") == "command"
-        and hook.get("statusMessage") == _CODEX_STOP_STATUS
-        and _command_invokes_om_codex_checkpoint(hook.get("command", ""))
-    )
+    """Return True when *group* contains an OM-managed Codex Stop hook."""
+    return _hook_group_runs_command(group, _command_invokes_om_codex_checkpoint)
 
 
 def _find_codex_session_start_hook(config: Config) -> tuple[dict | None, str | None]:
@@ -5356,13 +6210,18 @@ def _find_codex_stop_hook(config: Config) -> tuple[dict | None, str | None]:
         return None, "'hooks.Stop' must be a list"
 
     for group in groups:
-        if _is_om_codex_stop_group(group):
-            hook_list = group.get("hooks", [])
-            if hook_list:
-                hook = hook_list[0]
-                if isinstance(hook, dict):
-                    return hook, None
-            return None, "invalid OM Stop hook group"
+        if not isinstance(group, dict):
+            continue
+        hook_list = group.get("hooks", [])
+        if not isinstance(hook_list, list):
+            continue
+        for hook in hook_list:
+            if (
+                isinstance(hook, dict)
+                and isinstance(hook.get("command"), str)
+                and _command_invokes_om_codex_checkpoint(hook["command"])
+            ):
+                return hook, None
 
     return None, None
 
@@ -5533,7 +6392,7 @@ def _install_codex_stop_hook(config: Config) -> None:
     if not isinstance(groups, list):
         raise click.ClickException(f"{path} has invalid 'hooks.Stop'; expected a list.")
 
-    filtered = [group for group in groups if not _is_om_codex_stop_group(group)]
+    filtered, _changed = _without_hook_commands_from_groups(groups, _command_invokes_om_codex_checkpoint)
     filtered.append(_om_codex_stop_group())
     hooks["Stop"] = filtered
 
@@ -5589,7 +6448,7 @@ def _uninstall_codex_stop_hook(config: Config) -> None:
     if not isinstance(groups, list):
         raise click.ClickException(f"{path} has invalid 'hooks.Stop'; expected a list.")
 
-    filtered = [group for group in groups if not _is_om_codex_stop_group(group)]
+    filtered, _changed = _without_hook_commands_from_groups(groups, _command_invokes_om_codex_checkpoint)
     if filtered:
         hooks["Stop"] = filtered
     else:
@@ -6075,42 +6934,73 @@ def _write_launchd_plist(path: Path, payload: dict[str, object]) -> None:
     path.write_bytes(plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False))
 
 
-def _launchctl_bootout(label: str) -> None:
+def _default_run_launchctl(args: list[str]):
+    """Run one bounded launchctl operation; injectable for lifecycle tests."""
+    import subprocess
+
+    return subprocess.run(
+        ["launchctl", *args],
+        capture_output=True,
+        text=True,
+        timeout=_SCHEDULER_COMMAND_TIMEOUT_SECONDS,
+    )
+
+
+def _launchctl_enable(label: str, *, run_launchctl: Callable[[list[str]], object] = _default_run_launchctl) -> None:
+    """Clear an explicit disabled override before bootstrapping one job."""
+    import subprocess
+
+    try:
+        result = run_launchctl(["enable", _launchd_service_target(label)])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise click.ClickException(f"Failed to enable launchd agent {label}: {exc}") from exc
+    if getattr(result, "returncode", 1) != 0:
+        detail = getattr(result, "stderr", "").strip() or getattr(result, "stdout", "").strip() or "unknown error"
+        raise click.ClickException(f"Failed to enable launchd agent {label}: {detail}")
+
+
+def _launchctl_bootout(
+    label: str,
+    *,
+    run_launchctl: Callable[[list[str]], object] = _default_run_launchctl,
+) -> None:
     """Best-effort bootout for an OM launchd job."""
     import subprocess
 
-    subprocess.run(
-        ["launchctl", "bootout", _launchd_service_target(label)],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        run_launchctl(["bootout", _launchd_service_target(label)])
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
-def _launchctl_bootstrap(plist_path: Path) -> None:
+def _launchctl_bootstrap(
+    plist_path: Path,
+    *,
+    run_launchctl: Callable[[list[str]], object] = _default_run_launchctl,
+) -> None:
     """Bootstrap one OM launchd plist into the current user's GUI domain."""
     import subprocess
 
-    result = subprocess.run(
-        ["launchctl", "bootstrap", _launchd_domain_target(), str(plist_path)],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = run_launchctl(["bootstrap", _launchd_domain_target(), str(plist_path)])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise click.ClickException(f"Failed to bootstrap launchd agent {plist_path.name}: {exc}") from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
         raise click.ClickException(f"Failed to bootstrap launchd agent {plist_path.name}: {detail}")
 
 
-def _launchctl_service_loaded(label: str, timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS) -> tuple[bool, str | None]:
+def _launchctl_service_loaded(
+    label: str,
+    timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS,
+    *,
+    run_launchctl: Callable[[list[str]], object] = _default_run_launchctl,
+) -> tuple[bool, str | None]:
     """Return whether one OM launchd job is currently loaded."""
     import subprocess
 
     try:
-        result = subprocess.run(
-            ["launchctl", "print", _launchd_service_target(label)],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        result = run_launchctl(["print", _launchd_service_target(label)])
     except FileNotFoundError:
         return False, "launchctl not available"
     except subprocess.TimeoutExpired:
@@ -6151,7 +7041,12 @@ def _launchd_job_statuses(config: Config, targets: str = "both") -> list[dict[st
     return jobs
 
 
-def _install_launchd(config: Config, targets: str) -> None:
+def _install_launchd(
+    config: Config,
+    targets: str,
+    *,
+    run_launchctl: Callable[[list[str]], object] = _default_run_launchctl,
+) -> None:
     """Install OM-managed LaunchAgents on macOS."""
     if sys.platform != "darwin":
         raise click.ClickException("launchd installation is only supported on macOS.")
@@ -6170,8 +7065,12 @@ def _install_launchd(config: Config, targets: str) -> None:
         if not isinstance(plist_path, Path) or not isinstance(label, str):
             continue
         _write_launchd_plist(plist_path, _launchd_plist_payload(spec))
-        _launchctl_bootout(label)
-        _launchctl_bootstrap(plist_path)
+        _launchctl_enable(label, run_launchctl=run_launchctl)
+        _launchctl_bootout(label, run_launchctl=run_launchctl)
+        _launchctl_bootstrap(plist_path, run_launchctl=run_launchctl)
+        loaded, error = _launchctl_service_loaded(label, run_launchctl=run_launchctl)
+        if not loaded:
+            raise click.ClickException(f"Failed to verify launchd agent {label}: {error or 'service is not loaded'}")
 
     click.echo(f"Installed {len(specs)} launchd job(s)")
 
