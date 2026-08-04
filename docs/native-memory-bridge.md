@@ -6,19 +6,29 @@ The bridge is available on macOS in v0.10.0. It reads approved native summaries,
 
 ## Quick Start
 
-Install or upgrade OM, then enable the bridge:
+For a new Homebrew install, run `brew install intertwine/tap/observational-memory`. If OM is already installed, run `brew upgrade observational-memory`.
+
+Choose the native sources and enable the bridge:
 
 ```bash
-brew install intertwine/tap/observational-memory   # use `brew upgrade observational-memory` if already installed
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+```
+
+If Claude Code or Codex was running during installation, save the current work, exit the affected app or CLI session, and start a new session. A running process can retain its previous OM write hooks until it restarts.
+
+Build the first index and check the result:
+
+```bash
 om bridge-native-memory
 om search --native-bridge "what were we doing in this project?"
-om status
+om native-bridge status
 om doctor
 ```
 
 `om native-bridge sources` lists eligible Claude project directory names with Markdown-file counts. It also reports whether the fixed Codex allowlist files are present. It never prints memory text or enrolls a source. The first install needs macOS and at least one exact Claude project name from that list. Repeat `--claude-project` to include more than one. Codex memory is added whenever either fixed Codex file is present.
+
+Setup is ready when status shows `Config: configured`, `LaunchAgent: enabled and loaded`, and `Generation: ready`, and `om doctor` reports that the older Claude and Codex writers are inactive. If it does not, use the troubleshooting steps before relying on shared recall.
 
 Bridge retrieval is explicit. Ordinary `om search` and `om recall` continue to use the full OM memory store and do not merge bridge results.
 
@@ -37,20 +47,25 @@ You can move between these paths. The switch is explicit so an upgrade cannot si
 
 ## Install Or Upgrade
 
-Homebrew:
+For a new Homebrew install:
 
 ```bash
 brew install intertwine/tap/observational-memory
-# Existing install: brew upgrade observational-memory
-om native-bridge sources
-om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
 ```
 
-`uv`:
+If OM is already installed with Homebrew, run `brew upgrade observational-memory` instead.
+
+For a new `uv` install:
 
 ```bash
 uv tool install observational-memory
-# Existing install: uv tool upgrade observational-memory
+```
+
+If OM is already installed with `uv`, run `uv tool upgrade observational-memory` instead.
+
+Then choose the native sources and enable the bridge:
+
+```bash
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
 ```
@@ -77,7 +92,7 @@ On a v0.9.1 full install, bridge activation:
 
 Grok, Kimi, and OpenCode integrations are outside this Claude↔Codex migration. If you installed their writer integrations, they are unchanged.
 
-If setup fails, OM attempts to restore prior service and managed-file state. It reports `rollback incomplete` if any restoration step fails so you know the install needs manual inspection.
+If setup fails, OM attempts to restore the managed files and any service that was previously known to be enabled. For safety, a legacy service whose earlier enablement state was unknown stays disabled. `om doctor` reports that safe hold. OM reports `rollback incomplete` only when a restoration step itself fails and manual recovery is required.
 
 ## Run A Refresh Now
 
@@ -100,7 +115,7 @@ If no verified index exists yet, bridge search exits with guidance to install th
 The bridge uses a fixed source allowlist:
 
 - Codex: exactly `~/.codex/memories/MEMORY.md` and `~/.codex/memories/memory_summary.md`;
-- Claude Code: `.md` files under `~/.claude/projects/<exact-project-name>/memory/` for the project directory names you selected.
+- Claude Code: top-level `.md` files directly in `~/.claude/projects/<exact-project-name>/memory/` for the project directory names you selected.
 
 There is no public Codex filename override. Claude selection accepts exact project directory names, not arbitrary paths, recursive user globs, or remote sources.
 
@@ -133,9 +148,7 @@ Every attempt has fixed limits for:
 
 These ceilings cannot be raised through normal bridge options or OM provider settings. If admission fails or a limit is reached, the bridge keeps the last verified index. A busy index also fails safely instead of starting a competing writer.
 
-The memory boundary uses one processless worker. The supervisor samples the live worker and kills a detected breach. The worker also reports the kernel's lifetime RSS high-water mark, so a fast run cannot finish between samples and be accepted over the limit. On macOS, `RLIMIT_RSS` is an allocation preference rather than an unconditional kill guarantee; OM records its readback and relies on the supervisor plus the kernel high-water check for the acceptance decision.
-
-The private BM25 store keeps the current generation and three rollback candidates. A generation held by an active reader is never removed. Reader pins can temporarily raise the count above four; the next successful publication reclaims released generations.
+OM accepts a run only when its measured memory use and total elapsed time remain within these limits. A rejected run keeps the previous verified index. The private index normally keeps the current generation and three rollback candidates; an active search can delay cleanup until the next successful refresh.
 
 ## Check Health
 
@@ -149,7 +162,7 @@ om doctor
 
 `om native-bridge status` and `om status` report bridge configuration, service state, and verified-index readiness. `om doctor` also verifies that the older Claude, Codex, auto-memory, and reflector services and OM-managed writer hooks remain off.
 
-If Claude Code or Codex was open during activation, finish or save active work and fully restart that host once before relying on this result. The installer changes managed hooks on disk, but an already-running host can retain its old hook table until restart. Run `om doctor` after the restart.
+If Claude Code or Codex was running during installation, save the current work, exit the affected app or CLI session, and start a new session. Then run `om doctor` to confirm that the older OM writers remain off.
 
 None of these commands prints indexed memory text.
 
@@ -196,26 +209,27 @@ Or return explicitly to the full Claude Code and Codex workflow:
 om uninstall --native-bridge
 om install --both
 om install --cowork   # only if you want Cowork writers restored too
-om doctor
 ```
 
-`--both` restores Claude Code and Codex only. The full installer may ask for an LLM provider because observation and reflection use one.
+`--both` restores Claude Code and Codex only. The full installer may ask for an LLM provider because observation and reflection use one. Save current work, exit the affected Claude Code or Codex app or CLI session, and start a new session so it loads the restored hooks. Then run `om doctor`.
 
-If you installed OM with `uv` and need to roll back the package itself after disabling the bridge:
+If you installed OM with `uv` and want v0.9.1 with the full Claude Code and Codex workflow, restore that workflow while v0.10.0 is still installed, then downgrade the package:
 
 ```bash
 om uninstall --native-bridge
+om install --both
 uv tool install --force "observational-memory==0.9.1"
 om status
+om doctor
 ```
 
-The older writer jobs remain disabled until you explicitly run an install target such as `om install --both`.
+If you also want Cowork writers, run `om install --cowork` before the downgrade. After the downgrade, save current work, exit the affected Claude Code or Codex app or CLI session, and start a new session. If you only need a package rollback and want the older writers to stay off, omit `om install --both`.
 
 ## Troubleshooting
 
 ### The installer says the platform is unsupported
 
-The v0.10.0 bridge is macOS-only. Both its service and one-shot command depend on macOS resource admission. The rest of OM can still be installed on Linux or Windows.
+The v0.10.0 bridge is macOS-only. Both its service and one-shot command depend on built-in macOS memory and swap checks. The rest of OM can still be installed on Linux or Windows.
 
 ### Search says no bridge index exists
 
@@ -252,7 +266,7 @@ om status
 om doctor
 ```
 
-If activation fails, OM attempts to restore the pre-attempt service and managed-file state. It reports `rollback incomplete` if any restoration step fails.
+If activation fails, OM attempts to restore the managed files and services it can prove were previously enabled. A legacy service whose earlier enablement state was unknown stays disabled for safety and is shown by `om doctor`. OM reports `rollback incomplete` only if a restoration step itself fails.
 
 ### Native files are rejected
 
@@ -260,7 +274,7 @@ Do not replace them with symlinks or broadly loosen permissions. Let Claude Code
 
 ### Old transcript writers appear active
 
-Run `om install --native-bridge` again. A successful activation removes OM-managed Claude, Codex, and Cowork writer hooks and boots out the four older writer services. Grok, Kimi, and OpenCode remain outside this migration scope; disable those integrations separately if you do not want them writing to the full OM workflow.
+First restart any Claude Code or Codex app or CLI session that was open during installation, then run `om doctor`. If an old writer still appears, rerun `om install --native-bridge` and check again. A successful activation removes OM-managed Claude, Codex, and Cowork writer hooks and stops the four older writer services. Grok, Kimi, and OpenCode remain outside this migration scope; disable those integrations separately if you do not want them writing to the full OM workflow.
 
 ### An external Hermes or Grok plugin blocks the upgrade
 

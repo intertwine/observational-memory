@@ -11,27 +11,35 @@
 
 **Shared, local memory for AI coding agents — now with a native Claude Code and Codex bridge that needs no transcript capture or an LLM.**
 
-Observational Memory, or `om`, helps agents carry useful context from one session and tool to the next. In v0.10.0, its native-memory bridge reads the small memory summaries that Claude Code and Codex already maintain, indexes an approved set in a private local BM25 store, and makes that shared context available through OM retrieval.
+Observational Memory, or `om`, helps agents carry useful context from one session and tool to the next. In v0.10.0, its native-memory bridge reads the small memory summaries that Claude Code and Codex already maintain, indexes an approved set in a private local keyword-search index (BM25), and makes that shared context available through OM retrieval.
 
 The bridge is available on macOS in v0.10.0. It reads native memory sources without changing them. It does **not** ingest raw transcripts, call an LLM, run reflection, or silently upload memory.
 
 ## Shortest Path: Native Claude and Codex Memory
 
-Install or upgrade on macOS, then enable the bridge:
+For a new Homebrew install, run `brew install intertwine/tap/observational-memory`. If OM is already installed, run `brew upgrade observational-memory`.
+
+Choose the native sources and enable the bridge:
 
 ```bash
-brew install intertwine/tap/observational-memory   # use `brew upgrade observational-memory` if already installed
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+```
+
+If Claude Code or Codex was running during installation, save the current work, exit the affected app or CLI session, and start a new session. A running process can retain its previous OM write hooks until it restarts.
+
+Build the first index and check the result:
+
+```bash
 om bridge-native-memory
 om search --native-bridge "what were we doing in this project?"
-om status
+om native-bridge status
 om doctor
 ```
 
 The first install needs macOS and at least one eligible Claude project memory directory. Repeat `--claude-project` to include more than one. Codex memory joins the index when either fixed Codex memory file is present. Later installs and one-shot runs reuse the saved private Claude selection when you omit the flag.
 
-If Claude Code or Codex was open during activation, finish or save active work and fully restart that host once. The installer updates managed hooks on disk, but an already-running host can keep its old hook table until restart. Run `om doctor` after the restart before relying on the older-writer hold.
+Setup is ready when status shows `Config: configured`, `LaunchAgent: enabled and loaded`, and `Generation: ready`, and `om doctor` reports that the older Claude and Codex writers are inactive. If it does not, use the troubleshooting guide before relying on shared recall.
 
 Bridge search is explicit. Ordinary `om search` and `om recall` keep using the full OM memory store and do not merge bridge results.
 
@@ -75,10 +83,15 @@ If the bridge is already enabled, switch modes explicitly:
 ```bash
 om uninstall --native-bridge
 om install --both
-om doctor
 ```
 
 If bridge activation removed a Cowork writer you still want, also run `om install --cowork`. `--both` covers Claude Code and Codex only.
+
+Save current work in Claude Code or Codex, exit the affected app or CLI session, and start a new session so it loads the restored hooks. Then check the result:
+
+```bash
+om doctor
+```
 
 ## How Memory Flows
 
@@ -98,7 +111,7 @@ flowchart LR
 
 1. Install `om` on macOS.
 2. Run `om native-bridge sources`, then install with an exact Claude project name from that list.
-3. Fully restart any Claude Code or Codex host that was open during activation, then run `om doctor`.
+3. If Claude Code or Codex was running during installation, save the current work, exit that app or CLI session, and start a new session. Then run `om doctor`.
 4. Use Claude Code and Codex normally. Their native memory summaries remain the source of truth; the bridge refreshes its private index when they change.
 5. Retrieve bridge memory when you need it:
 

@@ -21,31 +21,51 @@ If you enable the full workflow and already pay for ChatGPT Plus / Pro / Team or
 
 ## Fast Native-Bridge Install
 
-macOS with Homebrew:
+For a new Homebrew install:
 
 ```bash
 brew install intertwine/tap/observational-memory
-om native-bridge sources
-om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
-om bridge-native-memory
-om search --native-bridge "current project status"
-om doctor
 ```
 
-macOS with `uv`:
+If OM is already installed with Homebrew:
+
+```bash
+brew upgrade observational-memory
+```
+
+For a new `uv` install:
 
 ```bash
 uv tool install observational-memory
+```
+
+If OM is already installed with `uv`:
+
+```bash
+uv tool upgrade observational-memory
+```
+
+Then choose the native sources and enable the bridge:
+
+```bash
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+```
+
+If Claude Code or Codex was running during installation, save the current work, exit the affected app or CLI session, and start a new session. A running process can retain its previous OM write hooks until it restarts.
+
+Build the first index and check the result:
+
+```bash
 om bridge-native-memory
 om search --native-bridge "current project status"
+om native-bridge status
 om doctor
 ```
 
 `om native-bridge sources` lists eligible Claude project directory names with Markdown-file counts and reports whether the two fixed Codex source files are present. It does not show memory text or enroll anything. The first install requires at least one exact Claude project directory name from that list. Repeat `--claude-project` for more projects.
 
-If Claude Code or Codex was open during activation, finish or save active work and fully restart that host once. Managed hooks change on disk immediately, but an already-running host can retain its old hook table until restart. Run `om doctor` after the restart before relying on the older-writer hold.
+Setup is ready when status shows `Config: configured`, `LaunchAgent: enabled and loaded`, and `Generation: ready`, and `om doctor` reports that the older Claude and Codex writers are inactive.
 
 Flags on `om install --native-bridge` replace the complete saved Claude selection. To add or remove a project, repeat every project you want to keep:
 
@@ -81,10 +101,11 @@ If the native bridge is already enabled, switch modes first so both schedulers a
 ```bash
 om uninstall --native-bridge
 om install --both
-om doctor
 ```
 
 If you previously used Cowork writers, also run `om install --cowork`. `--both` restores Claude Code and Codex only.
+
+Save current work in Claude Code or Codex, exit the affected app or CLI session, and start a new session so it loads the restored hooks. Then run `om doctor`.
 
 Enterprise auth extras:
 
@@ -197,15 +218,20 @@ Upgrade the package, then choose the bridge explicitly:
 brew upgrade observational-memory   # or: uv tool upgrade observational-memory
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+```
+
+If Claude Code or Codex was running during installation, save the current work, exit the affected app or CLI session, and start a new session. Then build and check the index:
+
+```bash
 om bridge-native-memory
 om search --native-bridge "current project status"
-om status
+om native-bridge status
 om doctor
 ```
 
 On an existing full install, `om install --native-bridge` boots out the four older macOS writer jobs: the Claude observer, Codex observer, Claude auto-memory scan, and reflector. Their plist files stay in place, but the bridge installer does not enable them.
 
-It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks. It preserves OM's read-only SessionStart context hooks and fallback, along with unrelated hook groups. If bridge setup fails, the installer attempts to restore prior service and managed-file state and reports `rollback incomplete` if any restoration step fails.
+It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks. It preserves OM's read-only SessionStart context hooks and fallback, along with unrelated hook groups. If bridge setup fails, the installer restores the managed files and any service it can prove was previously enabled. A legacy service whose earlier enablement state was unknown stays disabled for safety and is shown by `om doctor`. The installer reports `rollback incomplete` only if a restoration step itself fails.
 
 Grok, Kimi, and OpenCode are outside this Claude↔Codex migration. If you installed their writer integrations earlier, they are unchanged and may still feed the full OM workflow.
 
@@ -271,10 +297,9 @@ Removing the bridge does not restart older writer jobs. To leave the bridge and 
 om uninstall --native-bridge
 om install --both
 om install --cowork   # only if you want to restore Cowork writers too
-om doctor
 ```
 
-`--both` restores Claude Code and Codex only.
+`--both` restores Claude Code and Codex only. Save current work, exit the affected Claude Code or Codex app or CLI session, and start a new session so it loads the restored hooks. Then run `om doctor`.
 
 Remove hooks and scheduled jobs:
 

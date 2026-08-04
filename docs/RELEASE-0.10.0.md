@@ -10,15 +10,23 @@ The boundary is deliberate: the bridge does not ingest raw transcripts, call an 
 
 ## Get Started
 
-Install or upgrade OM on macOS, then enable the bridge:
+For a new Homebrew install, run `brew install intertwine/tap/observational-memory`. If OM is already installed, run `brew upgrade observational-memory`.
+
+Choose the native sources and enable the bridge:
 
 ```bash
-brew install intertwine/tap/observational-memory   # use `brew upgrade observational-memory` if already installed
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+```
+
+If Claude Code or Codex was running during installation, save the current work, exit the affected app or CLI session, and start a new session. A running process can retain its previous OM write hooks until it restarts.
+
+Build the first index and check the result:
+
+```bash
 om bridge-native-memory
 om search --native-bridge "what were we doing in this project?"
-om status
+om native-bridge status
 om doctor
 ```
 
@@ -26,11 +34,11 @@ om doctor
 
 Ordinary `om search` and `om recall` keep using the full OM memory store. They do not merge bridge results. Before the first verified bridge index exists, `om search --native-bridge` exits with guidance to install or run the bridge.
 
-The bridge is macOS-only in v0.10.0. Both its one-shot command and scheduled service use macOS resource admission.
+The bridge is macOS-only in v0.10.0. Both its one-shot command and scheduled service use built-in macOS memory and swap checks.
 
 ## What The Bridge Reads
 
-The fixed allowlist is Codex `MEMORY.md` and `memory_summary.md`, plus `.md` files inside the exact Claude project memory directories selected at install. It does not scan arbitrary files below Claude Code or Codex data directories.
+The fixed allowlist is Codex `MEMORY.md` and `memory_summary.md`, plus top-level `.md` files directly in the exact Claude project memory directories selected at install. It does not scan nested directories or arbitrary files elsewhere in Claude Code or Codex data directories.
 
 Its source roots stay read-only. Raw-memory files, transcripts, session logs, and OM's own observation and reflection inputs are outside this path. The derived bridge index is not sent through OM Cluster or OM Mail.
 
@@ -42,11 +50,11 @@ See [Native Claude and Codex memory](native-memory-bridge.md#source-and-privacy-
 
 Each run requires normal macOS memory pressure and at most 80% swap use. It is limited to 15 seconds, 128 MiB process-tree RSS, 2 MiB per file, and 16 MiB total input. If admission fails or a limit is reached, the bridge keeps the last verified index. `om native-bridge status`, `om status`, and `om doctor` report configuration, service, and verified-index state.
 
-The explicit bridge install boots out the older Claude observer, Codex observer, Claude auto-memory, and reflector services, and never enables them. It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks while preserving read-only SessionStart context and unrelated hook groups. It keeps the older service plist files so you can make a deliberate return to the full workflow later. If setup fails, OM attempts to restore prior service and managed-file state and reports `rollback incomplete` if any restoration step fails.
+Enabling the bridge stops OM's older Claude and Codex background writers and removes OM-managed write hooks for Claude Code, Codex, and Cowork. Read-only startup context, unrelated hooks, and existing memory remain in place. If installation fails, OM restores the managed files and any service it can prove was previously enabled. A legacy service whose earlier state was unknown stays disabled for safety and is shown by `om doctor`; OM asks for manual recovery only if a restoration step itself fails.
 
 Grok, Kimi, and OpenCode integrations are outside this Claude↔Codex migration scope. Existing writer integrations for those hosts are unchanged.
 
-After activation, fully restart any Claude Code or Codex host that was already running. Managed hooks change on disk immediately, but a running host can retain its old hook table until restart. Run `om doctor` after that restart before relying on the older-writer hold.
+After installation, start a new session for any Claude Code or Codex app or CLI session that was previously running, then run `om doctor` to confirm that the older OM writers remain off.
 
 ## Upgrade From v0.9.1
 
@@ -56,8 +64,13 @@ After upgrading the package, install the bridge and check the result:
 brew upgrade observational-memory   # or: uv tool upgrade observational-memory
 om native-bridge sources
 om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+```
+
+If Claude Code or Codex was running during installation, save the current work, exit the affected app or CLI session, and start a new session. Then build and check the index:
+
+```bash
 om bridge-native-memory
-om status
+om native-bridge status
 om doctor
 ```
 
@@ -89,10 +102,9 @@ Removing the bridge does not silently restart the older writer jobs. To return t
 om uninstall --native-bridge
 om install --both
 om install --cowork   # only if you want Cowork writers restored too
-om doctor
 ```
 
-`--both` restores Claude Code and Codex only. To remove the bridge service plus its private config, derived index, receipts, and logs, run `om uninstall --native-bridge --purge`; source memory is untouched.
+`--both` restores Claude Code and Codex only. Save current work, exit the affected Claude Code or Codex app or CLI session, and start a new session so it loads the restored hooks. Then run `om doctor`. To remove the bridge service plus its private config, derived index, receipts, and logs, run `om uninstall --native-bridge --purge`; source memory is untouched.
 
 After purge, run `om native-bridge sources` and pass at least one exact project name with `--claude-project` when you enable the bridge again. Purge intentionally removes the saved selection.
 
@@ -106,6 +118,6 @@ After purge, run `om native-bridge sources` and pass at least one exact project 
 - Claude Code and Codex native memory summaries only.
 - Local BM25 keyword retrieval only; this bridge does not use QMD, Moss, a remote backend, or an LLM.
 - The bridge can index only summaries that the host agents have already written.
-- Background freshness is normally within one 15-minute service interval; use `om bridge-native-memory` when you need an immediate refresh.
+- Background freshness is normally within one 15-minute service interval. A scheduled failure uses a bounded retry delay; after the Mac passes admission again, use `om bridge-native-memory` when you need an immediate refresh.
 
 For the complete operating guide, see [Native Claude and Codex memory](native-memory-bridge.md).

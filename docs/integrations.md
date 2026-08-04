@@ -2,7 +2,29 @@
 
 Observational Memory is user-level memory. It is shared across the agents you install it for, instead of being tied to one project checkout.
 
-## Claude Code
+Choose one operating mode for Claude Code and Codex. Use the native bridge to search their existing summaries without transcripts or an LLM. The `--claude` and `--codex` installs below enable the separate transcript-based workflow.
+
+## Native Claude Code And Codex Bridge
+
+On macOS, v0.10.0 can index approved native memory summaries from Claude Code and Codex without using their transcripts or an LLM:
+
+```bash
+om native-bridge sources
+om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
+```
+
+If Claude Code or Codex was running during installation, save the current work, exit the affected app or CLI session, and start a new session. Then build and search the index:
+
+```bash
+om bridge-native-memory
+om search --native-bridge "current project status"
+```
+
+Activation removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks, keeps read-only SessionStart context, and leaves the older observer and reflector services disabled. Grok, Kimi, and OpenCode integrations are not changed.
+
+See [Native Claude and Codex memory](native-memory-bridge.md) for the source boundary, lifecycle, rollback, and troubleshooting.
+
+## Full Workflow: Claude Code
 
 Install:
 
@@ -29,7 +51,7 @@ OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS=0
 
 Set `OM_DISABLE_SESSION_OBSERVER_CHECKPOINTS=1` to stop in-session checkpoints while keeping normal end-of-session capture.
 
-## Codex
+## Full Workflow: Codex
 
 Install:
 
@@ -57,21 +79,6 @@ Check it:
 om context --for codex --cwd "$PWD" --task "review current work"
 om recall --query "current work" --for codex --cwd "$PWD"
 ```
-
-## Native Claude Code And Codex Bridge
-
-On macOS, v0.10.0 can index approved native memory summaries from Claude Code and Codex without using their transcripts or an LLM:
-
-```bash
-om native-bridge sources
-om install --native-bridge --claude-project "<exact-directory-name-from-the-list>"
-om bridge-native-memory
-om search --native-bridge "current project status"
-```
-
-This is a separate mode from the writer-hook integrations above. Activation removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks, keeps read-only SessionStart context, and leaves the older observer and reflector services disabled. Grok, Kimi, and OpenCode integrations are not changed.
-
-See [Native Claude and Codex memory](native-memory-bridge.md) for the source boundary, lifecycle, rollback, and troubleshooting.
 
 ## Kimi Code CLI
 
@@ -225,7 +232,7 @@ Notes:
 
 ## Grok Build TUI (xAI)
 
-Grok has excellent native hook support and also reads `~/.claude/settings.json` for compatibility.
+Grok has native hook support and also reads `~/.claude/settings.json` for compatibility.
 
 The core integration below is installed by `om` and is separate from the independently released Grok marketplace plugin. For OM v0.10, use Grok marketplace plugin v0.1.2 or newer.
 
@@ -241,7 +248,7 @@ What gets installed:
 
 - `~/.grok/hooks/observational-memory.json` — OM `SessionStart` (context) + checkpoint hooks
 - On Windows: direct `om` executable invocations (no shell script dependency)
-- If OM Claude hooks already exist in `~/.claude/settings.json`, the installer intelligently omits a duplicate `SessionStart` to avoid double-injecting context (Grok inherits it via the compatibility layer)
+- If OM Claude hooks already exist in `~/.claude/settings.json`, the installer omits a duplicate `SessionStart` to avoid double-injecting context (Grok inherits it via the compatibility layer)
 
 Runtime behavior:
 
