@@ -200,6 +200,17 @@ def test_source_discovery_counts_only_secure_regular_user_files(monkeypatch, tmp
     assert discovered == ({"project": "project-a", "eligible_markdown_files": 1},)
 
 
+def test_source_discovery_rejects_group_or_world_writable_selected_directories(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    project = config.claude_projects_dir / "unsafe-project"
+    memory = project / "memory"
+    memory.mkdir(parents=True)
+    (memory / "MEMORY.md").write_text("not eligible through an unsafe directory")
+    project.chmod(0o777)
+
+    assert discover_claude_projects(config) == ()
+
+
 def test_codex_source_discovery_reports_fixed_presence_without_content(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
     memories = config.codex_home / "memories"

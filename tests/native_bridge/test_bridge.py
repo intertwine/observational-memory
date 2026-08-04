@@ -597,6 +597,7 @@ def test_durable_retry_blocks_reentry_before_native_source_capture(tmp_path, mon
         config,
         BridgePolicy(claude_projects=("project-a",)),
         admission_probe=admitted,
+        invocation="scheduled",
         now=clock,
     ).run()
 
@@ -605,6 +606,78 @@ def test_durable_retry_blocks_reentry_before_native_source_capture(tmp_path, mon
     status = _read_json(config.memory_dir / ".native-memory-bridge" / "status.json")
     assert status["consecutive_failure_count"] == 1
     assert status["total_failure_count"] == 1
+
+
+def test_manual_retry_bypasses_valid_scheduled_backoff_after_fresh_admission(tmp_path):
+    clock = MutableClock()
+
+    def fail(event):
+        if event == "before:stable_snapshot":
+            raise RuntimeError("deterministic failure")
+
+    bridge, config, _codex, _claude = bridge_fixture(tmp_path, phase_hook=fail)
+    bridge.now = clock
+    assert bridge.run().status == "failed"
+    admission_calls = 0
+
+    def fresh_admission():
+        nonlocal admission_calls
+        admission_calls += 1
+        return admitted()
+
+    result = NativeMemoryBridge(
+        config,
+        BridgePolicy(claude_projects=("project-a",)),
+        admission_probe=fresh_admission,
+        invocation="manual",
+        now=clock,
+    ).run()
+
+    assert admission_calls == 1
+    assert result.status == "success"
+    status = _read_json(config.memory_dir / ".native-memory-bridge" / "status.json")
+    assert status["retry_at"] is None
+    assert status["consecutive_failure_count"] == 0
+    assert status["total_failure_count"] == 1
+
+
+def test_manual_retry_requires_fresh_admission_and_invalid_retry_stays_fail_closed(tmp_path, monkeypatch):
+    clock = MutableClock()
+
+    def fail(event):
+        if event == "before:stable_snapshot":
+            raise RuntimeError("deterministic failure")
+
+    bridge, config, _codex, _claude = bridge_fixture(tmp_path, phase_hook=fail)
+    bridge.now = clock
+    assert bridge.run().status == "failed"
+    monkeypatch.setattr(
+        "observational_memory.native_bridge.bridge.capture_native_snapshot",
+        lambda **_kwargs: pytest.fail("source capture ran without admitted manual retry"),
+    )
+    rejected_retry = NativeMemoryBridge(
+        config,
+        BridgePolicy(claude_projects=("project-a",)),
+        admission_probe=rejected,
+        invocation="manual",
+        now=clock,
+    ).run()
+    assert rejected_retry.status == "rejected"
+
+    status_path = config.memory_dir / ".native-memory-bridge" / "status.json"
+    invalid_status = _read_json(status_path)
+    invalid_status["retry_at"] = 123
+    status_path.write_text(json.dumps(invalid_status, sort_keys=True, separators=(",", ":")) + "\n")
+    invalid_retry = NativeMemoryBridge(
+        config,
+        BridgePolicy(claude_projects=("project-a",)),
+        admission_probe=admitted,
+        invocation="manual",
+        now=clock,
+    ).run()
+
+    assert invalid_retry.status == "deferred"
+    assert "invalid" in invalid_retry.message
 
 
 def test_expired_retry_allows_one_new_attempt(tmp_path):

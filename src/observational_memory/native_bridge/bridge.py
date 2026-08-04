@@ -890,7 +890,8 @@ class NativeMemoryBridge:
                     self._read_json(storage, transaction, "state.json")
                     consecutive, total = self._failure_counters(prior_status, failed=False)
                     retry_active, retry_at = self._active_retry(prior_status)
-                    if retry_active:
+                    manual_retry = self.invocation == "manual" and retry_at is not None
+                    if retry_active and not manual_retry:
                         if retry_at is None:
                             message = "bridge retry state is invalid; retry is fail-closed"
                         else:

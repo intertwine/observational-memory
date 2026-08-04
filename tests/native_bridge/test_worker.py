@@ -144,11 +144,12 @@ def test_legacy_observer_safeguards_remain_300_seconds_and_4096_mib(monkeypatch)
     assert _observer_worker_max_rss_bytes() == 4096 * 1024 * 1024
 
 
-def test_process_tree_rss_includes_descendants(monkeypatch):
+def test_process_tree_rss_includes_supervisor_worker_and_transient_probe_descendants(monkeypatch):
     output = """\
 100 1 100
 101 100 200
-102 101 300
+102 100 300
+103 102 400
 200 1 900
 """
     monkeypatch.setattr(
@@ -157,13 +158,24 @@ def test_process_tree_rss_includes_descendants(monkeypatch):
         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout=output, stderr=""),
     )
 
-    pids, rss = process_tree(100)
+    pids, rss = process_tree(100, timeout_seconds=0.5)
 
-    assert pids == {100, 101, 102}
-    assert rss == (100 + 200 + 300) * 1024
+    assert pids == {100, 101, 102, 103}
+    assert rss == (100 + 200 + 300 + 400) * 1024
 
 
-def test_outer_timeout_terminates_worker_tree():
+def test_outer_timeout_terminates_worker_tree(monkeypatch):
+    import observational_memory.native_bridge.worker as worker
+
+    class AllPids(set):
+        def __contains__(self, _item):
+            return True
+
+    monkeypatch.setattr(
+        worker,
+        "process_tree",
+        lambda pid, *, timeout_seconds: (AllPids({pid}), 1),
+    )
     with pytest.raises(BridgeWorkerTimeout, match="exceeded 1s") as caught:
         run_bounded_bridge(SlowBridge(), timeout_seconds=1)
     assert caught.value.attempt_id is not None
@@ -187,7 +199,15 @@ def test_outer_deadline_includes_receipt_and_telemetry_finalization():
 def test_process_tree_rss_limit_terminates_worker(monkeypatch):
     import observational_memory.native_bridge.worker as worker
 
-    monkeypatch.setattr(worker, "process_tree", lambda pid: ({pid}, 1024))
+    class AllPids(set):
+        def __contains__(self, _item):
+            return True
+
+    monkeypatch.setattr(
+        worker,
+        "process_tree",
+        lambda pid, *, timeout_seconds: (AllPids({pid}), 1024),
+    )
     with pytest.raises(BridgeWorkerMemoryExceeded, match="exceeded 0 MiB"):
         run_bounded_bridge(WaitingBridge(), timeout_seconds=5, max_rss_bytes=1)
 
@@ -195,11 +215,18 @@ def test_process_tree_rss_limit_terminates_worker(monkeypatch):
 def test_fast_worker_cannot_evade_kernel_high_water_evidence(monkeypatch):
     import observational_memory.native_bridge.worker as worker
 
-    monkeypatch.setattr(worker, "process_tree", lambda pid: ({pid}, 1))
+    class AllPids(set):
+        def __contains__(self, _item):
+            return True
+
+    monkeypatch.setattr(
+        worker,
+        "process_tree",
+        lambda pid, *, timeout_seconds: (AllPids({pid}), 1),
+    )
     with pytest.raises(BridgeWorkerMemoryExceeded, match="kernel RSS high-water") as caught:
         run_bounded_bridge(FastBridge(), timeout_seconds=5, max_rss_bytes=1)
-    assert caught.value.telemetry["rss_sample_count"] >= 1
-    assert caught.value.telemetry["peak_tree_rss_bytes"] > 1
+    assert caught.value.telemetry["worker_high_water_rss_bytes"] > 1
 
 
 def test_process_tree_probe_error_fails_closed(monkeypatch):
@@ -208,10 +235,29 @@ def test_process_tree_probe_error_fails_closed(monkeypatch):
     monkeypatch.setattr(
         worker,
         "process_tree",
-        lambda _pid: (_ for _ in ()).throw(BridgeWorkerProbeError("probe failed")),
+        lambda _pid, *, timeout_seconds: (_ for _ in ()).throw(BridgeWorkerProbeError("probe failed")),
     )
     with pytest.raises(BridgeWorkerProbeError, match="probe failed"):
         run_bounded_bridge(WaitingBridge(), timeout_seconds=5)
+
+
+def test_process_tree_probe_timeout_is_capped_by_remaining_outer_deadline(monkeypatch):
+    import observational_memory.native_bridge.worker as worker
+
+    probes: list[tuple[int, float]] = []
+
+    def timed_out(pid, *, timeout_seconds):
+        probes.append((pid, timeout_seconds))
+        raise BridgeWorkerProbeError("probe timed out")
+
+    monkeypatch.setattr(worker, "process_tree", timed_out)
+
+    with pytest.raises(BridgeWorkerProbeError, match="probe timed out"):
+        run_bounded_bridge(WaitingBridge(), timeout_seconds=0.5)
+
+    assert probes
+    assert probes[0][0] == os.getpid()
+    assert all(0 < timeout <= 0.5 for _pid, timeout in probes)
 
 
 def test_worker_reads_back_zero_process_limit_and_cannot_fork_or_spawn():
@@ -231,7 +277,18 @@ def test_worker_reads_back_zero_process_limit_and_cannot_fork_or_spawn():
     }
 
 
-def test_timeout_uses_uncatchable_kill_and_leaves_no_escape_sentinel(tmp_path):
+def test_timeout_uses_uncatchable_kill_and_leaves_no_escape_sentinel(tmp_path, monkeypatch):
+    import observational_memory.native_bridge.worker as worker
+
+    class AllPids(set):
+        def __contains__(self, _item):
+            return True
+
+    monkeypatch.setattr(
+        worker,
+        "process_tree",
+        lambda pid, *, timeout_seconds: (AllPids({pid}), 1),
+    )
     sentinel = tmp_path / "escaped"
 
     with pytest.raises(BridgeWorkerTimeout):
@@ -289,11 +346,11 @@ def test_native_bridge_spawn_succeeds_and_persists_supervisor_telemetry(tmp_path
     assert len(attempt_id) == 32
     assert all(character in "0123456789abcdef" for character in attempt_id)
     assert status["attempt_id"] == attempt_id
-    # Invariant: even a fast worker contributes its kernel high-water mark.
+    # The attempt tree and worker kernel high-water remain separate evidence.
     sample_count = status["telemetry"]["rss_sample_count"]
     peak = status["telemetry"]["peak_tree_rss_bytes"]
-    assert sample_count >= 1
-    assert peak > 0
+    assert (sample_count == 0) == (peak is None)
+    assert status["telemetry"]["worker_high_water_rss_bytes"] > 0
     preference = status["telemetry"]["worker_memory_preference"]
     assert preference["requested_bytes"] == BRIDGE_MAX_RSS_BYTES
     assert "supervisor-and-kernel-high-water" in preference["enforcement"]

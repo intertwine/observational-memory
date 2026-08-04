@@ -155,13 +155,18 @@ def _bridge_for_worker(bridge: Any) -> Any:
     return worker_bridge
 
 
-def _process_table() -> dict[int, tuple[int, int]]:
-    result = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,rss="],
-        capture_output=True,
-        text=True,
-        timeout=2,
-    )
+def _process_table(*, timeout_seconds: float) -> dict[int, tuple[int, int]]:
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise BridgeWorkerProbeError("process-tree RSS probe has no remaining deadline")
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,rss="],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BridgeWorkerProbeError("process-tree RSS probe failed or timed out") from exc
     if result.returncode != 0:
         raise BridgeWorkerProbeError("process-tree RSS probe failed")
     table: dict[int, tuple[int, int]] = {}
@@ -179,9 +184,9 @@ def _process_table() -> dict[int, tuple[int, int]]:
     return table
 
 
-def process_tree(root_pid: int) -> tuple[set[int], int]:
+def process_tree(root_pid: int, *, timeout_seconds: float) -> tuple[set[int], int]:
     """Return all live descendants plus root and their cumulative RSS."""
-    table = _process_table()
+    table = _process_table(timeout_seconds=timeout_seconds)
     selected = {root_pid}
     changed = True
     while changed:
@@ -191,24 +196,38 @@ def process_tree(root_pid: int) -> tuple[set[int], int]:
                 selected.add(pid)
                 changed = True
     if root_pid not in table:
-        raise BridgeWorkerProbeError("bridge worker disappeared during RSS probe")
+        raise BridgeWorkerProbeError("process-tree root disappeared during RSS probe")
     return selected, sum(table[pid][1] for pid in selected if pid in table)
 
 
-def _terminate_tree(process: multiprocessing.Process, *, attempt_id: str | None = None) -> None:
+def _terminate_tree(
+    process: multiprocessing.Process,
+    *,
+    attempt_id: str | None = None,
+    deadline: float,
+) -> None:
     """Immediately kill the processless worker and confirm no snapshot survivor."""
     pids: set[int] = set()
     if process.pid is not None:
-        try:
-            pids, _rss = process_tree(process.pid)
-        except BridgeWorkerProbeError:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining > 0:
+            try:
+                pids, _rss = process_tree(process.pid, timeout_seconds=remaining)
+            except BridgeWorkerProbeError:
+                pids = {process.pid}
+        else:
             pids = {process.pid}
+    # The sampler is supervisor-rooted, but containment is always worker-rooted.
+    pids.discard(os.getpid())
     for pid in sorted(pids, reverse=True):
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    process.join(1)
+    join_timeout = min(1.0, max(0.0, deadline - time.monotonic()))
+    process.join(join_timeout)
+    if process.is_alive():
+        process.join(0.1)
     if process.is_alive():
         raise BridgeWorkerIsolationError("bridge worker survived immediate SIGKILL", attempt_id=attempt_id)
     survivors: list[int] = []
@@ -312,6 +331,7 @@ def run_bounded_bridge(
     publication_deadline = deadline - finalization_reserve_seconds
     admission_started = outer_started
     peak_rss_bytes: int | None = None
+    worker_high_water_rss_bytes: int | None = None
     rss_sample_count = 0
     memory_preference: dict[str, Any] | None = None
 
@@ -321,8 +341,9 @@ def run_bounded_bridge(
             "outer_duration_seconds": round(time.monotonic() - outer_started, 6),
             "outer_deadline_seconds": timeout_seconds,
             "peak_tree_rss_bytes": peak_rss_bytes,
+            "worker_high_water_rss_bytes": worker_high_water_rss_bytes,
             "rss_sample_count": rss_sample_count,
-            "rss_evidence": "supervisor samples plus child kernel high-water",
+            "rss_evidence": "supervisor-root process-tree samples plus independent worker kernel high-water",
             "worker_process_limit": {"resource": "RLIMIT_NPROC", "soft": 0, "hard": 0},
         }
         if memory_preference is not None:
@@ -391,7 +412,7 @@ def run_bounded_bridge(
             process.start()
     except _DeadlineExpired as exc:
         if process is not None and process.pid is not None:
-            _terminate_tree(process, attempt_id=attempt_id)
+            _terminate_tree(process, attempt_id=attempt_id, deadline=deadline)
         raise BridgeWorkerTimeout(
             f"native-memory bridge exceeded {timeout_seconds}s outer limit during {exc}",
             admission=admission,
@@ -408,7 +429,7 @@ def run_bounded_bridge(
     while process.is_alive():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            _terminate_tree(process, attempt_id=attempt_id)
+            _terminate_tree(process, attempt_id=attempt_id, deadline=deadline)
             raise BridgeWorkerTimeout(
                 f"native-memory bridge exceeded {timeout_seconds}s outer limit",
                 admission=admission,
@@ -417,22 +438,38 @@ def run_bounded_bridge(
             )
         if time.monotonic() >= next_rss_check:
             try:
-                _pids, rss = process_tree(process.pid)
+                pids, rss = process_tree(os.getpid(), timeout_seconds=remaining)
             except BridgeWorkerProbeError as exc:
                 if not process.is_alive():
                     break
-                _terminate_tree(process, attempt_id=attempt_id)
+                _terminate_tree(process, attempt_id=attempt_id, deadline=deadline)
                 raise BridgeWorkerProbeError(
                     str(exc),
                     admission=admission,
                     telemetry=telemetry(admission_seconds),
                     attempt_id=attempt_id,
                 ) from exc
+            if process.pid not in pids and process.is_alive():
+                _terminate_tree(process, attempt_id=attempt_id, deadline=deadline)
+                raise BridgeWorkerProbeError(
+                    "bridge worker was absent from the supervisor-root process-tree probe",
+                    admission=admission,
+                    telemetry=telemetry(admission_seconds),
+                    attempt_id=attempt_id,
+                )
             rss_sample_count += 1
             peak_rss_bytes = rss if peak_rss_bytes is None else max(peak_rss_bytes, rss)
             next_rss_check = time.monotonic() + RSS_SAMPLE_INTERVAL_SECONDS
+            if time.monotonic() >= deadline:
+                _terminate_tree(process, attempt_id=attempt_id, deadline=deadline)
+                raise BridgeWorkerTimeout(
+                    f"native-memory bridge exceeded {timeout_seconds}s outer limit during process-tree RSS probe",
+                    admission=admission,
+                    telemetry=telemetry(admission_seconds),
+                    attempt_id=attempt_id,
+                )
             if rss > max_rss_bytes:
-                _terminate_tree(process, attempt_id=attempt_id)
+                _terminate_tree(process, attempt_id=attempt_id, deadline=deadline)
                 raise BridgeWorkerMemoryExceeded(
                     f"native-memory bridge exceeded {max_rss_bytes // (1024 * 1024)} MiB process-tree RSS",
                     admission=admission,
@@ -471,8 +508,7 @@ def run_bounded_bridge(
             telemetry=telemetry(admission_seconds),
             attempt_id=attempt_id,
         )
-    rss_sample_count += 1
-    peak_rss_bytes = child_peak_rss_bytes if peak_rss_bytes is None else max(peak_rss_bytes, child_peak_rss_bytes)
+    worker_high_water_rss_bytes = child_peak_rss_bytes
     if status == "memory" or child_peak_rss_bytes > max_rss_bytes:
         raise BridgeWorkerMemoryExceeded(
             f"native-memory bridge exceeded {max_rss_bytes // (1024 * 1024)} MiB kernel RSS high-water limit",

@@ -4445,6 +4445,7 @@ def _install_native_bridge_product(config: Config, claude_projects: tuple[str, .
         install_bridge_launchd,
         load_settings,
         quiesce_legacy_launchd,
+        require_eligible_claude_projects,
         restore_launchd_states,
         restore_owned_file,
         settings_bytes,
@@ -4464,6 +4465,7 @@ def _install_native_bridge_product(config: Config, claude_projects: tuple[str, .
                     "first install requires at least one `--claude-project <exact-directory-name>`; "
                     "run `om native-bridge sources` to list candidates"
                 )
+        require_eligible_claude_projects(config, settings.claude_projects)
     except NativeBridgeLifecycleError as exc:
         raise click.ClickException(str(exc)) from exc
 

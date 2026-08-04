@@ -50,8 +50,15 @@ def _patch_cli_config(monkeypatch, config: Config, *, forbid_env_load: bool = Fa
         monkeypatch.setattr(config, "load_env_file", lambda: None)
 
 
+def _add_eligible_project(config: Config, name: str) -> None:
+    memory = config.claude_projects_dir / name / "memory"
+    memory.mkdir(parents=True)
+    (memory / "MEMORY.md").write_text("eligible native memory")
+
+
 def test_install_native_bridge_bypasses_provider_and_legacy_installers(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
+    _add_eligible_project(config, "-Users-example-project")
     _patch_cli_config(monkeypatch, config, forbid_env_load=True)
     monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     monkeypatch.setattr(cli_module, "_find_om_path", lambda: "/opt/om/bin/om")
@@ -92,6 +99,7 @@ def test_install_native_bridge_bypasses_provider_and_legacy_installers(monkeypat
 
 def test_failed_activation_restores_config_hooks_and_legacy_state(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
+    _add_eligible_project(config, "new-project")
     _patch_cli_config(monkeypatch, config)
     monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     monkeypatch.setattr(cli_module, "_find_om_path", lambda: "/opt/om/bin/om")
@@ -134,6 +142,7 @@ def test_failed_activation_restores_config_hooks_and_legacy_state(monkeypatch, t
 
 def test_install_fails_closed_and_preserves_concurrent_hook_edit(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
+    _add_eligible_project(config, "project-a")
     _patch_cli_config(monkeypatch, config, forbid_env_load=True)
     monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     monkeypatch.setattr(cli_module, "_find_om_path", lambda: "/opt/om/bin/om")
@@ -167,6 +176,71 @@ def test_install_fails_closed_and_preserves_concurrent_hook_edit(monkeypatch, tm
     assert "concurrently changed" in result.output
     assert config.claude_settings_path.read_bytes() == concurrent
     assert not config.native_bridge_config_path.exists()
+
+
+def test_install_rejects_any_ineligible_explicit_project_before_mutation(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    _add_eligible_project(config, "valid-project")
+    _patch_cli_config(monkeypatch, config, forbid_env_load=True)
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
+    config.claude_settings_path.parent.mkdir(parents=True)
+    original_hooks = b'{"hooks":{},"preserve":true}\n'
+    config.claude_settings_path.write_bytes(original_hooks)
+    monkeypatch.setattr(
+        cli_module,
+        "_find_om_path",
+        lambda: (_ for _ in ()).throw(AssertionError("install mutation planning must not start")),
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "quiesce_legacy_launchd",
+        lambda _config: (_ for _ in ()).throw(AssertionError("launchd must not run")),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "install",
+            "--native-bridge",
+            "--claude-project",
+            "valid-project",
+            "--claude-project",
+            "typo-project",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "not eligible: typo-project" in result.output
+    assert "om native-bridge sources" in result.output
+    assert config.claude_settings_path.read_bytes() == original_hooks
+    assert not config.native_bridge_config_path.exists()
+    assert not config.native_bridge_launchd_plist_path.exists()
+
+
+def test_install_revalidates_saved_selection_before_mutation(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    _patch_cli_config(monkeypatch, config, forbid_env_load=True)
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
+    write_settings(config, NativeBridgeSettings(("stale-project",)))
+    original_config = config.native_bridge_config_path.read_bytes()
+    monkeypatch.setattr(
+        cli_module,
+        "_find_om_path",
+        lambda: (_ for _ in ()).throw(AssertionError("install mutation planning must not start")),
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "quiesce_legacy_launchd",
+        lambda _config: (_ for _ in ()).throw(AssertionError("launchd must not run")),
+    )
+
+    result = CliRunner().invoke(cli, ["install", "--native-bridge"])
+
+    assert result.exit_code == 1
+    assert "not eligible: stale-project" in result.output
+    assert "om native-bridge sources" in result.output
+    assert config.native_bridge_config_path.read_bytes() == original_config
+    assert not config.native_bridge_launchd_plist_path.exists()
 
 
 def test_ordinary_runtime_paths_explicitly_load_provider_env(monkeypatch, tmp_path):

@@ -848,6 +848,16 @@ class SecureRoot:
         finally:
             os.close(fd)
 
+    def inspect_safe_directory(self, relative: str | Path) -> None:
+        """Require a no-follow, user-owned directory that others cannot modify."""
+        fd = self._open_dir(_parts(relative))
+        try:
+            info = os.fstat(fd)
+            if stat.S_IMODE(info.st_mode) & 0o022:
+                raise SecureAccessError(f"input directory is group/world writable: {relative}")
+        finally:
+            os.close(fd)
+
     def inspect_regular_file(self, relative: str | Path) -> SecureFileInfo:
         """Validate an input leaf from metadata only, without reading its content."""
         parent, name = self._parent_and_name(relative)

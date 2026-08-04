@@ -117,6 +117,8 @@ def discover_claude_projects(config: Config) -> tuple[dict[str, object], ...]:
             for project in root.list_entries():
                 try:
                     validate_claude_projects((project,))
+                    root.inspect_safe_directory(project)
+                    root.inspect_safe_directory(f"{project}/memory")
                     names = root.list_directory(f"{project}/memory")
                 except (FileNotFoundError, SecureAccessError, NativeBridgeLifecycleError):
                     continue
@@ -134,6 +136,20 @@ def discover_claude_projects(config: Config) -> tuple[dict[str, object], ...]:
             return tuple(candidates)
     except SecureAccessError as exc:
         raise NativeBridgeLifecycleError(f"Claude projects root failed secure validation: {exc}") from exc
+
+
+def require_eligible_claude_projects(config: Config, projects: Sequence[str]) -> tuple[str, ...]:
+    """Require every exact selection to be present in secure source discovery."""
+    selected = validate_claude_projects(projects)
+    eligible = {str(candidate["project"]) for candidate in discover_claude_projects(config)}
+    rejected = tuple(project for project in selected if project not in eligible)
+    if rejected:
+        names = ", ".join(rejected)
+        raise NativeBridgeLifecycleError(
+            f"Claude project selection is not eligible: {names}; "
+            "run `om native-bridge sources` and pass exact directory names with `--claude-project`"
+        )
+    return selected
 
 
 def discover_codex_sources(config: Config) -> tuple[dict[str, object], ...]:
