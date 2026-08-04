@@ -211,15 +211,77 @@ def _native_bridge_state_present(status: Mapping[str, object]) -> bool:
     )
 
 
+def _legacy_writer_activity_present(config: Config) -> bool:
+    """Return whether installed hooks or launchd state select the full workflow."""
+    from .native_bridge.lifecycle import (
+        LEGACY_WRITER_LABELS,
+        NativeBridgeLifecycleError,
+        inspect_launchd,
+        snapshot_owned_file,
+    )
+
+    cowork_hooks_path = _cowork_plugin_dir(config) / "hooks" / "hooks.json"
+    hook_paths = (config.claude_settings_path, config.codex_hooks_path, cowork_hooks_path)
+    try:
+        snapshots = {path: snapshot_owned_file(path, max_bytes=4 * 1024 * 1024) for path in hook_paths}
+        hook_activity = bool(_render_native_bridge_hook_updates(config, snapshots))
+    except (NativeBridgeLifecycleError, click.ClickException, OSError):
+        # Invalid managed hook state is diagnosed by the selected doctor mode.
+        # It is not positive evidence that a writer is active.
+        hook_activity = False
+
+    launchd_activity = False
+    if sys.platform == "darwin":
+        for label in LEGACY_WRITER_LABELS:
+            state = inspect_launchd(
+                config,
+                label,
+                plist_path=config.launch_agents_dir / f"{label}.plist",
+            )
+            if state.loaded or (state.installed and state.override != "disabled"):
+                launchd_activity = True
+                break
+
+    return hook_activity or launchd_activity
+
+
+def _doctor_operating_mode(config: Config, bridge_status: Mapping[str, object]) -> str:
+    """Select full, bridge, or unsafe mixed diagnostics from active state."""
+    if not _native_bridge_state_present(bridge_status):
+        return "full"
+
+    legacy_active = _legacy_writer_activity_present(config)
+    bridge_installed = bool(bridge_status["service_installed"])
+    bridge_active = bool(bridge_status["service_loaded"]) or (
+        bridge_installed and bridge_status["service_override"] == "enabled"
+    )
+    if bridge_active and legacy_active:
+        return "mixed"
+    if bridge_installed:
+        return "bridge"
+    if legacy_active:
+        return "full"
+    return "bridge"
+
+
 def _doctor_native_bridge_mode(
     config: Config,
     bridge_status: Mapping[str, object],
     check: Callable[[str, str, str, str], None],
     *,
     validate_key: bool,
+    mixed_active: bool = False,
 ) -> None:
     """Run only LLM-free bridge diagnostics and safe-hold checks."""
-    check("Operating mode", "PASS", "native-memory bridge (LLM-free)", "")
+    if mixed_active:
+        check(
+            "Operating mode",
+            "FAIL",
+            "unsafe mixed state: native bridge and legacy writers are active",
+            "Run: om uninstall --native-bridge before continuing with the full workflow",
+        )
+    else:
+        check("Operating mode", "PASS", "native-memory bridge (LLM-free)", "")
     if validate_key:
         check("Configured LLM access", "WARN", "not applicable in native bridge mode; no provider call made", "")
 
@@ -4982,13 +5044,21 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         _check("om binary", "FAIL", "not found on PATH", fix="Run: uv tool install observational-memory")
 
     bridge_status = _native_bridge_status_payload(config)
-    if _native_bridge_state_present(bridge_status):
-        _doctor_native_bridge_mode(config, bridge_status, _check, validate_key=validate_key)
+    operating_mode = _doctor_operating_mode(config, bridge_status)
+    if operating_mode in {"bridge", "mixed"}:
+        _doctor_native_bridge_mode(
+            config,
+            bridge_status,
+            _check,
+            validate_key=validate_key,
+            mixed_active=operating_mode == "mixed",
+        )
         _check("Platform", "PASS", sys.platform)
         _emit_doctor_results(results, as_json=as_json)
         return
 
     config = _load_runtime_config(ctx)
+    _check("Operating mode", "PASS", "full workflow (LLM-backed)")
 
     # 3. Provider config
     resolved_provider: str | None = None
@@ -5495,116 +5565,22 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
         except Exception:
             pass  # Already reported above
 
-    # 13. Native-memory bridge (optional, but fail closed when any state exists).
+    # 13. Native-memory bridge state retained after an explicit return to the
+    # full workflow is data, not an instruction to diagnose bridge safe hold.
     bridge_status = _native_bridge_status_payload(config)
-    bridge_present = (
-        bridge_status["config_status"] != "not configured"
-        or bool(bridge_status["service_installed"])
-        or bridge_status["generation_status"] != "not built"
-    )
-    if not bridge_present:
+    if not _native_bridge_state_present(bridge_status):
         _check("Native-memory bridge", "PASS", "not installed (optional)")
     else:
-        config_status = str(bridge_status["config_status"])
-        if config_status == "configured":
-            _check("Native bridge config", "PASS", "private fixed allowlist configured")
-        else:
-            _check(
-                "Native bridge config",
-                "FAIL",
-                config_status,
-                fix="Run: om install --native-bridge --claude-project <name>",
-            )
-
-        service_status = str(bridge_status["service_status"])
-        if service_status == "enabled and loaded":
-            _check("Native bridge LaunchAgent", "PASS", service_status)
-        elif service_status in {"disabled", "not installed"}:
-            _check("Native bridge LaunchAgent", "WARN", service_status, fix="Run: om install --native-bridge")
-        else:
-            _check("Native bridge LaunchAgent", "FAIL", service_status, fix="Run: om install --native-bridge")
-
-        generation_status = str(bridge_status["generation_status"])
-        if generation_status == "ready":
-            _check(
-                "Native bridge generation",
-                "PASS",
-                f"verified {bridge_status['generation_id']}; search with `om search --native-bridge <query>`",
-            )
-        elif generation_status == "not built":
-            _check(
-                "Native bridge generation",
-                "WARN",
-                generation_status,
-                fix="Run: om bridge-native-memory",
-            )
-        else:
-            _check("Native bridge generation", "FAIL", generation_status, fix="Reinstall or disable the bridge")
-
-        from .native_bridge.lifecycle import (
-            LEGACY_WRITER_LABELS,
-            NativeBridgeLifecycleError,
-            inspect_launchd,
-            snapshot_owned_file,
+        retained_ok = (
+            bridge_status["config_status"] == "configured"
+            and bridge_status["service_status"] == "not installed"
+            and bridge_status["generation_status"] in {"ready", "not built"}
         )
-        from .native_bridge.profiles import STRICT_DEFAULT_PROFILE
-
-        limits_ok = (
-            STRICT_DEFAULT_PROFILE.timeout_seconds <= 15 and STRICT_DEFAULT_PROFILE.max_rss_bytes <= 128 * 1024 * 1024
+        retained_status = (
+            f"inactive retained state; config {bridge_status['config_status']}; "
+            f"generation {bridge_status['generation_status']}"
         )
-        _check(
-            "Native bridge worker ceilings",
-            "PASS" if limits_ok else "FAIL",
-            (
-                f"{STRICT_DEFAULT_PROFILE.timeout_seconds}s; "
-                f"{STRICT_DEFAULT_PROFILE.max_rss_bytes // (1024 * 1024)} MiB process-tree RSS"
-            ),
-        )
-
-        if sys.platform == "darwin":
-            legacy_states = [
-                inspect_launchd(
-                    config,
-                    label,
-                    plist_path=config.launch_agents_dir / f"{label}.plist",
-                )
-                for label in LEGACY_WRITER_LABELS
-            ]
-            legacy_errors = [state for state in legacy_states if state.error or state.override == "unknown"]
-            unsafe_legacy = [state for state in legacy_states if state.loaded or state.override != "disabled"]
-            if legacy_errors:
-                _check(
-                    "Native bridge legacy writers",
-                    "FAIL",
-                    "could not verify all legacy LaunchAgents",
-                    fix="Run: om install --native-bridge",
-                )
-            elif unsafe_legacy:
-                _check(
-                    "Native bridge legacy writers",
-                    "FAIL",
-                    "not all four legacy LaunchAgents are disabled and unloaded",
-                    fix="Run: om install --native-bridge",
-                )
-            else:
-                _check("Native bridge legacy writers", "PASS", "four LaunchAgents disabled and unloaded")
-
-        try:
-            cowork_hooks_path = _cowork_plugin_dir(config) / "hooks" / "hooks.json"
-            hook_paths = (config.claude_settings_path, config.codex_hooks_path, cowork_hooks_path)
-            hook_snapshots = {path: snapshot_owned_file(path, max_bytes=4 * 1024 * 1024) for path in hook_paths}
-            pending_hook_updates = _render_native_bridge_hook_updates(config, hook_snapshots)
-            if pending_hook_updates:
-                _check(
-                    "Native bridge transcript hooks",
-                    "FAIL",
-                    "OM-managed transcript writer hooks remain installed",
-                    fix="Run: om install --native-bridge",
-                )
-            else:
-                _check("Native bridge transcript hooks", "PASS", "OM-managed writer hooks absent")
-        except (NativeBridgeLifecycleError, click.ClickException) as exc:
-            _check("Native bridge transcript hooks", "FAIL", str(exc), fix="Run: om install --native-bridge")
+        _check("Native-memory bridge", "PASS" if retained_ok else "WARN", retained_status)
 
     # 14. Background scheduler
     _check("Scheduler default", "PASS", _resolve_scheduler_mode("auto", None))
@@ -6940,42 +6916,73 @@ def _write_launchd_plist(path: Path, payload: dict[str, object]) -> None:
     path.write_bytes(plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False))
 
 
-def _launchctl_bootout(label: str) -> None:
+def _default_run_launchctl(args: list[str]):
+    """Run one bounded launchctl operation; injectable for lifecycle tests."""
+    import subprocess
+
+    return subprocess.run(
+        ["launchctl", *args],
+        capture_output=True,
+        text=True,
+        timeout=_SCHEDULER_COMMAND_TIMEOUT_SECONDS,
+    )
+
+
+def _launchctl_enable(label: str, *, run_launchctl: Callable[[list[str]], object] = _default_run_launchctl) -> None:
+    """Clear an explicit disabled override before bootstrapping one job."""
+    import subprocess
+
+    try:
+        result = run_launchctl(["enable", _launchd_service_target(label)])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise click.ClickException(f"Failed to enable launchd agent {label}: {exc}") from exc
+    if getattr(result, "returncode", 1) != 0:
+        detail = getattr(result, "stderr", "").strip() or getattr(result, "stdout", "").strip() or "unknown error"
+        raise click.ClickException(f"Failed to enable launchd agent {label}: {detail}")
+
+
+def _launchctl_bootout(
+    label: str,
+    *,
+    run_launchctl: Callable[[list[str]], object] = _default_run_launchctl,
+) -> None:
     """Best-effort bootout for an OM launchd job."""
     import subprocess
 
-    subprocess.run(
-        ["launchctl", "bootout", _launchd_service_target(label)],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        run_launchctl(["bootout", _launchd_service_target(label)])
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
-def _launchctl_bootstrap(plist_path: Path) -> None:
+def _launchctl_bootstrap(
+    plist_path: Path,
+    *,
+    run_launchctl: Callable[[list[str]], object] = _default_run_launchctl,
+) -> None:
     """Bootstrap one OM launchd plist into the current user's GUI domain."""
     import subprocess
 
-    result = subprocess.run(
-        ["launchctl", "bootstrap", _launchd_domain_target(), str(plist_path)],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = run_launchctl(["bootstrap", _launchd_domain_target(), str(plist_path)])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise click.ClickException(f"Failed to bootstrap launchd agent {plist_path.name}: {exc}") from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
         raise click.ClickException(f"Failed to bootstrap launchd agent {plist_path.name}: {detail}")
 
 
-def _launchctl_service_loaded(label: str, timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS) -> tuple[bool, str | None]:
+def _launchctl_service_loaded(
+    label: str,
+    timeout: int = _SCHEDULER_COMMAND_TIMEOUT_SECONDS,
+    *,
+    run_launchctl: Callable[[list[str]], object] = _default_run_launchctl,
+) -> tuple[bool, str | None]:
     """Return whether one OM launchd job is currently loaded."""
     import subprocess
 
     try:
-        result = subprocess.run(
-            ["launchctl", "print", _launchd_service_target(label)],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        result = run_launchctl(["print", _launchd_service_target(label)])
     except FileNotFoundError:
         return False, "launchctl not available"
     except subprocess.TimeoutExpired:
@@ -7016,7 +7023,12 @@ def _launchd_job_statuses(config: Config, targets: str = "both") -> list[dict[st
     return jobs
 
 
-def _install_launchd(config: Config, targets: str) -> None:
+def _install_launchd(
+    config: Config,
+    targets: str,
+    *,
+    run_launchctl: Callable[[list[str]], object] = _default_run_launchctl,
+) -> None:
     """Install OM-managed LaunchAgents on macOS."""
     if sys.platform != "darwin":
         raise click.ClickException("launchd installation is only supported on macOS.")
@@ -7035,8 +7047,12 @@ def _install_launchd(config: Config, targets: str) -> None:
         if not isinstance(plist_path, Path) or not isinstance(label, str):
             continue
         _write_launchd_plist(plist_path, _launchd_plist_payload(spec))
-        _launchctl_bootout(label)
-        _launchctl_bootstrap(plist_path)
+        _launchctl_enable(label, run_launchctl=run_launchctl)
+        _launchctl_bootout(label, run_launchctl=run_launchctl)
+        _launchctl_bootstrap(plist_path, run_launchctl=run_launchctl)
+        loaded, error = _launchctl_service_loaded(label, run_launchctl=run_launchctl)
+        if not loaded:
+            raise click.ClickException(f"Failed to verify launchd agent {label}: {error or 'service is not loaded'}")
 
     click.echo(f"Installed {len(specs)} launchd job(s)")
 

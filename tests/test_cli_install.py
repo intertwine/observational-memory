@@ -16,6 +16,7 @@ from observational_memory.cli import (
     _cron_job_keys_for_targets,
     _desired_cron_jobs,
     _enable_codex_hooks_feature,
+    _install_launchd,
     _launchd_job_specs,
     _resolve_scheduler_mode,
     _uninstall_cron,
@@ -565,14 +566,77 @@ def test_install_explicit_launchd_writes_plists_and_bootstraps(monkeypatch, tmp_
     assert "RunAtLoad" not in reflect_plist
 
     expected_calls = [
+        ["launchctl", "enable", f"gui/{os.getuid()}/{config.CODEX_OBSERVE_LAUNCHD_LABEL}"],
         ["launchctl", "bootout", f"gui/{os.getuid()}/{config.CODEX_OBSERVE_LAUNCHD_LABEL}"],
         ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(config.codex_observe_launchd_plist_path)],
+        ["launchctl", "print", f"gui/{os.getuid()}/{config.CODEX_OBSERVE_LAUNCHD_LABEL}"],
+        ["launchctl", "enable", f"gui/{os.getuid()}/{config.AUTO_MEMORY_LAUNCHD_LABEL}"],
         ["launchctl", "bootout", f"gui/{os.getuid()}/{config.AUTO_MEMORY_LAUNCHD_LABEL}"],
         ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(config.auto_memory_launchd_plist_path)],
+        ["launchctl", "print", f"gui/{os.getuid()}/{config.AUTO_MEMORY_LAUNCHD_LABEL}"],
+        ["launchctl", "enable", f"gui/{os.getuid()}/{config.REFLECT_LAUNCHD_LABEL}"],
         ["launchctl", "bootout", f"gui/{os.getuid()}/{config.REFLECT_LAUNCHD_LABEL}"],
         ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(config.reflect_launchd_plist_path)],
+        ["launchctl", "print", f"gui/{os.getuid()}/{config.REFLECT_LAUNCHD_LABEL}"],
     ]
     assert [args for args, _ in subprocess_calls] == expected_calls
+
+
+def test_install_launchd_clears_safe_hold_overrides_before_each_bootstrap(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    monkeypatch.setattr("observational_memory.cli.sys.platform", "darwin")
+    monkeypatch.setattr("observational_memory.cli._find_om_path", lambda: "/tmp/bin/om")
+    config = Config(memory_dir=tmp_path / "data" / "observational-memory", codex_home=tmp_path / "codex")
+    selected_labels = [str(spec["label"]) for spec in _launchd_job_specs(config, "both")]
+
+    class FakeLaunchctl:
+        def __init__(self):
+            self.disabled = {label: True for label in selected_labels}
+            self.loaded: set[str] = set()
+            self.calls: list[tuple[str, ...]] = []
+
+        def __call__(self, args):
+            call = tuple(args)
+            self.calls.append(call)
+            operation = args[0]
+            if operation == "enable":
+                label = args[1].rsplit("/", 1)[-1]
+                self.disabled[label] = False
+                return subprocess.CompletedProcess([], 0, "", "")
+            if operation == "bootout":
+                label = args[1].rsplit("/", 1)[-1]
+                self.loaded.discard(label)
+                return subprocess.CompletedProcess([], 0, "", "")
+            if operation == "bootstrap":
+                payload = plistlib.loads(Path(args[2]).read_bytes())
+                label = payload["Label"]
+                if self.disabled.get(label, False):
+                    return subprocess.CompletedProcess([], 5, "", "service is disabled")
+                self.loaded.add(label)
+                return subprocess.CompletedProcess([], 0, "", "")
+            if operation == "print":
+                label = args[1].rsplit("/", 1)[-1]
+                if label in self.loaded:
+                    return subprocess.CompletedProcess([], 0, "service = loaded", "")
+                return subprocess.CompletedProcess([], 1, "", "Could not find service")
+            raise AssertionError(f"Unexpected launchctl call: {args}")
+
+    fake = FakeLaunchctl()
+
+    _install_launchd(config, "both", run_launchctl=fake)
+
+    assert all(fake.disabled[label] is False for label in selected_labels)
+    assert fake.loaded == set(selected_labels)
+    assert config.NATIVE_BRIDGE_LAUNCHD_LABEL not in fake.disabled
+    for label in selected_labels:
+        enable_index = fake.calls.index(("enable", f"gui/{os.getuid()}/{label}"))
+        bootstrap_index = next(
+            index
+            for index, call in enumerate(fake.calls)
+            if call[0] == "bootstrap" and plistlib.loads(Path(call[2]).read_bytes())["Label"] == label
+        )
+        verify_index = fake.calls.index(("print", f"gui/{os.getuid()}/{label}"))
+        assert enable_index < bootstrap_index < verify_index
 
 
 def test_install_legacy_cron_flag_selects_cron_scheduler(monkeypatch, tmp_path):

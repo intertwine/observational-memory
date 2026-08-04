@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import plistlib
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -396,3 +399,184 @@ def test_bridge_mode_doctor_is_provider_free_and_never_recommends_legacy_install
     forbidden_fixes = {"Run: om install --claude", "Run: om install --codex"}
     assert not forbidden_fixes.intersection(row["fix"] for row in checks)
     assert not any("--provider" in row["fix"] for row in checks)
+
+
+def test_uninstalled_bridge_safe_hold_then_full_install_switches_doctor_mode(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    _patch_cli_config(monkeypatch, config)
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(cli_module, "_find_om_path", lambda: "/opt/om/bin/om")
+    monkeypatch.setattr(cli_module, "_uninstall_cron", lambda _targets="both": None)
+    monkeypatch.setattr(cli_module, "_om_cron_jobs", lambda _timeout=5: ({}, None))
+    monkeypatch.setattr(cli_module, "_import_provider_sdk", lambda _provider: None)
+    monkeypatch.setattr(cli_module.shutil, "which", lambda name: f"/opt/om/bin/{name}")
+    monkeypatch.setattr(
+        cli_module,
+        "_validate_llm_access",
+        lambda _config: (_ for _ in ()).throw(AssertionError("provider validation must not run")),
+    )
+
+    settings = NativeBridgeSettings(("project-a",))
+    write_settings(config, settings)
+    config.native_bridge_data_dir.mkdir(parents=True, mode=0o700)
+    retained_data = config.native_bridge_data_dir / "retained-evidence"
+    retained_data.write_text("keep")
+    config.launch_agents_dir.mkdir(parents=True, exist_ok=True)
+    config.native_bridge_launchd_plist_path.write_bytes(lifecycle.launchd_plist_bytes(config, "/opt/om/bin/om"))
+    for label in lifecycle.LEGACY_WRITER_LABELS:
+        (config.launch_agents_dir / f"{label}.plist").write_text("retained legacy plist")
+
+    class FakeLaunchctl:
+        def __init__(self):
+            self.disabled = {label: True for label in lifecycle.LEGACY_WRITER_LABELS}
+            self.disabled[config.NATIVE_BRIDGE_LAUNCHD_LABEL] = False
+            self.loaded = {config.NATIVE_BRIDGE_LAUNCHD_LABEL}
+            self.calls: list[tuple[str, ...]] = []
+
+        @staticmethod
+        def _result(returncode=0, stdout="", stderr=""):
+            return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+        def __call__(self, args):
+            call = tuple(args)
+            self.calls.append(call)
+            operation = args[0]
+            if operation == "print-disabled":
+                rows = "\n".join(
+                    f'    "{label}" => {str(value).lower()}' for label, value in sorted(self.disabled.items())
+                )
+                return self._result(stdout=f"disabled services = {{\n{rows}\n}}\n")
+            if operation == "print":
+                label = args[1].rsplit("/", 1)[-1]
+                if label in self.loaded:
+                    return self._result(stdout="service = loaded")
+                return self._result(1, stderr="Could not find service")
+            if operation in {"enable", "disable"}:
+                label = args[1].rsplit("/", 1)[-1]
+                self.disabled[label] = operation == "disable"
+                return self._result()
+            if operation == "bootout":
+                label = args[1].rsplit("/", 1)[-1]
+                self.loaded.discard(label)
+                return self._result()
+            if operation == "bootstrap":
+                payload = plistlib.loads(Path(args[2]).read_bytes())
+                label = payload["Label"]
+                if self.disabled.get(label, False):
+                    return self._result(5, stderr="service is disabled")
+                self.loaded.add(label)
+                return self._result()
+            raise AssertionError(f"unexpected launchctl call: {args}")
+
+    fake = FakeLaunchctl()
+    original_uninstall = lifecycle.uninstall_bridge_launchd
+    original_inspect = lifecycle.inspect_launchd
+    original_install = cli_module._install_launchd
+    monkeypatch.setattr(
+        lifecycle,
+        "uninstall_bridge_launchd",
+        lambda selected: original_uninstall(selected, run_launchctl=fake),
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "inspect_launchd",
+        lambda selected, label, **kwargs: original_inspect(selected, label, run_launchctl=fake, **kwargs),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_install_launchd",
+        lambda selected, targets: original_install(selected, targets, run_launchctl=fake),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_launchctl_service_loaded",
+        lambda label, _timeout=5, **_kwargs: (label in fake.loaded, None),
+    )
+
+    runner = CliRunner()
+    uninstall_result = runner.invoke(cli, ["uninstall", "--native-bridge"])
+
+    assert uninstall_result.exit_code == 0, uninstall_result.output
+    assert not config.native_bridge_launchd_plist_path.exists()
+    assert load_settings(config) == settings
+    assert retained_data.read_text() == "keep"
+
+    held_doctor = runner.invoke(cli, ["doctor", "--json", "--validate-key"])
+    assert held_doctor.exit_code == 0, held_doctor.output
+    held_checks = json.loads(held_doctor.output)
+    assert next(row for row in held_checks if row["name"] == "Operating mode")["detail"] == (
+        "native-memory bridge (LLM-free)"
+    )
+    assert not any("--provider" in row["fix"] or "--both" in row["fix"] for row in held_checks)
+
+    install_result = runner.invoke(
+        cli,
+        [
+            "install",
+            "--both",
+            "--scheduler",
+            "launchd",
+            "--provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o-mini",
+            "--non-interactive",
+        ],
+    )
+    assert install_result.exit_code == 0, install_result.output
+    assert load_settings(config) == settings
+    assert retained_data.read_text() == "keep"
+    assert fake.loaded == set(lifecycle.LEGACY_WRITER_LABELS)
+    assert all(fake.disabled[label] is False for label in lifecycle.LEGACY_WRITER_LABELS)
+    for label in lifecycle.LEGACY_WRITER_LABELS:
+        enable_index = fake.calls.index(("enable", f"gui/{os.getuid()}/{label}"))
+        bootstrap_index = next(
+            index
+            for index, call in enumerate(fake.calls)
+            if call[0] == "bootstrap" and plistlib.loads(Path(call[2]).read_bytes())["Label"] == label
+        )
+        assert enable_index < bootstrap_index
+
+    full_doctor = runner.invoke(cli, ["doctor", "--json"])
+    assert full_doctor.exit_code == 0, full_doctor.output
+    full_checks = json.loads(full_doctor.output)
+    assert next(row for row in full_checks if row["name"] == "Operating mode")["detail"] == (
+        "full workflow (LLM-backed)"
+    )
+    assert any(row["name"] == "LLM provider config" for row in full_checks)
+    retained_check = next(row for row in full_checks if row["name"] == "Native-memory bridge")
+    assert retained_check["status"] == "PASS"
+    assert retained_check["detail"].startswith("inactive retained state")
+    assert retained_check["fix"] == ""
+
+
+def test_doctor_flags_active_native_and_legacy_writers_as_unsafe_mixed(monkeypatch, tmp_path):
+    config = _config(monkeypatch, tmp_path)
+    _patch_cli_config(monkeypatch, config, forbid_env_load=True)
+    write_settings(config, NativeBridgeSettings(("project-a",)))
+    config.native_bridge_launchd_plist_path.parent.mkdir(parents=True, exist_ok=True)
+    config.native_bridge_launchd_plist_path.write_bytes(lifecycle.launchd_plist_bytes(config, "/opt/om/bin/om"))
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
+
+    def inspect(_config, label, **_kwargs):
+        if label == config.NATIVE_BRIDGE_LAUNCHD_LABEL:
+            return LaunchdState(label, installed=True, loaded=True, override="enabled")
+        if label == config.CODEX_OBSERVE_LAUNCHD_LABEL:
+            return LaunchdState(label, installed=True, loaded=True, override="enabled")
+        return LaunchdState(label, installed=True, loaded=False, override="disabled")
+
+    monkeypatch.setattr(lifecycle, "inspect_launchd", inspect)
+    monkeypatch.setattr(cli_module.shutil, "which", lambda name: f"/opt/om/bin/{name}")
+
+    result = CliRunner().invoke(cli, ["doctor", "--json", "--validate-key"])
+
+    assert result.exit_code == 0, result.output
+    checks = json.loads(result.output)
+    operating_mode = next(row for row in checks if row["name"] == "Operating mode")
+    assert operating_mode["status"] == "FAIL"
+    assert operating_mode["detail"] == "unsafe mixed state: native bridge and legacy writers are active"
+    assert operating_mode["fix"] == "Run: om uninstall --native-bridge before continuing with the full workflow"
+    assert next(row for row in checks if row["name"] == "Configured LLM access")["detail"].endswith(
+        "no provider call made"
+    )
