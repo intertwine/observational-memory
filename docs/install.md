@@ -231,7 +231,7 @@ om doctor
 
 On an existing full install, `om install --native-bridge` boots out the four older macOS writer jobs: the Claude observer, Codex observer, Claude auto-memory scan, and reflector. Their plist files stay in place, but the bridge installer does not enable them.
 
-It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks. It preserves OM's read-only SessionStart context hooks and fallback, along with unrelated hook groups. If bridge setup fails, the installer restores the managed files and any service it can prove was previously enabled. A legacy service whose earlier enablement state was unknown stays disabled for safety and is shown by `om doctor`. The installer reports `rollback incomplete` only if a restoration step itself fails.
+It also removes OM-managed Codex Stop, Claude checkpoint, and Cowork writer hooks. It preserves OM's read-only SessionStart context hooks and fallback, along with unrelated hook groups. If bridge setup fails, the installer restores the managed files and each legacy service that was explicitly enabled before the attempt. A service whose prior launchd state was `default` or could not be determined stays disabled for safety and appears in `om doctor`. The installer reports `rollback incomplete` only if a restoration step itself fails.
 
 Grok, Kimi, and OpenCode are outside this Claude↔Codex migration. If you installed their writer integrations earlier, they are unchanged and may still feed the full OM workflow.
 

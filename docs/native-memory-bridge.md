@@ -92,7 +92,7 @@ On a v0.9.1 full install, bridge activation:
 
 Grok, Kimi, and OpenCode integrations are outside this Claude↔Codex migration. If you installed their writer integrations, they are unchanged.
 
-If setup fails, OM attempts to restore the managed files and any service that was previously known to be enabled. For safety, a legacy service whose earlier enablement state was unknown stays disabled. `om doctor` reports that safe hold. OM reports `rollback incomplete` only when a restoration step itself fails and manual recovery is required.
+If setup fails, OM attempts to restore the managed files and each legacy service that was explicitly enabled before the attempt. A service whose prior launchd state was `default` or could not be determined stays disabled for safety and appears in `om doctor`. OM reports `rollback incomplete` only when a restoration step itself fails and manual recovery is required.
 
 ## Run A Refresh Now
 
@@ -141,14 +141,14 @@ Every attempt has fixed limits for:
 | --- | --- |
 | macOS memory pressure | `normal` only |
 | Swap use | At most 80% |
-| Total runtime | 15 seconds |
+| Bounded bridge run | 15 seconds |
 | Bridge worker process tree | 128 MiB RSS |
 | One input file | 2 MiB |
 | All selected input | 16 MiB |
 
 These ceilings cannot be raised through normal bridge options or OM provider settings. If admission fails or a limit is reached, the bridge keeps the last verified index. A busy index also fails safely instead of starting a competing writer.
 
-The 15-second deadline covers the complete attempt, including admission, the worker, probes, and receipt finalization. The 128 MiB ceiling applies to the spawned bridge worker process tree. OM also checks the worker's kernel RSS high-water mark so a fast run cannot finish between samples and evade the limit. A rejected run keeps the previous verified index. The private index normally keeps the current generation and three rollback candidates; an active search can delay cleanup until the next successful refresh.
+The bounded run covers admission, the worker, probes, index publication, and in-deadline supervisor telemetry. That work stops at 15 seconds. After a timeout, OM can finish writing a local failure receipt; the receipt cannot publish a generation or change the current pointer. The 128 MiB ceiling applies to the spawned bridge worker process tree. OM also checks the worker's kernel RSS high-water mark so a fast run cannot finish between samples and evade the limit. A rejected run keeps the previous verified index. The private index normally keeps the current generation and three rollback candidates; an active search can delay cleanup until the next successful refresh.
 
 ## Check Health
 
@@ -266,7 +266,7 @@ om status
 om doctor
 ```
 
-If activation fails, OM attempts to restore the managed files and services it can prove were previously enabled. A legacy service whose earlier enablement state was unknown stays disabled for safety and is shown by `om doctor`. OM reports `rollback incomplete` only if a restoration step itself fails.
+If activation fails, OM attempts to restore the managed files and each legacy service that was explicitly enabled before the attempt. A service whose prior launchd state was `default` or could not be determined stays disabled for safety and appears in `om doctor`. OM reports `rollback incomplete` only if a restoration step itself fails.
 
 ### Native files are rejected
 

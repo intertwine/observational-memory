@@ -32,7 +32,7 @@ If you already pay for ChatGPT Plus / Pro / Team / Enterprise or for SuperGrok, 
 | `openai`           | `OPENAI_API_KEY`           | `gpt-4o-mini`       | Metered                |
 | `anthropic`        | `ANTHROPIC_API_KEY`        | `claude-sonnet-4-5` | Metered                |
 
-To sign in, run `om login` and pick your provider. Tokens land in `~/.config/observational-memory/auth.json` (0600, host-local). `om` never writes back to `~/.codex/` or `~/.grok/`; if you already have those CLIs, run `om login --import` to copy their tokens into om's own store.
+To sign in, run `om login` and pick your provider. Tokens land in `~/.config/observational-memory/auth.json` (0600, host-local). If you already use Codex or Grok, `om login --import` copies their tokens into OM's own store without modifying the source token files. Separate commands such as `om install --codex` and `om install --grok` do manage OM hook files in those CLI directories.
 
 `om auth status` shows what is currently configured (tokens are redacted to the last 4 characters). `om auth refresh` forces a refresh now. `om logout [provider]` clears stored tokens.
 
@@ -375,7 +375,7 @@ It is intentionally not configured like the full observation and reflection work
 - Codex `MEMORY.md` and `memory_summary.md`, plus top-level `.md` files directly in the exact Claude project memory directories selected with repeated `--claude-project` flags;
 - an isolated local BM25 generation rather than QMD, Moss, or a remote backend;
 - one fixed 15-minute launchd cadence;
-- normal macOS memory pressure, at most 80% swap use, a 15-second whole-attempt deadline, 128 MiB bridge-worker process-tree RSS, 2 MiB per file, and 16 MiB total input;
+- normal macOS memory pressure, at most 80% swap use, a 15-second bounded-run deadline for admission, index building, publication, and in-deadline telemetry, 128 MiB bridge-worker process-tree RSS, 2 MiB per file, and 16 MiB total input;
 - no Claude, Codex, or Cowork writer hooks, observer services, auto-memory service, or reflector service enabled for this path.
 
 `om native-bridge sources [--json]` lists eligible Claude project directory names with counts only and reports whether the fixed Codex allowlist files are present. It does not enroll a source. On first install, at least one `--claude-project <exact-directory-name>` is required. The sorted selection is saved in private `0600` bridge config. A later install or one-shot run can omit the flag and reuse that selection.

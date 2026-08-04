@@ -58,14 +58,14 @@ The v0.10 native-memory bridge has a narrower contract than the full OM workflow
 - read-only Claude Code and Codex native source roots;
 - Codex `MEMORY.md` and `memory_summary.md` only, plus top-level `.md` files directly in explicitly selected Claude `projects/<name>/memory/` directories, with raw memory, transcripts, and session logs excluded;
 - local BM25 only, with no provider environment, LLM, reflection, QMD, Moss, or remote-backend path;
-- a fixed 15-minute service interval; normal-pressure and at-most-80%-swap admission; a fixed 15-second whole-attempt deadline; and fixed 128 MiB worker process-tree RSS, 2 MiB per-file, and 16 MiB total-input ceilings;
+- a fixed 15-minute service interval; normal-pressure and at-most-80%-swap admission; a fixed 15-second bounded-run deadline for admission, index building, publication, and in-deadline telemetry; and fixed 128 MiB worker process-tree RSS, 2 MiB per-file, and 16 MiB total-input ceilings;
 - `om status` and `om doctor` visibility;
 - `om native-bridge disable` unloads the service but retains its plist, while `om uninstall --native-bridge` removes only the bridge service; both preserve private config, derived data, and receipts, and neither restarts older writer jobs;
 - return to the full workflow requires an explicit install target such as `om install --both`, followed by a restart of affected Claude Code and Codex app or CLI sessions.
 
 The resource and publication contract is also part of the release gate:
 
-- The bridge worker cannot create child processes. The supervisor samples the worker process tree, and every sampling probe is limited by the remaining 15-second whole-attempt deadline.
+- The bridge worker cannot create child processes. The supervisor samples the worker process tree, and every sampling probe is limited by the remaining 15-second bounded-run deadline. An external-failure receipt written after a timeout is outside that deadline and has no publication authority.
 - The worker reports the kernel's child-process RSS high-water mark so a fast run cannot finish between samples and evade the 128 MiB worker limit. macOS `RLIMIT_RSS` is advisory; it is recorded but is not the sole enforcement mechanism.
 - The index normally keeps the current generation and three rollback candidates. A generation pinned by an active reader can temporarily raise that count, and a later successful publication removes released generations.
 - Retention and persisted-byte verification finish before the current-generation pointer changes. The transaction owner checks the remaining time and memory budget before publication and again after reading the persisted generation. A late failure restores the prior pointer.
@@ -249,8 +249,9 @@ The standalone plugin has its own tests in the `intertwine/hermes-observational-
 
 The `om reflect --async` Batch path is fully covered by mocked tests
 (`tests/test_jobs_batch.py`). A live end-to-end smoke needs a real `OPENAI_API_KEY`
-with usable billing (the v0.6.5 validation hit `billing_hard_limit_reached`, which
-blocked a real run). When billing is available, run a tiny end-to-end check:
+with usable billing. If the provider returns `billing_hard_limit_reached` or another
+billing error, record the live smoke as blocked rather than validated. When billing
+is available, run a tiny end-to-end check:
 
 ```bash
 export OPENAI_API_KEY=sk-...           # billing enabled
