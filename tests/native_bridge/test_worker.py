@@ -6,6 +6,7 @@ import pickle
 import resource
 import signal
 import subprocess
+import sys
 import time
 from functools import partial
 from pathlib import Path
@@ -27,6 +28,11 @@ from observational_memory.native_bridge.worker import (
     BridgeWorkerTimeout,
     process_tree,
     run_bounded_bridge,
+)
+
+_REQUIRES_MACOS_PROCESSLESS_RESULT = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="native bridge workers are macOS-only; Linux RLIMIT_NPROC=0 blocks Queue result delivery",
 )
 
 
@@ -189,6 +195,7 @@ def test_outer_deadline_interrupts_admission_probe():
     assert time.monotonic() - started < 0.75
 
 
+@_REQUIRES_MACOS_PROCESSLESS_RESULT
 def test_outer_deadline_includes_receipt_and_telemetry_finalization():
     started = time.monotonic()
     with pytest.raises(BridgeWorkerTimeout, match="receipt and telemetry finalization"):
@@ -212,6 +219,7 @@ def test_process_tree_rss_limit_terminates_worker(monkeypatch):
         run_bounded_bridge(WaitingBridge(), timeout_seconds=5, max_rss_bytes=1)
 
 
+@_REQUIRES_MACOS_PROCESSLESS_RESULT
 def test_fast_worker_cannot_evade_kernel_high_water_evidence(monkeypatch):
     import observational_memory.native_bridge.worker as worker
 
@@ -260,6 +268,7 @@ def test_process_tree_probe_timeout_is_capped_by_remaining_outer_deadline(monkey
     assert all(0 < timeout <= 0.5 for _pid, timeout in probes)
 
 
+@_REQUIRES_MACOS_PROCESSLESS_RESULT
 def test_worker_reads_back_zero_process_limit_and_cannot_fork_or_spawn():
     bridge = ProcesslessProbeBridge()
 
@@ -277,6 +286,7 @@ def test_worker_reads_back_zero_process_limit_and_cannot_fork_or_spawn():
     }
 
 
+@_REQUIRES_MACOS_PROCESSLESS_RESULT
 def test_fast_worker_acceptance_keeps_independent_kernel_high_water_evidence(monkeypatch):
     """Invariant: every accepted fast worker reports its kernel high-water mark."""
     import observational_memory.native_bridge.worker as worker
@@ -334,6 +344,7 @@ def test_processless_worker_rejects_limit_failure(monkeypatch):
         worker._set_processless_worker()
 
 
+@_REQUIRES_MACOS_PROCESSLESS_RESULT
 def test_native_bridge_spawn_succeeds_and_persists_supervisor_telemetry(tmp_path, monkeypatch):
     memory = tmp_path / "om"
     codex_home = tmp_path / "codex"
@@ -385,6 +396,7 @@ def test_native_bridge_spawn_succeeds_and_persists_supervisor_telemetry(tmp_path
     pickle.dumps(NativeMemoryBridge(config, BridgePolicy()))
 
 
+@_REQUIRES_MACOS_PROCESSLESS_RESULT
 def test_supervised_busy_attempt_writes_no_receipt_without_root_ownership(tmp_path):
     """Invariant: a supervised busy attempt states that durable evidence was not written."""
     memory = tmp_path / "om"

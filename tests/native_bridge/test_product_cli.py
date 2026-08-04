@@ -260,6 +260,7 @@ def test_ordinary_runtime_paths_explicitly_load_provider_env(monkeypatch, tmp_pa
 def test_native_bridge_purge_uninstalls_and_verifies_service_first(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
     _patch_cli_config(monkeypatch, config, forbid_env_load=True)
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     calls: list[str] = []
     monkeypatch.setattr(lifecycle, "uninstall_bridge_launchd", lambda _config: calls.append("uninstall"))
 
@@ -383,6 +384,7 @@ def test_hook_quiescence_removes_only_om_writer_groups(monkeypatch, tmp_path):
 def test_sources_command_is_counts_only_and_does_not_persist_selection(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path)
     _patch_cli_config(monkeypatch, config, forbid_env_load=True)
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     memory = config.claude_projects_dir / "-Users-example-project" / "memory"
     memory.mkdir(parents=True)
     (memory / "topic.md").write_text("never print this private sentence")
@@ -408,6 +410,7 @@ def test_sources_command_is_counts_only_and_does_not_persist_selection(monkeypat
 def test_public_search_reads_verified_isolated_generation_with_qmd_config(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path, search_backend="qmd-hybrid")
     _patch_cli_config(monkeypatch, config, forbid_env_load=True)
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     codex_memories = config.codex_home / "memories"
     claude_memory = config.claude_projects_dir / "project-a" / "memory"
     codex_memories.mkdir(parents=True)
@@ -433,6 +436,7 @@ def test_public_search_reads_verified_isolated_generation_with_qmd_config(monkey
 def test_public_search_fails_clearly_before_first_bridge_generation(monkeypatch, tmp_path):
     config = _config(monkeypatch, tmp_path, search_backend="none")
     _patch_cli_config(monkeypatch, config, forbid_env_load=True)
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
 
     result = CliRunner().invoke(cli, ["search", "anything", "--native-bridge"])
 

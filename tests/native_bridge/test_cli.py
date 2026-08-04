@@ -14,6 +14,7 @@ from observational_memory.native_bridge.worker import BridgeWorkerTimeout
 
 def test_cli_reports_immutable_admission_evidence_from_temp_config(tmp_path, monkeypatch):
     """P3 contract: immediate JSON preserves the exact frozen admission snapshot."""
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     config = Config(
         memory_dir=tmp_path / "memory",
         env_file=tmp_path / "config" / "env",
@@ -63,6 +64,7 @@ def test_cli_reports_immutable_admission_evidence_from_temp_config(tmp_path, mon
 
 
 def test_cli_propagates_nonzero_busy_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     config = Config(
         memory_dir=tmp_path / "memory",
         env_file=tmp_path / "config" / "env",
@@ -88,6 +90,7 @@ def test_cli_propagates_nonzero_busy_exit(tmp_path, monkeypatch):
 
 
 def test_cli_records_outer_failure_with_original_admission_and_telemetry(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     memory = tmp_path / "memory"
     memory.mkdir()
     config = Config(
@@ -141,6 +144,7 @@ def test_cli_does_not_expose_trial_or_codex_allowlist_overrides(tmp_path, monkey
 
 def test_cli_selects_fixed_product_profile_and_codex_allowlist(tmp_path, monkeypatch):
     """Invariant: the public one-shot route cannot widen fixed product boundaries."""
+    monkeypatch.setattr(cli_module.sys, "platform", "darwin")
     config = Config(
         memory_dir=tmp_path / "memory",
         env_file=tmp_path / "config" / "env",
