@@ -217,7 +217,8 @@ def _terminate_tree(
                 pids = {process.pid}
         else:
             pids = {process.pid}
-    # The sampler is supervisor-rooted, but containment is always worker-rooted.
+    # Sampling and containment share the spawned worker root. The CLI host is
+    # outside the fixed 128 MiB worker-tree contract.
     pids.discard(os.getpid())
     for pid in sorted(pids, reverse=True):
         try:
@@ -343,7 +344,7 @@ def run_bounded_bridge(
             "peak_tree_rss_bytes": peak_rss_bytes,
             "worker_high_water_rss_bytes": worker_high_water_rss_bytes,
             "rss_sample_count": rss_sample_count,
-            "rss_evidence": "supervisor-root process-tree samples plus independent worker kernel high-water",
+            "rss_evidence": "worker process-tree samples plus independent worker kernel high-water",
             "worker_process_limit": {"resource": "RLIMIT_NPROC", "soft": 0, "hard": 0},
         }
         if memory_preference is not None:
@@ -438,7 +439,7 @@ def run_bounded_bridge(
             )
         if time.monotonic() >= next_rss_check:
             try:
-                pids, rss = process_tree(os.getpid(), timeout_seconds=remaining)
+                _pids, rss = process_tree(process.pid, timeout_seconds=remaining)
             except BridgeWorkerProbeError as exc:
                 if not process.is_alive():
                     break
@@ -449,14 +450,6 @@ def run_bounded_bridge(
                     telemetry=telemetry(admission_seconds),
                     attempt_id=attempt_id,
                 ) from exc
-            if process.pid not in pids and process.is_alive():
-                _terminate_tree(process, attempt_id=attempt_id, deadline=deadline)
-                raise BridgeWorkerProbeError(
-                    "bridge worker was absent from the supervisor-root process-tree probe",
-                    admission=admission,
-                    telemetry=telemetry(admission_seconds),
-                    attempt_id=attempt_id,
-                )
             rss_sample_count += 1
             peak_rss_bytes = rss if peak_rss_bytes is None else max(peak_rss_bytes, rss)
             next_rss_check = time.monotonic() + RSS_SAMPLE_INTERVAL_SECONDS

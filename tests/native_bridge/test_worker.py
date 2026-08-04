@@ -144,12 +144,12 @@ def test_legacy_observer_safeguards_remain_300_seconds_and_4096_mib(monkeypatch)
     assert _observer_worker_max_rss_bytes() == 4096 * 1024 * 1024
 
 
-def test_process_tree_rss_includes_supervisor_worker_and_transient_probe_descendants(monkeypatch):
+def test_process_tree_rss_includes_worker_and_worker_descendants_only(monkeypatch):
     output = """\
 100 1 100
 101 100 200
-102 100 300
-103 102 400
+102 101 300
+103 1 400
 200 1 900
 """
     monkeypatch.setattr(
@@ -160,8 +160,8 @@ def test_process_tree_rss_includes_supervisor_worker_and_transient_probe_descend
 
     pids, rss = process_tree(100, timeout_seconds=0.5)
 
-    assert pids == {100, 101, 102, 103}
-    assert rss == (100 + 200 + 300 + 400) * 1024
+    assert pids == {100, 101, 102}
+    assert rss == (100 + 200 + 300) * 1024
 
 
 def test_outer_timeout_terminates_worker_tree(monkeypatch):
@@ -256,7 +256,7 @@ def test_process_tree_probe_timeout_is_capped_by_remaining_outer_deadline(monkey
         run_bounded_bridge(WaitingBridge(), timeout_seconds=0.5)
 
     assert probes
-    assert probes[0][0] == os.getpid()
+    assert probes[0][0] != os.getpid()
     assert all(0 < timeout <= 0.5 for _pid, timeout in probes)
 
 
@@ -275,6 +275,24 @@ def test_worker_reads_back_zero_process_limit_and_cannot_fork_or_spawn():
         "soft": 0,
         "hard": 0,
     }
+
+
+def test_fast_worker_acceptance_keeps_independent_kernel_high_water_evidence(monkeypatch):
+    """Invariant: every accepted fast worker reports its kernel high-water mark."""
+    import observational_memory.native_bridge.worker as worker
+
+    monkeypatch.setattr(
+        worker,
+        "process_tree",
+        lambda pid, *, timeout_seconds: ({pid}, 1),
+    )
+    bridge = FastBridge()
+
+    result = run_bounded_bridge(bridge, timeout_seconds=5)
+
+    assert result.status == "success"
+    assert bridge.telemetry["worker_high_water_rss_bytes"] > 0
+    assert bridge.telemetry["rss_evidence"] == ("worker process-tree samples plus independent worker kernel high-water")
 
 
 def test_timeout_uses_uncatchable_kill_and_leaves_no_escape_sentinel(tmp_path, monkeypatch):
