@@ -9,7 +9,12 @@ additional platform-specific test infrastructure.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
 import time
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -28,6 +33,7 @@ from observational_memory.cli import (
     cli,
 )
 from observational_memory.config import Config
+from observational_memory.search import get_backend, reindex
 from observational_memory.sync.config import load_cluster_config
 
 
@@ -42,6 +48,12 @@ def _return_observer_value(_config: Config, value: int) -> int:
 @pytest.fixture
 def windows_env(monkeypatch, tmp_path):
     """Simulate a Windows environment with isolated APPDATA / LOCALAPPDATA dirs."""
+    # Load rank_bm25 and its multiprocessing dependency while the test host
+    # still reports its real platform. A real Windows interpreter supplies
+    # _winapi; this POSIX-host simulation does not.
+    from rank_bm25 import BM25Okapi
+
+    assert BM25Okapi is not None
     appdata = tmp_path / "AppData" / "Roaming"
     local_appdata = tmp_path / "AppData" / "Local"
     home = tmp_path / "home"
@@ -171,6 +183,100 @@ def test_doctor_warns_for_windows_cluster_key_acl_verification(windows_env, monk
     key_check = next(item for item in checks if item["name"] == "OM Cluster key permissions")
     assert key_check["status"] == "WARN"
     assert "Windows ACL owner-only verification" in key_check["detail"]
+
+
+def test_fresh_windows_status_and_doctor_import_without_posix_modules(tmp_path):
+    """Windows entrypoints must not import the macOS bridge before platform gating."""
+    script = textwrap.dedent(
+        """
+        import sys
+
+        import click
+        from click.testing import CliRunner
+
+        sys.platform = "win32"
+        sys.modules["fcntl"] = None
+        sys.modules["resource"] = None
+
+        import observational_memory.cli as cli_module
+
+        cli_module._find_om_path = lambda: "C:/tools/om.exe"
+        cli_module.shutil.which = lambda name: "C:/tools/om.exe" if name == "om" else None
+        cli_module._schtasks_job_statuses = lambda config: []
+
+        runner = CliRunner()
+        status = runner.invoke(cli_module.cli, ["status"])
+        assert status.exit_code == 0, (status.output, repr(status.exception))
+        assert "unsupported (macOS only)" in status.output
+
+        doctor = runner.invoke(cli_module.cli, ["doctor", "--json"])
+        assert doctor.exit_code == 0, (doctor.output, repr(doctor.exception))
+
+        bridge_status = runner.invoke(cli_module.cli, ["native-bridge", "status"])
+        assert bridge_status.exit_code == 0, (bridge_status.output, repr(bridge_status.exception))
+        assert "unsupported (macOS only)" in bridge_status.output
+
+        for argv in (
+            ["bridge-native-memory"],
+            ["install", "--native-bridge", "--claude-project", "example"],
+            ["uninstall", "--native-bridge"],
+            ["native-bridge", "disable"],
+            ["native-bridge", "sources"],
+            ["search", "anything", "--native-bridge"],
+        ):
+            unsupported = runner.invoke(cli_module.cli, argv)
+            assert unsupported.exit_code != 0, (argv, unsupported.output, repr(unsupported.exception))
+            assert "only supported on macOS" in unsupported.output
+        """
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "APPDATA": str(tmp_path / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(tmp_path / "AppData" / "Local"),
+            "HOME": str(tmp_path / "home"),
+            "USERPROFILE": str(tmp_path / "home"),
+            "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_windows_bm25_uses_legacy_pickle_round_trip_and_reindex(windows_env):
+    """The default Windows workflow retains its pre-v0.10 local BM25 format."""
+    memory_dir = windows_env["local_appdata"] / "observational-memory"
+    projects = windows_env["home"] / ".claude" / "projects"
+    projects.mkdir(parents=True)
+    config = Config(memory_dir=memory_dir, search_backend="bm25", claude_projects_dir=projects)
+    config.ensure_memory_dir()
+    config.observations_path.write_text("# Observations\n\n## 2026-08-03\n\nWindows legacy pickle search.\n")
+    config.reflections_path.write_text("# Reflections\n\n## Active Projects\n\nPortable memory indexing.\n")
+
+    assert reindex(config) == 2
+    legacy_index = config.search_index_dir / "bm25.pkl"
+    assert legacy_index.is_file()
+    assert not (config.search_index_dir / "current-generation.json").exists()
+    assert not (config.search_index_dir / "generations").exists()
+
+    backend = get_backend("bm25", config)
+    assert backend.is_ready()
+    assert backend.search("pickle")[0].document.doc_id == "obs:2026-08-03"
+
+    config.observations_path.write_text("# Observations\n\n## 2026-08-04\n\nWinnipeg reindex marker.\n")
+    assert reindex(config) == 2
+    reloaded = get_backend("bm25", config)
+    assert reloaded.search("Winnipeg")[0].document.doc_id == "obs:2026-08-04"
 
 
 # --- Scheduler resolution ---

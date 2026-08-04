@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
 import stat
 import threading
@@ -12,6 +11,11 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # Windows has no descriptor-flock API.
+    fcntl = None  # type: ignore[assignment]
 
 
 class GenerationStoreError(RuntimeError):
@@ -67,12 +71,14 @@ def _directory_open_flags() -> int:
     required = ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
     if any(not hasattr(os, name) for name in required):
         raise StoreLockUnsupportedError("generation store requires O_DIRECTORY, O_NOFOLLOW, and O_CLOEXEC")
-    if not hasattr(fcntl, "F_GETFD") or not hasattr(fcntl, "FD_CLOEXEC"):
+    if fcntl is None or not hasattr(fcntl, "F_GETFD") or not hasattr(fcntl, "FD_CLOEXEC"):
         raise StoreLockUnsupportedError("generation store cannot verify close-on-exec")
     return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def _verify_close_on_exec(fd: int) -> None:
+    if fcntl is None:
+        raise StoreLockUnsupportedError("generation store requires POSIX descriptor locking")
     try:
         descriptor_flags = fcntl.fcntl(fd, fcntl.F_GETFD)
     except OSError as exc:
@@ -196,7 +202,7 @@ def _validate_root_fd(root: Path, fd: int, *, require_mode: bool = True) -> os.s
 
 
 def _acquire_flock(fd: int, *, timeout_seconds: float) -> None:
-    if not hasattr(fcntl, "flock") or not hasattr(fcntl, "LOCK_EX") or not hasattr(fcntl, "LOCK_NB"):
+    if fcntl is None or not hasattr(fcntl, "flock") or not hasattr(fcntl, "LOCK_EX") or not hasattr(fcntl, "LOCK_NB"):
         raise StoreLockUnsupportedError("store-root descriptor locking is unsupported")
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     while True:
@@ -220,6 +226,8 @@ def _acquire_flock(fd: int, *, timeout_seconds: float) -> None:
 
 
 def _unlock(fd: int) -> None:
+    if fcntl is None:
+        raise StoreLockUnsupportedError("generation store requires POSIX descriptor locking")
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
     except OSError as exc:
@@ -228,7 +236,7 @@ def _unlock(fd: int) -> None:
 
 def _try_generation_lock(fd: int, *, exclusive: bool) -> bool:
     """Pin one generation for reading or claim it for nonblocking pruning."""
-    if not hasattr(fcntl, "LOCK_SH"):
+    if fcntl is None or not hasattr(fcntl, "LOCK_SH"):
         raise StoreLockUnsupportedError("generation reader locking is unsupported")
     operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     try:

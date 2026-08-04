@@ -85,10 +85,10 @@ def bridge_native_memory(
     as_json: bool,
 ) -> None:
     """Publish allowlisted native memories to the isolated local BM25 bridge."""
-    from .native_bridge.lifecycle import NativeBridgeLifecycleError, NativeBridgeSettings, load_settings
-
     if sys.platform != "darwin":
         raise click.ClickException("the native-memory bridge is only supported on macOS")
+    from .native_bridge.lifecycle import NativeBridgeLifecycleError, NativeBridgeSettings, load_settings
+
     try:
         settings = NativeBridgeSettings(claude_projects) if claude_projects else load_settings(ctx.obj["config"])
     except NativeBridgeLifecycleError as exc:
@@ -107,10 +107,10 @@ def bridge_native_memory(
 @click.pass_context
 def native_bridge_worker(ctx: click.Context) -> None:
     """Run one installed launchd-owned native bridge attempt."""
-    from .native_bridge.lifecycle import NativeBridgeLifecycleError, load_settings
-
     if sys.platform != "darwin":
         raise click.ClickException("the native-memory bridge worker is only supported on macOS")
+    from .native_bridge.lifecycle import NativeBridgeLifecycleError, load_settings
+
     try:
         settings = load_settings(ctx.obj["config"])
     except NativeBridgeLifecycleError as exc:
@@ -204,6 +204,8 @@ def _execute_native_memory_bridge(
 
 
 def _native_bridge_state_present(status: Mapping[str, object]) -> bool:
+    if not status["platform_supported"]:
+        return False
     return (
         status["config_status"] != "not configured"
         or bool(status["service_installed"])
@@ -1462,6 +1464,8 @@ def search(
         raise click.ClickException("--raw-qmd cannot be combined with --json.")
 
     if native_bridge:
+        if sys.platform != "darwin":
+            raise click.ClickException("the native-memory bridge is only supported on macOS")
         if raw_qmd or reindex:
             raise click.ClickException("--native-bridge cannot be combined with --raw-qmd or --reindex.")
         from .search.bm25 import BM25Backend, BM25GenerationStore
@@ -4241,6 +4245,8 @@ def uninstall(ctx: click.Context, targets: str, purge: bool) -> None:
     config = ctx.obj["config"]
 
     if targets == "native-bridge":
+        if sys.platform != "darwin":
+            raise click.ClickException("`om uninstall --native-bridge` is only supported on macOS")
         from .native_bridge.lifecycle import NativeBridgeLifecycleError, purge_bridge_state, uninstall_bridge_launchd
 
         try:
@@ -4438,6 +4444,8 @@ def _render_native_bridge_hook_updates(config: Config, snapshots: dict[Path, obj
 
 def _install_native_bridge_product(config: Config, claude_projects: tuple[str, ...]) -> None:
     """Activate the bridge transaction without enabling any legacy writer."""
+    if sys.platform != "darwin":
+        raise click.ClickException("`om install --native-bridge` is only supported on macOS (launchd required)")
     from .native_bridge.lifecycle import (
         NativeBridgeLifecycleError,
         NativeBridgeSettings,
@@ -4453,8 +4461,6 @@ def _install_native_bridge_product(config: Config, claude_projects: tuple[str, .
         write_settings,
     )
 
-    if sys.platform != "darwin":
-        raise click.ClickException("`om install --native-bridge` is only supported on macOS (launchd required)")
     try:
         if claude_projects:
             settings = NativeBridgeSettings(claude_projects)
@@ -4538,6 +4544,8 @@ def native_bridge_group() -> None:
 @click.pass_context
 def native_bridge_disable(ctx: click.Context) -> None:
     """Disable and unload the bridge while retaining its files."""
+    if sys.platform != "darwin":
+        raise click.ClickException("the native-memory bridge is only supported on macOS")
     from .native_bridge.lifecycle import NativeBridgeLifecycleError, disable_bridge_launchd
 
     try:
@@ -4570,6 +4578,8 @@ def native_bridge_status(ctx: click.Context, as_json: bool) -> None:
 @click.pass_context
 def native_bridge_sources(ctx: click.Context, as_json: bool) -> None:
     """List eligible local source names without reading memory content."""
+    if sys.platform != "darwin":
+        raise click.ClickException("the native-memory bridge is only supported on macOS")
     from .native_bridge.lifecycle import (
         NATIVE_BRIDGE_CODEX_ALLOWLIST,
         NativeBridgeLifecycleError,
@@ -4606,23 +4616,26 @@ def native_bridge_sources(ctx: click.Context, as_json: bool) -> None:
 
 def _native_bridge_status_payload(config: Config) -> dict[str, object]:
     """Return truthful, read-only bridge state for status and doctor."""
-    from .native_bridge.lifecycle import NativeBridgeLifecycleError, inspect_launchd, load_settings
-    from .search.bm25 import BRIDGE_GENERATION_SCHEMA, BM25GenerationStore
-    from .search.generation_store import GenerationStoreError, StoreReadRoot
-
     payload: dict[str, object] = {
         "platform_supported": sys.platform == "darwin",
-        "config_status": "not configured",
+        "config_status": "not configured" if sys.platform == "darwin" else "unsupported (macOS only)",
         "claude_projects": [],
         "codex_allowlist": [],
         "service_status": "unavailable (launchd requires macOS)",
         "service_installed": False,
         "service_loaded": False,
         "service_override": "unavailable",
-        "generation_status": "not built",
+        "generation_status": "not built" if sys.platform == "darwin" else "unavailable (macOS only)",
         "generation_id": None,
         "search_command": "om search --native-bridge <query>",
     }
+    if sys.platform != "darwin":
+        return payload
+
+    from .native_bridge.lifecycle import NativeBridgeLifecycleError, inspect_launchd, load_settings
+    from .search.bm25 import BRIDGE_GENERATION_SCHEMA, BM25GenerationStore
+    from .search.generation_store import GenerationStoreError, StoreReadRoot
+
     try:
         settings = load_settings(config, required=False)
         if settings is not None:
@@ -4741,9 +4754,12 @@ def status(ctx: click.Context) -> None:
     click.echo("\nSearch:")
     click.echo(f"  Backend: {config.search_backend}")
     if config.search_backend == "bm25":
-        click.echo(f"  BM25 generation store: {config.search_index_dir}")
-        click.echo(f"  BM25 current pointer: {config.search_index_dir / 'current-generation.json'}")
-        click.echo(f"  BM25 legacy index (preserved): {config.search_index_dir / 'bm25.pkl'}")
+        if sys.platform == "win32":
+            click.echo(f"  BM25 index: {config.search_index_dir / 'bm25.pkl'}")
+        else:
+            click.echo(f"  BM25 generation store: {config.search_index_dir}")
+            click.echo(f"  BM25 current pointer: {config.search_index_dir / 'current-generation.json'}")
+            click.echo(f"  BM25 legacy index (preserved): {config.search_index_dir / 'bm25.pkl'}")
     elif config.search_backend in {"qmd", "qmd-hybrid"}:
         from .search.qmd import QMDBackend, inspect_qmd_index, inspect_qmd_install
 

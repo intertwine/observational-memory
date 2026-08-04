@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -217,7 +218,7 @@ def reindex(config) -> int:
     Returns:
         Number of documents indexed.
     """
-    if config.search_backend == "bm25":
+    if config.search_backend == "bm25" and sys.platform != "win32":
         with _generation_transaction(config) as transaction:
             batch = _capture_document_batch_owned(config, transaction)
             return _commit_document_batch_owned(config, batch, transaction)

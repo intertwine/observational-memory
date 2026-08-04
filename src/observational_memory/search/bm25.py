@@ -7,7 +7,6 @@ import json
 import os
 import pickle
 import re
-import resource
 import sys
 import time
 import uuid
@@ -16,6 +15,11 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource
+except ImportError:  # Windows does not provide POSIX getrusage.
+    resource = None  # type: ignore[assignment]
 
 from . import Document, SearchResult
 from .generation import (
@@ -418,6 +422,8 @@ def _check_publication_budget() -> None:
         return
     if time.monotonic() >= budget.deadline:
         raise PublicationBudgetExceeded("native-memory publication deadline expired before commit")
+    if resource is None:
+        raise PublicationBudgetExceeded("native-memory publication requires POSIX resource accounting")
     peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     peak_bytes = peak if sys.platform == "darwin" else peak * 1024
     if peak_bytes > budget.max_rss_bytes:
@@ -830,8 +836,14 @@ class BM25Backend:
         return instance
 
     def index(self, documents: list[Document]) -> None:
-        del documents
-        raise RuntimeError("BM25 publication requires the search generation transaction owner")
+        if sys.platform != "win32":
+            raise RuntimeError("BM25 publication requires the search generation transaction owner")
+        self._documents = list(documents)
+        self._tokenized_corpus = [_tokenize(document.content) for document in documents]
+        self._generation_id = None
+        self._generation_manifest = None
+        self._build_ranker()
+        self._save_legacy()
 
     def _build_ranker(self) -> None:
         if self._tokenized_corpus:
@@ -882,16 +894,30 @@ class BM25Backend:
         return value if isinstance(value, str) else None
 
     def _load(self) -> None:
-        store = BM25GenerationStore(self._store_root)
-        if store.has_generation_state():
-            with StoreReadRoot.open(self._store_root) as read_root:
-                verified = store.read_current(read_root)
-            self._documents = [document_from_payload(value) for value in verified.index["documents"]]
-            self._tokenized_corpus = [list(tokens) for tokens in verified.index["tokenized_corpus"]]
-            self._generation_id = verified.generation_id
-            self._generation_manifest = verified.manifest
-            self._build_ranker()
-            return
+        if sys.platform != "win32":
+            store = BM25GenerationStore(self._store_root)
+            if store.has_generation_state():
+                with StoreReadRoot.open(self._store_root) as read_root:
+                    verified = store.read_current(read_root)
+                self._documents = [document_from_payload(value) for value in verified.index["documents"]]
+                self._tokenized_corpus = [list(tokens) for tokens in verified.index["tokenized_corpus"]]
+                self._generation_id = verified.generation_id
+                self._generation_manifest = verified.manifest
+                self._build_ranker()
+                return
+        self._load_legacy()
+
+    def _save_legacy(self) -> None:
+        """Write the pre-v0.10 Windows BM25 pickle format."""
+        self._legacy_index_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "documents": self._documents,
+            "tokenized_corpus": self._tokenized_corpus,
+        }
+        with self._legacy_index_path.open("wb") as stream:
+            pickle.dump(data, stream)
+
+    def _load_legacy(self) -> None:
         if not self._legacy_index_path.exists():
             return
         try:
