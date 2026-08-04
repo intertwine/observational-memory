@@ -432,13 +432,16 @@ def launchd_override(label: str, *, run_launchctl: RunLaunchctl = _default_run_l
         return "unknown", str(exc)
     if result.returncode != 0 or result.stderr:
         return "unknown", _result_detail(result)
-    pattern = re.compile(rf'^\s*"{re.escape(label)}"\s*=>\s*(true|false)\s*$', re.MULTILINE)
+    pattern = re.compile(
+        rf'^\s*"{re.escape(label)}"\s*=>\s*(true|false|enabled|disabled)\s*$',
+        re.MULTILINE,
+    )
     matches = pattern.findall(result.stdout)
     if len(matches) > 1:
         return "unknown", "launchctl returned duplicate disabled-state entries"
     if not matches:
         return "default", None
-    return ("disabled" if matches[0] == "true" else "enabled"), None
+    return ("disabled" if matches[0] in {"true", "disabled"} else "enabled"), None
 
 
 def launchd_loaded(label: str, *, run_launchctl: RunLaunchctl = _default_run_launchctl) -> tuple[bool, str | None]:

@@ -259,6 +259,8 @@ def test_launchd_plist_uses_installed_om_fixed_cadence_and_no_provider_env(monke
     [
         ('disabled services = {\n    "label" => true\n}\n', "disabled"),
         ('disabled services = {\n    "label" => false\n}\n', "enabled"),
+        ('disabled services = {\n    "label" => disabled\n}\n', "disabled"),
+        ('disabled services = {\n    "label" => enabled\n}\n', "enabled"),
         ("disabled services = {\n}\n", "default"),
     ],
 )
