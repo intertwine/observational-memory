@@ -226,6 +226,28 @@ def _unlock(fd: int) -> None:
         raise GenerationStoreError(f"store-root descriptor unlock failed: {exc}") from exc
 
 
+def _try_generation_lock(fd: int, *, exclusive: bool) -> bool:
+    """Pin one generation for reading or claim it for nonblocking pruning."""
+    if not hasattr(fcntl, "LOCK_SH"):
+        raise StoreLockUnsupportedError("generation reader locking is unsupported")
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    try:
+        fcntl.flock(fd, operation | fcntl.LOCK_NB)
+    except OSError as exc:
+        unsupported = {
+            getattr(errno, "ENOTSUP", -1),
+            getattr(errno, "EOPNOTSUPP", -1),
+            getattr(errno, "ENOSYS", -1),
+            getattr(errno, "EINVAL", -1),
+        }
+        if exc.errno in unsupported:
+            raise StoreLockUnsupportedError("generation reader locking is unsupported") from exc
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            return False
+        raise GenerationStoreError(f"generation descriptor lock failed: {exc}") from exc
+    return True
+
+
 def _current_thread_owner() -> tuple[int, threading.Thread]:
     """Return the required numeric ID and the non-recyclable thread owner."""
     return threading.get_ident(), threading.current_thread()

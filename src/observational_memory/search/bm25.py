@@ -7,7 +7,12 @@ import json
 import os
 import pickle
 import re
+import resource
+import sys
+import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,8 +36,11 @@ from .generation_store import (
     _open_dir,
     _PointerChanged,
     _read_file,
+    _require_regular,
     _require_store_transaction,
     _secure_open_root,
+    _try_generation_lock,
+    _unlock,
     _validate_canonical_read_root,
     _write_file,
     validate_canonical_root,
@@ -49,7 +57,13 @@ BM25_BACKEND_CONFIG = {
 BM25_BACKEND_CONFIG_DIGEST = sha256_hex(canonical_json_bytes(BM25_BACKEND_CONFIG))
 BRIDGE_GENERATION_SCHEMA = "om.native-memory-bridge.generation.v2"
 
+# The current generation plus three rollback candidates. Reader-pinned
+# generations can temporarily exceed this bound and are retried on the next
+# publication; a live reader is never invalidated to satisfy retention.
+MAX_RETAINED_GENERATIONS = 4
+
 _GENERATION_ID = re.compile(r"^[0-9a-f]{64}$")
+_RETIRED_GENERATION = re.compile(r"^\.retired\.[0-9a-f]{64}\.[0-9a-f]{32}$")
 _BRIDGE_METADATA_KEYS = {
     "schema",
     "desired_state_digest",
@@ -366,6 +380,50 @@ def _publication_phase(phase: str) -> None:
     del phase
 
 
+class _GenerationMoved(RuntimeError):
+    """The pointer-to-generation race overlapped safe retention pruning."""
+
+
+class PublicationBudgetExceeded(GenerationStoreError):
+    """A supervised bridge may not replace the pointer outside its budget."""
+
+
+@dataclass(frozen=True)
+class _PublicationBudget:
+    deadline: float
+    max_rss_bytes: int
+
+
+_PUBLICATION_BUDGET: ContextVar[_PublicationBudget | None] = ContextVar(
+    "om_bm25_publication_budget",
+    default=None,
+)
+
+
+@contextmanager
+def supervised_publication_budget(*, deadline: float, max_rss_bytes: int):
+    """Install the fixed pre-pointer deadline/RSS boundary for one worker."""
+    if not time.monotonic() < deadline or max_rss_bytes <= 0:
+        raise PublicationBudgetExceeded("native-memory publication budget is already exhausted")
+    token = _PUBLICATION_BUDGET.set(_PublicationBudget(deadline, max_rss_bytes))
+    try:
+        yield
+    finally:
+        _PUBLICATION_BUDGET.reset(token)
+
+
+def _check_publication_budget() -> None:
+    budget = _PUBLICATION_BUDGET.get()
+    if budget is None:
+        return
+    if time.monotonic() >= budget.deadline:
+        raise PublicationBudgetExceeded("native-memory publication deadline expired before commit")
+    peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    peak_bytes = peak if sys.platform == "darwin" else peak * 1024
+    if peak_bytes > budget.max_rss_bytes:
+        raise PublicationBudgetExceeded("native-memory worker RSS high-water exceeded before commit")
+
+
 class BM25GenerationStore:
     """The sole schema, digest, publication, and persisted-byte BM25 authority."""
 
@@ -413,12 +471,31 @@ class BM25GenerationStore:
             raise GenerationStoreError("current generation ID is not content-addressed")
         generations = _open_dir(root, "generations", create=False, writable=False)
         generation = None
+        pinned = False
         try:
-            generation = _open_dir(generations, generation_id, create=False, writable=False)
+            try:
+                generation = _open_dir(generations, generation_id, create=False, writable=False)
+            except GenerationStoreError as exc:
+                cause = exc.__cause__
+                if isinstance(cause, OSError) and cause.errno == errno.ENOENT:
+                    raise _GenerationMoved(generation_id) from exc
+                raise
+            if not _try_generation_lock(generation, exclusive=False):
+                raise _GenerationMoved(generation_id)
+            pinned = True
+            try:
+                named = os.stat(generation_id, dir_fd=generations, follow_symlinks=False)
+            except FileNotFoundError as exc:
+                raise _GenerationMoved(generation_id) from exc
+            opened = os.fstat(generation)
+            if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+                raise _GenerationMoved(generation_id)
             index_bytes = _read_file(generation, "index.json")
             manifest_bytes = _read_file(generation, "manifest.json")
         finally:
             if generation is not None:
+                if pinned:
+                    _unlock(generation)
                 os.close(generation)
             os.close(generations)
         index, manifest = _verify_bm25_generation(index_bytes, manifest_bytes)
@@ -451,7 +528,12 @@ class BM25GenerationStore:
                         raise GenerationStoreError("generation pointer did not stabilize") from None
                     continue
                 pointer = self._parse_pointer(pointer_bytes)
-                verified = self._read_generation(root, pointer["generation_id"])
+                try:
+                    verified = self._read_generation(root, pointer["generation_id"])
+                except _GenerationMoved:
+                    if attempt == 2:
+                        raise GenerationStoreError("generation pointer did not stabilize") from None
+                    continue
                 if pointer["index_sha256"] != sha256_hex(verified.index_bytes):
                     raise GenerationStoreError("generation pointer index digest is invalid")
                 if pointer["manifest_sha256"] != sha256_hex(verified.manifest_bytes):
@@ -463,6 +545,93 @@ class BM25GenerationStore:
                 return verified
             raise AssertionError("bounded pointer loop did not return or raise")
         finally:
+            os.close(root)
+
+    def _prune_generations(
+        self,
+        transaction: StoreTransaction,
+        *,
+        protected_generation_ids: frozenset[str],
+    ) -> None:
+        """Retain four generations without touching pointer targets or reader pins."""
+        _require_store_transaction(transaction, self.root)
+        root = _duplicate_root_fd(transaction, expected_root=self.root)
+        generations = staging = None
+        try:
+            generations = _open_dir(root, "generations", create=False, writable=True)
+            staging = _open_dir(root, "staging", create=True, writable=True)
+            for retired_name in sorted(
+                name for name in os.listdir(staging) if _RETIRED_GENERATION.fullmatch(name) is not None
+            ):
+                retired = _open_dir(staging, retired_name, create=False, writable=True)
+                try:
+                    leaves = set(os.listdir(retired))
+                    if not leaves.issubset({"index.json", "manifest.json"}):
+                        raise GenerationStoreError("retired generation has unsupported entries")
+                    for leaf in sorted(leaves):
+                        info = os.stat(leaf, dir_fd=retired, follow_symlinks=False)
+                        _require_regular(info, leaf)
+                        os.unlink(leaf, dir_fd=retired)
+                    os.fsync(retired)
+                    os.rmdir(retired_name, dir_fd=staging)
+                    os.fsync(staging)
+                finally:
+                    os.close(retired)
+            entries: list[tuple[int, str]] = []
+            for name in os.listdir(generations):
+                if _GENERATION_ID.fullmatch(name) is None:
+                    raise GenerationStoreError(f"unsafe generation directory name: {name!r}")
+                generation = _open_dir(generations, name, create=False, writable=False)
+                try:
+                    info = os.fstat(generation)
+                    entries.append((info.st_mtime_ns, name))
+                finally:
+                    os.close(generation)
+            remaining = len(entries)
+            if remaining <= MAX_RETAINED_GENERATIONS:
+                return
+
+            for _modified_ns, name in sorted(entries):
+                if remaining <= MAX_RETAINED_GENERATIONS:
+                    break
+                if name in protected_generation_ids:
+                    continue
+                generation = _open_dir(generations, name, create=False, writable=True)
+                locked = False
+                try:
+                    if not _try_generation_lock(generation, exclusive=True):
+                        continue
+                    locked = True
+                    named = os.stat(name, dir_fd=generations, follow_symlinks=False)
+                    opened = os.fstat(generation)
+                    if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+                        raise GenerationStoreError("generation changed during retention pruning")
+                    if set(os.listdir(generation)) != {"index.json", "manifest.json"}:
+                        raise GenerationStoreError("generation has unsupported retention entries")
+                    for leaf in ("index.json", "manifest.json"):
+                        info = os.stat(leaf, dir_fd=generation, follow_symlinks=False)
+                        _require_regular(info, leaf)
+                    retired_name = f".retired.{name}.{uuid.uuid4().hex}"
+                    os.rename(name, retired_name, src_dir_fd=generations, dst_dir_fd=staging)
+                    os.fsync(generations)
+                    os.fsync(staging)
+                    _publication_phase("after:retention_rename")
+                    os.unlink("index.json", dir_fd=generation)
+                    os.unlink("manifest.json", dir_fd=generation)
+                    os.fsync(generation)
+                    os.rmdir(retired_name, dir_fd=staging)
+                    os.fsync(staging)
+                    remaining -= 1
+                finally:
+                    if locked:
+                        _unlock(generation)
+                    os.close(generation)
+            validate_canonical_root(transaction)
+        finally:
+            if staging is not None:
+                os.close(staging)
+            if generations is not None:
+                os.close(generations)
             os.close(root)
 
     def publish(
@@ -485,6 +654,21 @@ class BM25GenerationStore:
         generations = staging = stage = None
         stage_name = f".{generation_id}.{uuid.uuid4().hex}"
         pointer_temp: str | None = None
+        prior_pointer_bytes: bytes | None = None
+        prior_generation_id: str | None = None
+        pointer_replacement_started = False
+        try:
+            prior_pointer_bytes = _read_file(
+                root,
+                "current-generation.json",
+                max_bytes=1024 * 1024,
+            )
+        except GenerationStoreError as exc:
+            cause = exc.__cause__
+            if not isinstance(cause, OSError) or cause.errno != errno.ENOENT:
+                raise
+        if prior_pointer_bytes is not None:
+            prior_generation_id = self._parse_pointer(prior_pointer_bytes)["generation_id"]
         try:
             generations = _open_dir(root, "generations", create=True, writable=True)
             staging = _open_dir(root, "staging", create=True, writable=True)
@@ -523,6 +707,14 @@ class BM25GenerationStore:
             _publication_phase("after:generation_rename")
             os.fsync(generations)
             _publication_phase("after:generations_flush")
+            protected_generation_ids = {generation_id}
+            if prior_generation_id is not None:
+                protected_generation_ids.add(prior_generation_id)
+            self._prune_generations(
+                transaction,
+                protected_generation_ids=frozenset(protected_generation_ids),
+            )
+            _publication_phase("after:retention_prune")
 
             pointer = {
                 "schema": CURRENT_POINTER_SCHEMA,
@@ -537,6 +729,8 @@ class BM25GenerationStore:
             _require_store_transaction(transaction, self.root)
             validate_canonical_root(transaction)
             _publication_phase("after:root_identity")
+            _check_publication_budget()
+            pointer_replacement_started = True
             os.rename(
                 pointer_temp,
                 "current-generation.json",
@@ -553,9 +747,36 @@ class BM25GenerationStore:
                 raise GenerationStoreError("fresh reader resolved a different generation")
             if verified.manifest.get("content_digest") != immutable_batch.content_digest:
                 raise GenerationStoreError("fresh reader resolved different canonical corpus bytes")
+            _check_publication_budget()
             validate_canonical_root(transaction)
             _publication_phase("after:final_verify")
             return verified
+        except PublicationBudgetExceeded:
+            if pointer_replacement_started:
+                validate_canonical_root(transaction)
+                if prior_pointer_bytes is None:
+                    try:
+                        os.unlink("current-generation.json", dir_fd=root)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    rollback_temp = f".current-generation.rollback.{uuid.uuid4().hex}.tmp"
+                    try:
+                        _write_file(root, rollback_temp, prior_pointer_bytes)
+                        os.rename(
+                            rollback_temp,
+                            "current-generation.json",
+                            src_dir_fd=root,
+                            dst_dir_fd=root,
+                        )
+                    finally:
+                        try:
+                            os.unlink(rollback_temp, dir_fd=root)
+                        except FileNotFoundError:
+                            pass
+                os.fsync(root)
+                _publication_phase("after:budget_rollback")
+            raise
         finally:
             if pointer_temp is not None:
                 try:

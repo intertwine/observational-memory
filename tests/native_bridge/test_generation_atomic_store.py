@@ -22,7 +22,12 @@ import observational_memory.search.generation_store as generation_store_module
 from observational_memory.config import Config
 from observational_memory.native_bridge.secure_fs import SecureRoot
 from observational_memory.search import Document, DocumentSource, get_backend, reindex
-from observational_memory.search.bm25 import BM25GenerationStore
+from observational_memory.search.bm25 import (
+    MAX_RETAINED_GENERATIONS,
+    BM25GenerationStore,
+    PublicationBudgetExceeded,
+    supervised_publication_budget,
+)
 from observational_memory.search.generation import canonical_json_bytes
 from observational_memory.search.generation_store import (
     GenerationStoreError,
@@ -49,6 +54,10 @@ def _pointer(config: Config) -> dict:
 
 def _current_corpus(config: Config) -> str:
     return "\n".join(document.content for document in get_backend("bm25", config)._documents)
+
+
+def _generation_names(config: Config) -> set[str]:
+    return {path.name for path in (config.search_index_dir / "generations").iterdir()}
 
 
 def _external_lock_result(root) -> subprocess.CompletedProcess[str]:
@@ -676,3 +685,211 @@ def test_legacy_reader_is_one_way_before_generation_state(tmp_path):
     (config.search_index_dir / "staging").mkdir(mode=0o700)
     with pytest.raises(GenerationStoreError, match="generation store"):
         get_backend("bm25", config)
+
+
+def test_generation_retention_has_a_deterministic_four_generation_bound(tmp_path):
+    """Invariant: repeated publications do not accumulate immutable generations."""
+    config = _config(tmp_path)
+    published: list[str] = []
+    for sequence in range(MAX_RETAINED_GENERATIONS + 4):
+        config.observations_path.write_text(f"# Observations\n\n## 2026-01-01\n\nretention generation {sequence}\n")
+        assert reindex(config) == 1
+        current = _pointer(config)["generation_id"]
+        published.append(current)
+        names = _generation_names(config)
+        assert current in names
+        assert len(names) <= MAX_RETAINED_GENERATIONS
+
+    assert len(_generation_names(config)) == MAX_RETAINED_GENERATIONS
+    assert published[-1] in _generation_names(config)
+    assert published[0] not in _generation_names(config)
+
+
+def test_supervised_rss_budget_rejects_before_first_pointer_publish(tmp_path):
+    """Invariant: an over-limit fast worker cannot make its generation current."""
+    config = _config(tmp_path)
+    with pytest.raises(PublicationBudgetExceeded, match="RSS high-water"):
+        with supervised_publication_budget(deadline=time.monotonic() + 5, max_rss_bytes=1):
+            reindex(config)
+
+    assert not (config.search_index_dir / "current-generation.json").exists()
+    assert len(_generation_names(config)) == 1
+
+
+def test_supervised_deadline_rejects_before_first_pointer_publish(tmp_path, monkeypatch):
+    """Invariant: a worker outside its commit window cannot replace the pointer."""
+    config = _config(tmp_path)
+
+    def expire_before_pointer(phase: str) -> None:
+        if phase == "after:root_identity":
+            time.sleep(0.02)
+
+    monkeypatch.setattr(bm25_module, "_publication_phase", expire_before_pointer)
+    with pytest.raises(PublicationBudgetExceeded, match="deadline expired"):
+        with supervised_publication_budget(
+            deadline=time.monotonic() + 0.005,
+            max_rss_bytes=2**63 - 1,
+        ):
+            reindex(config)
+
+    assert not (config.search_index_dir / "current-generation.json").exists()
+
+
+def test_post_verify_budget_failure_atomically_restores_prior_pointer(tmp_path, monkeypatch):
+    """Invariant: a late deadline/RSS failure keeps the previous verified index."""
+    config = _config(tmp_path)
+    assert reindex(config) == 1
+    prior_pointer = (config.search_index_dir / "current-generation.json").read_bytes()
+    config.observations_path.write_text("# Observations\n\n## 2026-01-01\n\nrejected replacement\n")
+    checks = 0
+
+    def reject_after_fresh_read() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise PublicationBudgetExceeded("injected post-verify budget failure")
+
+    monkeypatch.setattr(bm25_module, "_check_publication_budget", reject_after_fresh_read)
+    with pytest.raises(PublicationBudgetExceeded, match="post-verify"):
+        with supervised_publication_budget(
+            deadline=time.monotonic() + 5,
+            max_rss_bytes=128 * 1024 * 1024,
+        ):
+            reindex(config)
+
+    assert checks == 2
+    assert (config.search_index_dir / "current-generation.json").read_bytes() == prior_pointer
+    assert "generation alpha" in _current_corpus(config)
+    assert "rejected replacement" not in _current_corpus(config)
+
+
+def test_pre_pointer_retention_crash_keeps_prior_generation_current(tmp_path, monkeypatch):
+    """Invariant: pruning finishes before the atomic current-pointer replacement."""
+    config = _config(tmp_path)
+    for sequence in range(MAX_RETAINED_GENERATIONS):
+        config.observations_path.write_text(f"# Observations\n\n## 2026-01-01\n\npre-crash generation {sequence}\n")
+        assert reindex(config) == 1
+
+    def crash_after_retirement(phase: str) -> None:
+        if phase == "after:retention_rename":
+            raise RuntimeError("injected retention crash")
+
+    monkeypatch.setattr(bm25_module, "_publication_phase", crash_after_retirement)
+    config.observations_path.write_text("# Observations\n\n## 2026-01-01\n\ncurrent survives pruning crash\n")
+    with pytest.raises(RuntimeError, match="injected retention crash"):
+        reindex(config)
+
+    assert len(_generation_names(config)) == MAX_RETAINED_GENERATIONS
+    assert "pre-crash generation 3" in _current_corpus(config)
+    assert "current survives pruning crash" not in _current_corpus(config)
+    assert any(name.startswith(".retired.") for name in os.listdir(config.search_index_dir / "staging"))
+    monkeypatch.setattr(bm25_module, "_publication_phase", lambda _phase: None)
+    config.observations_path.write_text("# Observations\n\n## 2026-01-01\n\ncleanup retired tombstone\n")
+    assert reindex(config) == 1
+    assert not any(name.startswith(".retired.") for name in os.listdir(config.search_index_dir / "staging"))
+
+
+def test_retention_skips_reader_pinned_generation_then_reclaims_it(tmp_path, monkeypatch):
+    """Invariant: pruning never removes a generation held by a live reader."""
+    config = _config(tmp_path)
+    for sequence in range(MAX_RETAINED_GENERATIONS):
+        config.observations_path.write_text(f"# Observations\n\n## 2026-01-01\n\npinned generation {sequence}\n")
+        assert reindex(config) == 1
+    pinned_generation = _pointer(config)["generation_id"]
+    pinned_path = config.search_index_dir / "generations" / pinned_generation
+    os.utime(pinned_path, ns=(1_000_000_000, 1_000_000_000))
+
+    reader_entered = threading.Event()
+    release_reader = threading.Event()
+    reader_result: list[str] = []
+    reader_errors: list[BaseException] = []
+    original_read_file = bm25_module._read_file
+    reader_thread: threading.Thread | None = None
+
+    def held_read(parent, name, **kwargs):
+        if threading.current_thread() is reader_thread and name == "index.json" and not reader_entered.is_set():
+            reader_entered.set()
+            assert release_reader.wait(3)
+        return original_read_file(parent, name, **kwargs)
+
+    monkeypatch.setattr(bm25_module, "_read_file", held_read)
+
+    def read_pinned() -> None:
+        try:
+            reader_result.append(get_backend("bm25", config).committed_generation_id)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            reader_errors.append(exc)
+
+    reader_thread = threading.Thread(target=read_pinned)
+    reader_thread.start()
+    assert reader_entered.wait(2)
+    try:
+        config.observations_path.write_text("# Observations\n\n## 2026-01-01\n\npublish while prior reader is pinned\n")
+        assert reindex(config) == 1
+        config.observations_path.write_text(
+            "# Observations\n\n## 2026-01-01\n\nsecond publish while reader stays pinned\n"
+        )
+        assert reindex(config) == 1
+        assert pinned_path.is_dir()
+        assert len(_generation_names(config)) == MAX_RETAINED_GENERATIONS
+    finally:
+        release_reader.set()
+        reader_thread.join(3)
+    assert not reader_thread.is_alive()
+    assert reader_errors == []
+    assert reader_result == [pinned_generation]
+
+    config.observations_path.write_text("# Observations\n\n## 2026-01-01\n\nreclaim released reader generation\n")
+    assert reindex(config) == 1
+    assert not pinned_path.exists()
+    assert len(_generation_names(config)) == MAX_RETAINED_GENERATIONS
+
+
+def test_reader_retries_new_pointer_when_old_generation_is_pruned(tmp_path, monkeypatch):
+    """Regression: pointer-to-open overlap resolves a complete new generation."""
+    config = _config(tmp_path)
+    for sequence in range(MAX_RETAINED_GENERATIONS):
+        config.observations_path.write_text(f"# Observations\n\n## 2026-01-01\n\nrace generation {sequence}\n")
+        assert reindex(config) == 1
+    old_generation = _pointer(config)["generation_id"]
+    old_path = config.search_index_dir / "generations" / old_generation
+    os.utime(old_path, ns=(1_000_000_000, 1_000_000_000))
+
+    reader_selected_pointer = threading.Event()
+    allow_reader_open = threading.Event()
+    reader_result: list[str] = []
+    reader_errors: list[BaseException] = []
+    original_read_generation = BM25GenerationStore._read_generation
+    reader_thread: threading.Thread | None = None
+
+    def delayed_read_generation(store, root, generation_id):
+        if threading.current_thread() is reader_thread and not reader_selected_pointer.is_set():
+            assert generation_id == old_generation
+            reader_selected_pointer.set()
+            assert allow_reader_open.wait(3)
+        return original_read_generation(store, root, generation_id)
+
+    monkeypatch.setattr(BM25GenerationStore, "_read_generation", delayed_read_generation)
+
+    def read_during_prune() -> None:
+        try:
+            reader_result.append(get_backend("bm25", config).committed_generation_id)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            reader_errors.append(exc)
+
+    reader_thread = threading.Thread(target=read_during_prune)
+    reader_thread.start()
+    assert reader_selected_pointer.wait(2)
+    config.observations_path.write_text("# Observations\n\n## 2026-01-01\n\nnew pointer after prune race\n")
+    assert reindex(config) == 1
+    config.observations_path.write_text("# Observations\n\n## 2026-01-01\n\nsecond pointer after prune race\n")
+    assert reindex(config) == 1
+    new_generation = _pointer(config)["generation_id"]
+    assert new_generation != old_generation
+    assert not old_path.exists()
+    allow_reader_open.set()
+    reader_thread.join(3)
+
+    assert not reader_thread.is_alive()
+    assert reader_errors == []
+    assert reader_result == [new_generation]

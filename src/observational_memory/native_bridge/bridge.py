@@ -196,6 +196,7 @@ class SecureBM25Backend:
         self.storage = storage
         self.transaction = transaction
         self.store = BM25GenerationStore(storage.path)
+        self._published = None
 
     def validate(self) -> None:
         # Import and instantiate with a harmless corpus. This proves the local
@@ -212,7 +213,7 @@ class SecureBM25Backend:
         snapshot: StableSnapshot,
     ) -> None:
         del snapshot
-        self.store.publish(
+        self._published = self.store.publish(
             self.transaction,
             batch,
             bridge_metadata={
@@ -255,7 +256,9 @@ class SecureBM25Backend:
         return value if isinstance(value, str) else None
 
     def verify_commit(self, batch: DocumentBatch) -> str:
-        current = self.store.read_current(self.transaction)
+        current = self._published
+        if current is None:
+            raise RuntimeError("BM25 bridge has no freshly verified publication")
         if current.generation_id != batch.generation_id:
             raise RuntimeError("BM25 fresh reader resolved a different generation")
         if current.manifest.get("content_digest") != batch.content_digest:

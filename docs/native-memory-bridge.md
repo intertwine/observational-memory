@@ -133,6 +133,10 @@ Every attempt has fixed limits for:
 
 These ceilings cannot be raised through normal bridge options or OM provider settings. If admission fails or a limit is reached, the bridge keeps the last verified index. A busy index also fails safely instead of starting a competing writer.
 
+The memory boundary uses one processless worker. The supervisor samples the live worker and kills a detected breach. The worker also reports the kernel's lifetime RSS high-water mark, so a fast run cannot finish between samples and be accepted over the limit. On macOS, `RLIMIT_RSS` is an allocation preference rather than an unconditional kill guarantee; OM records its readback and relies on the supervisor plus the kernel high-water check for the acceptance decision.
+
+The private BM25 store keeps the current generation and three rollback candidates. A generation held by an active reader is never removed. Reader pins can temporarily raise the count above four; the next successful publication reclaims released generations.
+
 ## Check Health
 
 Use these commands after install, upgrade, or troubleshooting:
