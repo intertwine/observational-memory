@@ -142,13 +142,13 @@ Every attempt has fixed limits for:
 | macOS memory pressure | `normal` only |
 | Swap use | At most 80% |
 | Total runtime | 15 seconds |
-| Process-tree memory | 128 MiB RSS |
+| Bridge worker process tree | 128 MiB RSS |
 | One input file | 2 MiB |
 | All selected input | 16 MiB |
 
 These ceilings cannot be raised through normal bridge options or OM provider settings. If admission fails or a limit is reached, the bridge keeps the last verified index. A busy index also fails safely instead of starting a competing writer.
 
-OM accepts a run only when its measured memory use and total elapsed time remain within these limits. A rejected run keeps the previous verified index. The private index normally keeps the current generation and three rollback candidates; an active search can delay cleanup until the next successful refresh.
+The 15-second deadline covers the complete attempt, including admission, the worker, probes, and receipt finalization. The 128 MiB ceiling applies to the spawned bridge worker process tree. OM also checks the worker's kernel RSS high-water mark so a fast run cannot finish between samples and evade the limit. A rejected run keeps the previous verified index. The private index normally keeps the current generation and three rollback candidates; an active search can delay cleanup until the next successful refresh.
 
 ## Check Health
 

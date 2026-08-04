@@ -48,7 +48,7 @@ See [Native Claude and Codex memory](native-memory-bridge.md#source-and-privacy-
 
 `om install --native-bridge` installs one OM-owned macOS service. It checks for changed source summaries every 15 minutes and publishes a new verified local index only after the run passes its safety checks.
 
-Each run requires normal macOS memory pressure and at most 80% swap use. It is limited to 15 seconds, 128 MiB process-tree RSS, 2 MiB per file, and 16 MiB total input. If admission fails or a limit is reached, the bridge keeps the last verified index. `om native-bridge status`, `om status`, and `om doctor` report configuration, service, and verified-index state.
+Each run requires normal macOS memory pressure and at most 80% swap use. The complete attempt is limited to 15 seconds, and the spawned bridge worker process tree is limited to 128 MiB RSS. Input is limited to 2 MiB per file and 16 MiB total. If admission fails or a limit is reached, the bridge keeps the last verified index. `om native-bridge status`, `om status`, and `om doctor` report configuration, service, and verified-index state.
 
 Enabling the bridge stops OM's older Claude and Codex background writers and removes OM-managed write hooks for Claude Code, Codex, and Cowork. Read-only startup context, unrelated hooks, and existing memory remain in place. If installation fails, OM restores the managed files and any service it can prove was previously enabled. A legacy service whose earlier state was unknown stays disabled for safety and is shown by `om doctor`; OM asks for manual recovery only if a restoration step itself fails.
 
