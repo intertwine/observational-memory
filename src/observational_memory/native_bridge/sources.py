@@ -68,6 +68,7 @@ def capture_codex(
 ) -> list[SourceArtifact]:
     artifacts: list[SourceArtifact] = []
     with SecureRoot(root_path, writable=False) as root:
+        root.inspect_safe_root_directory()
         for configured in sorted(set(allowlist)):
             relative = _validate_relative_file(configured)
             try:
@@ -75,6 +76,7 @@ def capture_codex(
             except FileNotFoundError:
                 continue
             artifacts.append(_artifact("codex", relative, content))
+        root.inspect_safe_root_directory()
     return artifacts
 
 
@@ -86,6 +88,7 @@ def capture_claude(
 ) -> list[SourceArtifact]:
     artifacts: list[SourceArtifact] = []
     with SecureRoot(projects_root, writable=False) as root:
+        root.inspect_safe_root_directory()
         for project in sorted(set(projects)):
             project_path = PurePosixPath(project)
             if (
@@ -95,6 +98,8 @@ def capture_claude(
             ):
                 raise SecureAccessError(f"Claude project opt-in must be one directory name: {project}")
             memory_relative = f"{project}/memory"
+            root.inspect_safe_directory(project)
+            root.inspect_safe_directory(memory_relative)
             for name in root.list_directory(memory_relative):
                 if name.lower() in _RAW_MEMORY_NAMES:
                     continue
@@ -106,6 +111,9 @@ def capture_claude(
                 except FileNotFoundError:
                     raise SecureAccessError(f"Claude input disappeared during snapshot: {relative}") from None
                 artifacts.append(_artifact("claude", relative, content))
+            root.inspect_safe_directory(memory_relative)
+            root.inspect_safe_directory(project)
+        root.inspect_safe_root_directory()
     return artifacts
 
 

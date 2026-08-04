@@ -827,6 +827,14 @@ class SecureRoot:
         """List names directly below this root without exposing its descriptor."""
         return sorted(os.listdir(self._fd))
 
+    def inspect_safe_root_directory(self) -> None:
+        """Require the opened input root to remain private from other writers."""
+        if self._fd is None:
+            raise SecureAccessError("secure root is closed")
+        info = os.fstat(self._fd)
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            raise SecureAccessError(f"input directory is group/world writable: {self.path}")
+
     def acquire_store_transaction(self):
         """Lock an independent open-file description for this secure root."""
         if not self.writable:

@@ -45,6 +45,17 @@ def test_codex_symlink_leaf_is_rejected(tmp_path):
         capture_codex(memories, ("MEMORY.md",), max_file_bytes=1024)
 
 
+def test_codex_capture_rejects_runtime_writable_source_root(tmp_path):
+    """Invariant: permission drift cannot widen the fixed Codex source root."""
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "MEMORY.md").write_text("approved")
+    memories.chmod(0o777)
+
+    with pytest.raises(SecureAccessError, match="group/world writable"):
+        capture_codex(memories, ("MEMORY.md",), max_file_bytes=1024)
+
+
 def test_claude_raw_memory_is_excluded_not_read(tmp_path):
     projects = tmp_path / "projects"
     memory = projects / "project-a" / "memory"
@@ -57,6 +68,20 @@ def test_claude_raw_memory_is_excluded_not_read(tmp_path):
     artifacts = capture_claude(projects, ("project-a",), max_file_bytes=1024)
 
     assert [artifact.relative_path for artifact in artifacts] == ["project-a/memory/MEMORY.md"]
+
+
+@pytest.mark.parametrize("writable_component", ["projects", "project", "memory"])
+def test_claude_capture_rejects_runtime_writable_source_directory(tmp_path, writable_component):
+    """Invariant: permission drift cannot widen any selected Claude directory."""
+    projects = tmp_path / "projects"
+    project = projects / "project-a"
+    memory = project / "memory"
+    memory.mkdir(parents=True)
+    (memory / "MEMORY.md").write_text("approved")
+    {"projects": projects, "project": project, "memory": memory}[writable_component].chmod(0o777)
+
+    with pytest.raises(SecureAccessError, match="group/world writable"):
+        capture_claude(projects, ("project-a",), max_file_bytes=1024)
 
 
 @pytest.mark.parametrize("project", ["project\nname", "project\tname", "project\x7fname"])
