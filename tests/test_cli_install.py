@@ -1146,13 +1146,28 @@ class TestGrokInstall:
     def test_install_all_includes_grok(self, tmp_path, monkeypatch):
         _set_base_env(monkeypatch, tmp_path)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        def fail_live_scheduler(*_args, **_kwargs):
+            raise AssertionError("scheduler setup must stay disabled in this filesystem-only install test")
+
+        monkeypatch.setattr("observational_memory.cli._install_launchd", fail_live_scheduler)
         grok_home = Path(os.environ["GROK_HOME"])
         hook_file = grok_home / "hooks" / "observational-memory.json"
         runner = CliRunner()
 
         result = runner.invoke(
             cli,
-            ["install", "--all", "--provider", "openai", "--llm-model", "gpt-4o-mini", "--non-interactive"],
+            [
+                "install",
+                "--all",
+                "--provider",
+                "openai",
+                "--llm-model",
+                "gpt-4o-mini",
+                "--scheduler",
+                "none",
+                "--non-interactive",
+            ],
         )
 
         assert result.exit_code == 0, result.output
