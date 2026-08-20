@@ -382,7 +382,7 @@ def test_anthropic_call_sends_cacheable_system(monkeypatch):
         def create(self, **kwargs):
             captured.update(kwargs)
             return SimpleNamespace(
-                content=[SimpleNamespace(text="ok")],
+                content=[SimpleNamespace(type="text", text="ok")],
                 usage=SimpleNamespace(input_tokens=3, output_tokens=2),
             )
 
