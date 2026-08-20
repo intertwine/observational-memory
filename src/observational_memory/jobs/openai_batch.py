@@ -368,13 +368,17 @@ def _find_response_line(raw_jsonl: str, custom_id: str) -> dict | None:
 
 
 def _extract_text(body: dict) -> str:
+    from ..llm import join_openai_content_text
+
     try:
         content = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise ValueError(f"unexpected batch response body shape: {exc}") from exc
-    if not isinstance(content, str) or not content.strip():
+    # `content` is usually a string, but can arrive as a list of content parts.
+    text = join_openai_content_text(content)
+    if not text.strip():
         raise ValueError("batch response had empty content")
-    return content
+    return text
 
 
 def _record_batch_usage(config: Config, record: JobRecord, body: dict) -> None:

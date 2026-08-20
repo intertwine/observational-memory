@@ -16,7 +16,7 @@ from observational_memory.jobs import (
     cancel_job,
     submit_reflect_batch,
 )
-from observational_memory.jobs.openai_batch import _sha256
+from observational_memory.jobs.openai_batch import _extract_text, _sha256
 from observational_memory.reflect import ChunkingRequired
 
 _REFLECTIONS = (
@@ -566,3 +566,25 @@ def test_cancel_leaves_job_pending_on_failure(cfg, monkeypatch):
     assert result.status == "submitted"  # still pending, retryable
     assert result.error and "cancel request failed" in result.error
     assert ProviderJobStore(cfg.openai_batch_jobs_dir).load(record.job_id).pending
+
+
+def test_batch_extract_text_joins_content_parts():
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "first half. "},
+                        {"type": "text", "text": "second half."},
+                    ]
+                }
+            }
+        ]
+    }
+    assert _extract_text(body) == "first half. second half."
+
+
+def test_batch_extract_text_rejects_a_body_without_text():
+    body = {"choices": [{"message": {"content": [{"type": "refusal", "refusal": "no"}]}}]}
+    with pytest.raises(ValueError, match="empty content"):
+        _extract_text(body)
