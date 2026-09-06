@@ -51,8 +51,13 @@ uv run pytest
 - Claude Code, Codex, and Grok have installer-managed hooks.
 - Cowork has a macOS local plugin.
 - Hermes is transcript ingestion only in this repo today.
+- Do not document Hermes as `om install` hook-installed. The Hermes plugin is installed and selected through Hermes itself.
+- The v0.10 native bridge is macOS-only and covers Claude Code and Codex native memory. Bridge activation removes OM-managed Claude/Codex/Cowork writer hooks while preserving read-only SessionStart context; Grok, Kimi, and OpenCode are outside that migration scope. OM v0.10 requires Hermes memory-provider plugin v1.5.1+ and Grok marketplace plugin v0.1.2+ on hosts that use those separately released plugins.
 - OM Cluster is opt-in and disabled unless initialized or joined.
 - Relay transport is supported, but relay access is not cluster trust.
+- Do not sync `~/.local/share/observational-memory/` directly; use a transport directory or relay endpoint.
+- Treat filesystem, relay, and P2P transports as untrusted.
+- `scope=local` reflection entries must not become shared cluster memory.
 - Hosted memory exports are review bundles; `om` does not silently write ChatGPT or Claude Managed Agents memory.
 - Usage tracking, cost, and budgets (`om usage`) are host-local in `usage.sqlite`; never synced via OM Cluster.
 - OpenAI Batch async reflection (`om reflect --async`, `om jobs`) is API-key `openai` only and never selected for the `openai-chatgpt` subscription provider.
