@@ -5836,14 +5836,24 @@ def _grok_hook_commands() -> tuple[str, str]:
 _CLAUDE_OM_EVENTS = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact")
 
 
-def _is_om_claude_hook(command: str) -> bool:
-    """Recognize installer-owned commands, not arbitrary mentions of OM."""
+def _split_hook_command(command: str) -> list[str]:
+    """Parse installer command quoting without erasing Windows separators."""
     import shlex
 
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    if sys.platform == "win32":
+        lexer.escape = ""
+    return list(lexer)
+
+
+def _is_om_claude_hook(command: str) -> bool:
+    """Recognize installer-owned commands, not arbitrary mentions of OM."""
     if not isinstance(command, str):
         return False
     try:
-        parts = shlex.split(command)
+        parts = _split_hook_command(command)
     except ValueError:
         return False
     if len(parts) == 2 and parts[1] in {"context", "claude-checkpoint"}:
@@ -6135,10 +6145,8 @@ def _command_invokes_om_codex_checkpoint(command: str) -> bool:
 
 def _hook_command_exists(command: str) -> bool:
     """Return True when the hook command's executable resolves locally."""
-    import shlex
-
     try:
-        parts = shlex.split(command)
+        parts = _split_hook_command(command)
     except ValueError:
         return False
 

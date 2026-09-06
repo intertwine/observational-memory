@@ -1,6 +1,8 @@
 """Legacy teardown must preserve other tools and leave recovery evidence."""
 
 import json
+import shutil
+import sys
 from types import SimpleNamespace
 
 import click
@@ -106,3 +108,40 @@ def test_symlinked_settings_not_modified(tmp_path):
     with pytest.raises(click.ClickException, match="symlinked"):
         _install_claude_hooks(SimpleNamespace(claude_settings_path=path))
     assert target.read_text() == "{}"
+
+
+@pytest.mark.parametrize("executable", [r"C:\Users\Alice\.local\bin\om.exe", r'"C:\Program Files\OM\om.exe"'])
+def test_windows_uninstall_preserves_separators_and_unrelated_hooks(tmp_path, monkeypatch, executable):
+    path = tmp_path / "settings.json"
+    unrelated = {"type": "command", "command": r"C:\Tools\other.exe context"}
+    events = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact")
+    original = {
+        "hooks": {
+            event: [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": executable + (" context" if index == 0 else " claude-checkpoint"),
+                        },
+                        unrelated,
+                    ]
+                }
+            ]
+            for index, event in enumerate(events)
+        }
+    }
+    path.write_text(json.dumps(original))
+    monkeypatch.setattr(sys, "platform", "win32")
+    _uninstall_claude_hooks(SimpleNamespace(claude_settings_path=path))
+    assert json.loads(path.read_text()) == {"hooks": {event: [{"hooks": [unrelated]}] for event in events}}
+    assert not _is_om_claude_hook(executable + " context && echo keep")
+
+
+def test_windows_diagnostic_preserves_executable_path(monkeypatch):
+    executable = r"C:\Users\Alice\.local\bin\om.exe"
+    seen = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(shutil, "which", lambda value: seen.append(value) or executable)
+    assert _hook_command_exists(executable + " context")
+    assert seen == [executable]
