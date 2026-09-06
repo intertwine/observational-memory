@@ -145,3 +145,14 @@ def test_windows_diagnostic_preserves_executable_path(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda value: seen.append(value) or executable)
     assert _hook_command_exists(executable + " context")
     assert seen == [executable]
+
+
+@pytest.mark.parametrize("operator", ["&", "&&", "|", "||", ";"])
+def test_windows_compound_hook_not_owned(monkeypatch, operator):
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert not _is_om_claude_hook(r"C:\Tools\other.exe" + operator + r"C:\OM\om.exe context")
+
+
+def test_windows_quoted_path_with_ampersand_is_owned(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert _is_om_claude_hook(r'"C:\Research & Development\om.exe" context')

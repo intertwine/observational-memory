@@ -5840,7 +5840,7 @@ def _split_hook_command(command: str) -> list[str]:
     """Parse installer command quoting without erasing Windows separators."""
     import shlex
 
-    lexer = shlex.shlex(command, posix=True)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
     if sys.platform == "win32":
