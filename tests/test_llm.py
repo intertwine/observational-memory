@@ -254,6 +254,11 @@ def test_anthropic_text_reads_already_flattened_string_content():
     assert _extract_anthropic_text(SimpleNamespace(content="ok", stop_reason="end_turn")) == "ok"
 
 
+def test_anthropic_flattened_string_still_rejects_truncation():
+    with pytest.raises(RuntimeError, match="truncated"):
+        _extract_anthropic_text(SimpleNamespace(content="partial", stop_reason="max_tokens"))
+
+
 def test_anthropic_text_without_content_blocks_raises():
     with pytest.raises(RuntimeError, match="no content blocks"):
         _extract_anthropic_text(SimpleNamespace(content=[]))

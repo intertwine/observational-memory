@@ -45,6 +45,40 @@ def _get_check(results, name):
     return None
 
 
+def test_doctor_om_hook_executable_with_arguments(monkeypatch, tmp_path):
+    _set_base_env(monkeypatch, tmp_path)
+    executable = tmp_path / "space path" / "om"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 99\n")
+    executable.chmod(0o700)
+    config = Config()
+    config.claude_settings_path.parent.mkdir(parents=True, exist_ok=True)
+    config.claude_settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": f"'{executable}' context"},
+                                {"type": "command", "command": "/unrelated/missing command"},
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    assert _get_check(json.loads(result.output), "Hook paths valid")["status"] == "PASS"
+    executable.unlink()
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+    check = _get_check(json.loads(result.output), "Hook paths valid")
+    assert check["status"] == "FAIL"
+    assert "uninstall --claude" in check["fix"]
+
+
 def test_doctor_provider_fail_closed_no_fallback(monkeypatch, tmp_path):
     _set_base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("OM_LLM_PROVIDER", "openai")

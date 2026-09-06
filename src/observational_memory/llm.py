@@ -777,12 +777,10 @@ def _extract_anthropic_text(message: object) -> str:
     content = getattr(message, "content", None)
     if not content:
         raise RuntimeError("Anthropic response contained no content blocks.")
-    if isinstance(content, str):  # already-flattened content from a proxy or shim
-        return content
     stop_reason = getattr(message, "stop_reason", None)
     parts: list[str] = []
     block_types: list[str] = []
-    for block in content:
+    for block in [{"type": "text", "text": content}] if isinstance(content, str) else _content_parts(content):
         block_type = _block_type(block)
         block_types.append(block_type)
         if block_type in _TEXT_BLOCK_TYPES:
