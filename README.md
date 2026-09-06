@@ -1,5 +1,11 @@
 # Observational Memory
 
+> **Unmaintained legacy software — September 5, 2026.** Final core release:
+> **0.10.1**. No feature, compatibility, or security updates are promised.
+> New users should prefer their agent's native memory. See the
+> [retirement and migration guide](docs/legacy-migration.md) to preserve your
+> archive and safely remove integrations. Existing licenses and releases remain.
+
 ![Observational Memory header showing local agent memory shared across Claude Code, Codex, Grok, Claude Cowork, and Hermes, with reviewed export to hosted agents.](assets/observational-memory-header.png)
 
 [![PyPI version](https://img.shields.io/pypi/v/observational-memory.svg)](https://pypi.org/project/observational-memory/)
@@ -9,13 +15,13 @@
 [![CI](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/intertwine/observational-memory/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/intertwine/observational-memory?style=social)](https://github.com/intertwine/observational-memory/stargazers)
 
-**Shared, local memory for AI coding agents — now with a native Claude Code and Codex bridge that needs no transcript capture or an LLM.**
+**Historical functionality: shared local memory and an opt-in native-memory bridge.**
 
 Observational Memory, or `om`, helps agents carry useful context from one session and tool to the next. In v0.10.0, its native-memory bridge reads the small memory summaries that Claude Code and Codex already maintain, indexes an approved set in a private local keyword-search index (BM25), and makes that shared context available through OM retrieval.
 
 The bridge is available on macOS in v0.10.0. It reads native memory sources without changing them. It does **not** ingest raw transcripts, call an LLM, run reflection, or silently upload memory.
 
-## Shortest Path: Native Claude and Codex Memory
+## Historical setup: native Claude and Codex bridge (unsupported)
 
 For a new Homebrew install, run `brew install intertwine/tap/observational-memory`. If OM is already installed, run `brew upgrade observational-memory`.
 
@@ -256,7 +262,9 @@ Out-of-tree integrations have first-class seams: mail providers and CLI add-ons 
 
 ## Version
 
-Current release: **v0.10.0** — [release notes](docs/RELEASE-0.10.0.md). This release adds the macOS native-memory bridge; the full transcript-based OM workflow remains available when you choose it. Maintainers: the release workflow lives in [docs/MAINTAINERS.md](docs/MAINTAINERS.md).
+Final legacy release: **v0.10.1** — [release notes](docs/RELEASE-0.10.1.md).
+See [migration guidance](docs/legacy-migration.md). Historical development instructions
+remain in [docs/MAINTAINERS.md](docs/MAINTAINERS.md) for forks.
 
 ## Contributing
 

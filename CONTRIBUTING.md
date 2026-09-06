@@ -1,6 +1,9 @@
 # Contributing to Observational Memory
 
-Thanks for your interest in improving Observational Memory (`om`).
+Observational Memory is unmaintained as of September 5, 2026. New issues and pull
+requests are not maintained; forks remain possible under the existing license.
+See [legacy status and migration](docs/legacy-migration.md). The instructions below
+are retained for historical reference and forks.
 
 ## Development setup
 
@@ -47,5 +50,6 @@ agree to them.
 
 ## Security
 
-Do not open public issues for security problems. Report them privately to
-<bryan@intertwinesys.com>.
+No monitored security-response channel or security fixes are promised for this
+legacy project. Avoid exposing private memory or credentials in public reports.
+Fork maintainers must establish their own security policy and contact.

@@ -1,5 +1,9 @@
 # Configuration
 
+> Unmaintained legacy software as of September 5, 2026. No updates or security
+> fixes are promised. These instructions are historical; see
+> [legacy status and migration](legacy-migration.md) before use.
+
 Most native-bridge users do not need to edit configuration. Use `om install --native-bridge` for provider-free native-summary search. Bare `om install` configures the separate transcript-based workflow. This page explains the settings behind both modes.
 
 ## Env File

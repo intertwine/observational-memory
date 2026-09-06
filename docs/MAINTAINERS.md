@@ -1,5 +1,9 @@
 # Maintainer Guide
 
+> Unmaintained legacy software as of September 5, 2026. No updates or security
+> fixes are promised. These instructions are historical; see
+> [legacy status and migration](legacy-migration.md) before use.
+
 This guide is for people changing, testing, and releasing Observational Memory. User install docs live in [install.md](install.md).
 
 ## Development Install

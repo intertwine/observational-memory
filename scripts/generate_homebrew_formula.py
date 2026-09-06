@@ -17,7 +17,7 @@ from urllib.parse import quote
 from urllib.request import urlopen
 
 # Homebrew requires `desc` < 80 chars, no leading article, no trailing period.
-HOMEBREW_DESC = "Local cross-agent memory and search for coding agents"
+HOMEBREW_DESC = "Unmaintained legacy cross-agent memory and search"
 
 
 @dataclass(frozen=True)
@@ -266,6 +266,7 @@ def render_formula(
         f'  url "{root.url}"',
         f'  sha256 "{root.sha256}"',
         f'  license "{license_name}"',
+        '  deprecate! date: "2026-09-05", because: :unmaintained',
         "",
         '  depends_on "jq"',
         f'  depends_on "{python_dep}"',

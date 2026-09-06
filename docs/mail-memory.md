@@ -1,5 +1,9 @@
 # OM Mail (experimental)
 
+> Unmaintained legacy software as of September 5, 2026. No updates or security
+> fixes are promised. These instructions are historical; see
+> [legacy status and migration](legacy-migration.md) before use.
+
 OM Mail gives your `om` node its own email inbox and treats memory artifacts as structured email messages. It is **experimental**: a prototype that proves the idea, not a finished feature.
 
 Why email? A dynamic inbox is durable, globally addressable, append-only, and comes with built-in identity (the address) and threading. That means two agents can exchange memory across machines, harnesses (Claude Code, Codex, Grok, Cowork, Hermes), models, orgs, and vendors with no shared infrastructure beyond a mailbox.
