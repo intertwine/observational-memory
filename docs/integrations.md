@@ -1,5 +1,9 @@
 # Platform Integrations
 
+> Unmaintained legacy software as of September 5, 2026. No updates or security
+> fixes are promised. These instructions are historical; see
+> [legacy status and migration](legacy-migration.md) before use.
+
 Observational Memory is user-level memory. It is shared across the agents you install it for, instead of being tied to one project checkout.
 
 Choose one operating mode for Claude Code and Codex. Use the native bridge to search their existing summaries without transcripts or an LLM. The `--claude` and `--codex` installs below enable the separate transcript-based workflow.

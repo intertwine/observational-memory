@@ -1,7 +1,7 @@
 {
   "name": "observational-memory",
-  "version": "0.10.0",
-  "description": "Cross-session observational memory — compresses conversation transcripts into shared observations and reflections that persist across Cowork sessions.",
+  "version": "0.10.1",
+  "description": "Unmaintained legacy memory plugin. Prefer native memory; see the repository migration guide.",
   "author": {
     "name": "Intertwine Systems"
   },

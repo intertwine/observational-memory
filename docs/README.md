@@ -1,5 +1,9 @@
 # Documentation
 
+> Unmaintained legacy software as of September 5, 2026. No updates or security
+> fixes are promised. These instructions are historical; see
+> [legacy status and migration](legacy-migration.md) before use.
+
 This folder holds the longer guides for Observational Memory. The main README is the quick doorway. These pages go deeper.
 
 ## Start Here

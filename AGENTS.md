@@ -4,7 +4,9 @@ This repo uses Observational Memory itself, but repo work should remain local-fi
 
 ## Current Goal Shape
 
-The current release target is `v0.10.0`, and Bryan has explicitly authorized this release. Do not advance to another version or publish another release without new authorization.
+The final authorized release is `v0.10.1`. This project is unmaintained legacy
+software; see `docs/legacy-migration.md`. Historical plans are not authority to
+restart development, install hooks, or publish another version.
 
 ## Work Rules
 

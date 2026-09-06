@@ -5574,12 +5574,17 @@ def doctor(ctx: click.Context, as_json: bool, validate_key: bool) -> None:
                         cmd = hook.get("command", "")
                         # Only validate commands that look like file paths (start with / or ~),
                         # skip inline shell commands
-                        if cmd and (cmd.startswith("/") or cmd.startswith("~")) and not Path(cmd).exists():
+                        if _is_om_claude_hook(cmd) and not _hook_command_exists(cmd):
                             broken.append(f"{event_name}: {cmd}")
             if not broken:
-                _check("Hook paths valid", "PASS", "all hook commands exist")
+                _check("Hook paths valid", "PASS", "OM hook executables resolve (unrelated shell hooks not checked)")
             else:
-                _check("Hook paths valid", "FAIL", f"broken: {', '.join(broken)}", fix="Run: om install --claude")
+                _check(
+                    "Hook paths valid",
+                    "FAIL",
+                    f"broken: {', '.join(broken)}",
+                    fix="Run om uninstall --claude to retire OM hooks, or repair an intentionally retained install",
+                )
         except Exception:
             pass  # Already reported above
 
@@ -5809,7 +5814,7 @@ def _claude_hook_commands() -> tuple[str, str]:
         return f"{quoted} context", f"{quoted} claude-checkpoint"
 
     hooks_dir = Path(__file__).parent / "hooks" / "claude"
-    return str(hooks_dir / "session-start.sh"), f"{quoted} claude-checkpoint"
+    return _quote_hook_executable(str(hooks_dir / "session-start.sh")), f"{quoted} claude-checkpoint"
 
 
 def _grok_hook_commands() -> tuple[str, str]:
@@ -5828,22 +5833,97 @@ def _grok_hook_commands() -> tuple[str, str]:
     return str(grok_hooks_dir / "session-start.sh"), f"{_find_om_path() or 'om'} grok-checkpoint"
 
 
-def _install_claude_hooks(config: Config) -> None:
-    """Add SessionStart and session checkpoint hooks to ~/.claude/settings.json."""
+_CLAUDE_OM_EVENTS = ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact")
+
+
+def _split_hook_command(command: str) -> list[str]:
+    """Parse installer command quoting without erasing Windows separators."""
+    import shlex
+
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    if sys.platform == "win32":
+        lexer.escape = ""
+    return list(lexer)
+
+
+def _is_om_claude_hook(command: str) -> bool:
+    """Recognize installer-owned commands, not arbitrary mentions of OM."""
+    if not isinstance(command, str):
+        return False
+    try:
+        parts = _split_hook_command(command)
+    except ValueError:
+        return False
+    if len(parts) == 2 and parts[1] in {"context", "claude-checkpoint"}:
+        if parts[0].replace("\\", "/").rsplit("/", 1)[-1] in {"om", "om.exe"}:
+            return True
+    if len(parts) == 2 and parts[0] in {"bash", "sh", "/bin/bash", "/bin/sh"}:
+        parts = parts[1:]
+    suffixes = tuple(f"/observational_memory/hooks/claude/{name}.sh" for name in ("session-start", "session-end"))
+    if len(parts) == 1:
+        return parts[0].replace("\\", "/").endswith(suffixes)
+    # Old POSIX installers emitted an unquoted absolute script path, including
+    # spaces. Never treat a shell pipeline or compound command as owned.
+    return command.startswith("/") and command.endswith(suffixes) and not any(c in command for c in ";|&$`\n<>()")
+
+
+def _read_claude_hook_settings(path: Path) -> dict:
+    """Fail closed before editing malformed or indirectly addressed settings."""
     import json
 
+    if path.is_symlink():
+        raise click.ClickException(f"Refusing to edit symlinked Claude settings: {path}")
+    try:
+        settings = json.loads(path.read_text()) if path.exists() else {}
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(f"Cannot read Claude settings: {exc}") from exc
+    if not isinstance(settings, dict) or not isinstance(settings.get("hooks", {}), dict):
+        raise click.ClickException("Claude settings and 'hooks' must be JSON objects; no changes made.")
+    for event in _CLAUDE_OM_EVENTS:
+        if not isinstance(settings.get("hooks", {}).get(event, []), list):
+            raise click.ClickException(f"Claude hook event {event} must be an array; no changes made.")
+    return settings
+
+
+def _write_claude_hook_settings(path: Path, settings: dict) -> None:
+    """Keep a private recovery copy and replace the settings atomically."""
+    import json
+    import tempfile
+
+    data = (json.dumps(settings, indent=2) + "\n").encode()
+    original = path.read_bytes() if path.exists() else None
+    if original == data:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if original is not None:
+        fd, backup = tempfile.mkstemp(prefix=path.name + ".om-backup-", dir=path.parent)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(original)
+        click.echo(f"Backed up Claude settings to {backup}")
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".om-tmp-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+        if path.exists():
+            os.chmod(temporary, path.stat().st_mode & 0o777)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _install_claude_hooks(config: Config) -> None:
+    """Add SessionStart and session checkpoint hooks to ~/.claude/settings.json."""
     session_start_command, checkpoint_command = _claude_hook_commands()
-
-    if not config.claude_settings_path.exists():
-        config.claude_settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings = {}
-    else:
-        settings = json.loads(config.claude_settings_path.read_text())
-
+    settings = _read_claude_hook_settings(config.claude_settings_path)
     hooks = settings.setdefault("hooks", {})
 
+    for event in _CLAUDE_OM_EVENTS:
+        hooks[event], _ = _without_hook_commands_from_groups(hooks.get(event, []), _is_om_claude_hook)
+
     # SessionStart hook
-    hooks["SessionStart"] = [
+    hooks["SessionStart"] += [
         {
             "hooks": [
                 {
@@ -5857,40 +5937,46 @@ def _install_claude_hooks(config: Config) -> None:
     ]
 
     # SessionEnd hook
-    hooks["SessionEnd"] = [
+    hooks["SessionEnd"] += [
         {"hooks": [{"type": "command", "command": checkpoint_command, "timeout": 60, "async": True}]}
     ]
 
     # UserPromptSubmit checkpoint hook
-    hooks["UserPromptSubmit"] = [
+    hooks["UserPromptSubmit"] += [
         {"hooks": [{"type": "command", "command": checkpoint_command, "timeout": 5, "async": True}]}
     ]
 
     # PreCompact checkpoint hook
-    hooks["PreCompact"] = [{"hooks": [{"type": "command", "command": checkpoint_command, "timeout": 5, "async": True}]}]
+    hooks["PreCompact"] += [
+        {"hooks": [{"type": "command", "command": checkpoint_command, "timeout": 5, "async": True}]}
+    ]
 
-    config.claude_settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    _write_claude_hook_settings(config.claude_settings_path, settings)
     click.echo("Installed Claude Code hooks (SessionStart, UserPromptSubmit, PreCompact, SessionEnd)")
 
 
 def _uninstall_claude_hooks(config: Config) -> None:
     """Remove observational memory hooks from Claude Code settings."""
-    import json
-
     if not config.claude_settings_path.exists():
         return
-
-    settings = json.loads(config.claude_settings_path.read_text())
+    settings = _read_claude_hook_settings(config.claude_settings_path)
     hooks = settings.get("hooks", {})
-    hooks.pop("SessionStart", None)
-    hooks.pop("SessionEnd", None)
-    hooks.pop("UserPromptSubmit", None)
-    hooks.pop("PreCompact", None)
+    changed = False
+    for event in _CLAUDE_OM_EVENTS:
+        filtered, event_changed = _without_hook_commands_from_groups(hooks.get(event, []), _is_om_claude_hook)
+        if event_changed:
+            changed = True
+            if filtered:
+                hooks[event] = filtered
+            else:
+                hooks.pop(event, None)
+    if not changed:
+        return
     if not hooks:
         settings.pop("hooks", None)
 
-    config.claude_settings_path.write_text(json.dumps(settings, indent=2) + "\n")
-    click.echo("Removed Claude Code hooks")
+    _write_claude_hook_settings(config.claude_settings_path, settings)
+    click.echo("Removed OM-owned Claude Code hooks; unrelated hooks retained")
 
 
 # --- Cowork plugin installation ---
@@ -6059,10 +6145,8 @@ def _command_invokes_om_codex_checkpoint(command: str) -> bool:
 
 def _hook_command_exists(command: str) -> bool:
     """Return True when the hook command's executable resolves locally."""
-    import shlex
-
     try:
-        parts = shlex.split(command)
+        parts = _split_hook_command(command)
     except ValueError:
         return False
 
@@ -6071,7 +6155,7 @@ def _hook_command_exists(command: str) -> bool:
 
     executable = os.path.expanduser(parts[0])
     if "/" in executable:
-        return Path(executable).exists()
+        return Path(executable).is_file() and (sys.platform == "win32" or os.access(executable, os.X_OK))
     return shutil.which(executable) is not None
 
 

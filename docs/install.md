@@ -1,5 +1,9 @@
 # Install And Setup
 
+> Unmaintained legacy software as of September 5, 2026. No updates or security
+> fixes are promised. These instructions are historical; see
+> [legacy status and migration](legacy-migration.md) before use.
+
 This guide is for people installing Observational Memory for day-to-day use. Maintainer and release commands live in [MAINTAINERS.md](MAINTAINERS.md).
 
 ## What You Need

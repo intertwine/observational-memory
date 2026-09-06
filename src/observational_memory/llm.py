@@ -476,13 +476,67 @@ def build_openai_chat_request(model: str, system_prompt: str, user_content: str,
     }
 
 
+# Assistant prose only ever lives in a `text` block/part. Everything else a
+# response can carry -- Anthropic `thinking` / `redacted_thinking` / tool blocks,
+# OpenAI-compatible `reasoning` parts -- is either not the answer or is model
+# private state, and several of those carry a `text` field of their own, so
+# selecting by type is what keeps them out of the memory document.
+_TEXT_BLOCK_TYPES = frozenset({"text"})
+
+
+def _block_type(block: object) -> str:
+    """Best-effort content-block type for SDK objects and plain dicts."""
+    if isinstance(block, dict):
+        value = block.get("type")
+    else:
+        value = getattr(block, "type", None)
+    return value if isinstance(value, str) and value else "unknown"
+
+
+def _block_text(block: object) -> str:
+    """Text carried by a content block/part, or "" when it carries none."""
+    if isinstance(block, dict):
+        value = block.get("text")
+    else:
+        value = getattr(block, "text", None)
+    return value if isinstance(value, str) else ""
+
+
+def _content_parts(content: object) -> list:
+    """Content parts as a list, whatever shape the caller handed us."""
+    return list(content) if isinstance(content, (list, tuple)) else []
+
+
+def join_openai_content_text(content: object) -> str:
+    """Join a string or OpenAI content-part list into one text string.
+
+    Newer SDK variants and OpenAI-compatible servers can return
+    ``message.content`` as a list of content parts rather than a bare string.
+    Keep the text of every text part, in order, instead of stringifying the
+    whole structure into the memory document.
+    """
+    if isinstance(content, str):
+        return content
+    return "".join(_block_text(part) for part in _content_parts(content) if _block_type(part) in _TEXT_BLOCK_TYPES)
+
+
 def _parse_openai_chat_text(response: object, source: str = "OpenAI") -> str:
     """Extract assistant text from an OpenAI chat.completions response object."""
-    content = response.choices[0].message.content
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise RuntimeError(f"{source} response contained no choices.")
+    content = choices[0].message.content
     if content is None:
         raise RuntimeError(f"{source} response contained empty content.")
+    if isinstance(content, str):
+        return content
     # OpenAI can return non-string content arrays in newer SDK response variants.
-    return content if isinstance(content, str) else str(content)
+    text = join_openai_content_text(content)
+    if not text.strip():
+        parts = _content_parts(content)
+        part_types = ", ".join(_block_type(part) for part in parts) if parts else type(content).__name__
+        raise RuntimeError(f"{source} response did not include text content. Content part types: {part_types}.")
+    return text
 
 
 def _call_openai_compatible(
@@ -712,13 +766,42 @@ def _anthropic_system_blocks(system_prompt: str) -> list[dict]:
 
 
 def _extract_anthropic_text(message: object) -> str:
+    """Join the text of every text block in an Anthropic response.
+
+    Anthropic responses interleave block types: a Claude 5 answer typically
+    starts with a ``thinking`` block, and citations can split the answer across
+    several ``text`` blocks. Scan every block, keep the ``text`` ones in order
+    (they are contiguous fragments of one message, so they concatenate without a
+    separator), and ignore every other block type.
+    """
     content = getattr(message, "content", None)
     if not content:
         raise RuntimeError("Anthropic response contained no content blocks.")
-    first = content[0]
-    text = getattr(first, "text", None)
-    if not text:
-        raise RuntimeError("Anthropic response did not include text content.")
+    stop_reason = getattr(message, "stop_reason", None)
+    parts: list[str] = []
+    block_types: list[str] = []
+    for block in [{"type": "text", "text": content}] if isinstance(content, str) else _content_parts(content):
+        block_type = _block_type(block)
+        block_types.append(block_type)
+        if block_type in _TEXT_BLOCK_TYPES:
+            parts.append(_block_text(block))
+    text = "".join(parts)
+    if not text.strip():
+        hint = ""
+        if stop_reason == "max_tokens":
+            hint = " max_tokens was spent before any text; thinking tokens come out of the same budget."
+        raise RuntimeError(
+            "Anthropic response did not include text content. "
+            f"Block types returned: {', '.join(block_types)} (stop_reason={stop_reason}).{hint}"
+        )
+    if stop_reason == "max_tokens":
+        # The text is real but cut off mid-answer. Refuse it rather than append a
+        # half-written document to the append-only observations/reflections file.
+        raise RuntimeError(
+            "Anthropic response was truncated (stop_reason=max_tokens): the text ends mid-answer, "
+            "so it was not used. Raise max_tokens for this operation -- on thinking models the "
+            "thinking tokens are drawn from the same budget as the answer."
+        )
     return text
 
 

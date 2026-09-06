@@ -1,7 +1,7 @@
 [project]
 name = "observational-memory"
-version = "0.10.0"
-description = "Cross-agent observational memory and local search for Claude Code, Codex CLI, OpenCode, Kimi Code CLI, Grok Build TUI, Cowork, and Hermes Agent"
+version = "0.10.1"
+description = "Unmaintained legacy cross-agent memory and local search; prefer native agent memory"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ keywords = [
     "llm", "agent-memory", "developer-tools", "local-search", "qmd", "rag",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 7 - Inactive",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
@@ -31,6 +31,7 @@ dependencies = [
     "anthropic>=0.40.0",
     "openai>=1.50.0",
     "click>=8.1.0",
+    "httpx>=0.27.0,<1",
     "cryptography>=42.0.0",
     "rank-bm25>=0.2.2",
 ]

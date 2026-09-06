@@ -1,5 +1,9 @@
 # Native Claude And Codex Memory
 
+> Unmaintained legacy software as of September 5, 2026. No updates or security
+> fixes are promised. These instructions are historical; see
+> [legacy status and migration](legacy-migration.md) before use.
+
 The native-memory bridge gives Claude Code and Codex one local place to search the memory summaries they already maintain. It is the shortest OM setup when you want useful cross-agent recall without a transcript pipeline.
 
 The bridge is available on macOS in v0.10.0. It reads approved native summaries, builds a private BM25 index, and refreshes it every 15 minutes. It does not read raw transcripts, call an LLM, run reflection, change native memory, or upload it.

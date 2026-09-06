@@ -1,5 +1,9 @@
 # Hermes Plugin
 
+> Unmaintained legacy software as of September 5, 2026. No updates or security
+> fixes are promised. These instructions are historical; see
+> [legacy status and migration](legacy-migration.md) before use.
+
 Observational Memory has a standalone Hermes memory-provider plugin:
 
 ```text

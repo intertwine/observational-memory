@@ -1,5 +1,9 @@
 # OM Cluster Sync
 
+> Unmaintained legacy software as of September 5, 2026. No updates or security
+> fixes are promised. These instructions are historical; see
+> [legacy status and migration](legacy-migration.md) before use.
+
 OM Cluster syncs memory across machines by moving encrypted, signed, append-only records. The readable Markdown files stay local materialized views.
 
 Cluster mode is opt-in. Nothing syncs until you run `om cluster init` or `om cluster join`.
