@@ -25,6 +25,6 @@ Existing installations are not automatically disabled by this patch release.
 
 The closeout uses mocked provider responses and isolated lifecycle fixtures, not
 a live paid-provider call or hosted memory import. The local full suite passed
-on Python 3.12.13 with Anthropic 1.4.0, OpenAI 3.8.0 and HTTPX 0.28.1.
+on Python 3.12.13 with Anthropic 1.2.0, OpenAI 3.6.0 and HTTPX 0.28.1.
 See the release's CI and closeout receipt for final artifact checks. No future
 host/runtime compatibility is implied by those results.
